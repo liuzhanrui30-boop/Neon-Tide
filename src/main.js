@@ -133,6 +133,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "hi
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.domElement.tabIndex = -1;
 renderer.domElement.setAttribute("aria-label", "Neon Tide 游戏画布");
 dom.root.appendChild(renderer.domElement);
 
@@ -1362,6 +1363,11 @@ function closeDialogs({ restoreFocus = true } = {}) {
   });
 }
 
+function focusGameplaySurface() {
+  if (state.mode !== "playing" || activeDialog) return;
+  renderer.domElement.focus({ preventScroll: true });
+}
+
 function setBackgroundInert(inert) {
   [dom.root, dom.hud, dom.missionPanel, dom.bossPanel, dom.touchControls].forEach((element) => {
     if (element) element.inert = inert;
@@ -1392,6 +1398,7 @@ function renderMode(mode, previousMode, payload = {}) {
   dom.pauseButton.style.visibility = ["menu", "gameover", "victory"].includes(mode) ? "hidden" : "visible";
   if (mode === "playing") {
     closeDialogs({ restoreFocus: previousMode !== "menu" || payload.newRun });
+    window.requestAnimationFrame(focusGameplaySurface);
     return;
   }
   if (mode === "upgrade") {

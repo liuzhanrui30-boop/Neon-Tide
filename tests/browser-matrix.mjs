@@ -366,6 +366,8 @@ class GamePage {
     await this.click('#primary-button');
     await this.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     await sleep(60);
+    assert.equal(await this.evaluate(`document.activeElement?.tagName`), 'CANVAS', `${this.name}: gameplay focus did not move to the canvas`);
+    assert.equal(await this.evaluate(`document.activeElement?.matches('button')`), false, `${this.name}: gameplay focus remains on a button`);
   }
 
   async assertClean() {
@@ -411,6 +413,22 @@ async function desktopCoreScenario() {
     assert.equal(load.label, '首领接入');
 
     await page.startGame();
+    page.requireDev('initial keyboard dash focus probe');
+    await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.enemySpawnTimer=999;
+      $state.dashCharges=[1,1];
+      $state.dashSequence=0;
+      $state.dashTimer=0;
+      input.dashBuffer=0;
+      $player.velocity.set(0,0);
+      return true;
+    `);
+    await page.pressKey(' ', 'Space');
+    await sleep(80);
+    const initialSpace = await page.gameEvaluate('return {mode:$state.mode,sequence:$state.dashSequence}');
+    assert.deepEqual(initialSpace, { mode: 'playing', sequence: 1 }, 'Space after starting did not produce exactly one gameplay dash');
+
     const before = await page.gameEvaluate('return $state.elapsed');
     await page.gameEvaluate('return $state.elapsed', { stallMs: WALL_STALL_MS });
     await sleep(90);
@@ -461,8 +479,8 @@ async function desktopCoreScenario() {
     await page.pressKey('p', 'KeyP');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     await sleep(80);
-    assert.equal(await page.evaluate('document.activeElement?.id'), 'pause-button');
-    await page.evaluate(`document.body.tabIndex=-1;document.body.focus()`);
+    assert.equal(await page.evaluate('document.activeElement?.tagName'), 'CANVAS');
+    assert.equal(await page.evaluate(`document.activeElement?.matches('button')`), false);
     page.requireDev('dash repeat probe');
     await page.gameEvaluate(`
       clearWorldEntities();
@@ -513,7 +531,7 @@ async function desktopCoreScenario() {
     assert.equal(await page.gameEvaluate('return $state.ownedUpgrades.length'), ownedBeforeRepeat);
     await page.pressKey('1', 'Digit1');
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
-    await page.waitForPage(`document.activeElement?.id === 'pause-button'`);
+    await page.waitForPage(`document.activeElement?.tagName === 'CANVAS'`);
   });
 }
 
