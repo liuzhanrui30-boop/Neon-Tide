@@ -2,6 +2,7 @@ import * as THREE from "three";
 import "./style.css";
 import NeonAudio from "./game/audio.js";
 import {
+  ENEMY_TYPES,
   GAME,
   STAGES,
   computeRank,
@@ -24,6 +25,9 @@ const DASH_SPEED = 16.2;
 const DASH_ACTIVE_WINDOW = 0.19;
 const DASH_BUFFER_WINDOW = 0.16;
 const DASH_RECOVERY_TIME = 1.45;
+const MAX_MINES = 4;
+const BOSS_DASH_DAMAGE = 5;
+const BOSS_TELEGRAPH_TIME = 0.68;
 const STAGE_LABELS = ["第一幕 · 深潮接入", "第二幕 · 信号涌升", "第三幕 · 交叉流", "终幕 · 事件视界"];
 const MODES = new Set(["menu", "playing", "upgrade", "paused", "gameover", "victory"]);
 const ALLOWED_TRANSITIONS = Object.freeze({
@@ -135,6 +139,7 @@ const state = {
   shardSpawnTimer: 1.8,
   dashCharges: [1, 1],
   dashTimer: 0,
+  dashSequence: 0,
   hurtInvuln: 0,
   get playerAttacking() {
     return this.dashTimer > 0;
@@ -147,6 +152,9 @@ const state = {
   shakeStrength: 0,
   toastTimer: 0,
   stageBannerTimer: 0,
+  upgradeTriggered: [false, false],
+  bossTriggered: false,
+  bossSpawned: false,
   muted: false,
   ownedUpgrades: [],
   upgradeOptions: [],
@@ -218,6 +226,70 @@ const shared = {
   }),
   particleGeometry: new THREE.CircleGeometry(0.055, 7),
   rippleGeometry: new THREE.RingGeometry(0.42, 0.46, 28),
+  strikerGeometry: null,
+  mineGeometry: new THREE.CircleGeometry(0.48, 6),
+  bossCoreGeometry: new THREE.CircleGeometry(0.82, 28),
+  mineRingGeometry: new THREE.RingGeometry(0.86, 0.94, 40),
+  eliteOuterGeometry: new THREE.RingGeometry(0.76, 0.83, 32),
+  eliteShieldGeometry: new THREE.RingGeometry(0.94, 1.0, 36),
+  bossOuterGeometry: new THREE.RingGeometry(2.28, 2.42, 64),
+  bossMiddleGeometry: new THREE.RingGeometry(1.62, 1.76, 56),
+  bossInnerGeometry: new THREE.RingGeometry(1.12, 1.24, 48),
+  bossPulseGeometry: new THREE.RingGeometry(0.94, 1.02, 52),
+  telegraphLineGeometry: new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 18, 0),
+  ]),
+  chaserMaterial: new THREE.MeshBasicMaterial({ color: 0xff506f }),
+  strikerMaterial: new THREE.MeshBasicMaterial({ color: 0xff4fd8 }),
+  mineMaterial: new THREE.MeshBasicMaterial({ color: 0xff9f43 }),
+  eliteMaterial: new THREE.MeshBasicMaterial({ color: 0xffedf4 }),
+  bossMaterial: new THREE.MeshBasicMaterial({ color: 0xe7ffff }),
+  coreMaterial: new THREE.MeshBasicMaterial({ color: 0xff506f }),
+  warningRingMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff7ae6,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  chaserGlowMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff2a79,
+    transparent: true,
+    opacity: 0.14,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  strikerGlowMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff4fd8,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  mineGlowMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff9f43,
+    transparent: true,
+    opacity: 0.17,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  telegraphMaterial: new THREE.LineBasicMaterial({
+    color: 0xff7ae6,
+    transparent: true,
+    opacity: 0.72,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  dangerRingMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff9f43,
+    transparent: true,
+    opacity: 0.72,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
 };
 
 function createTriangleGeometry(nose, tailWidth, tailY) {
@@ -233,6 +305,7 @@ function createTriangleGeometry(nose, tailWidth, tailY) {
 }
 
 shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
+shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
 
 function createBackground() {
   const backdrop = new THREE.Mesh(
@@ -448,8 +521,7 @@ function spawnShard(position) {
   return shard;
 }
 
-function spawnEnemy() {
-  const margin = 0.5;
+function randomEdgePosition(margin = 0.8) {
   const xBound = view.halfWidth + margin;
   const yBound = view.halfHeight + margin;
   const edge = Math.floor(Math.random() * 4);
@@ -460,28 +532,149 @@ function spawnEnemy() {
   if (edge === 2) { x = (Math.random() - 0.5) * xBound * 2; y = -yBound; }
   if (edge === 3) { x = (Math.random() - 0.5) * xBound * 2; y = yBound; }
 
-  const group = new THREE.Group();
-  group.position.set(x, y, 2);
-  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.enemyGlowMaterial);
-  const body = new THREE.Mesh(shared.enemyGeometry, shared.enemyMaterial);
-  const eye = new THREE.Mesh(
-    new THREE.CircleGeometry(0.08, 10),
-    new THREE.MeshBasicMaterial({ color: 0xffd9e5 })
-  );
-  eye.position.set(0, 0.09, 0.06);
-  group.add(glow, body, eye);
-  world.add(group);
+  return new THREE.Vector2(x, y);
+}
 
+function registerEnemy(type, position, group, initialState, overrides = {}) {
+  if (enemies.length >= GAME.maxEnemies) return null;
+  const config = ENEMY_TYPES[type];
+  group.position.set(position.x, position.y, 2);
+  world.add(group);
   const enemy = {
+    type,
     group,
     velocity: new THREE.Vector2(),
-    speed: 0.92 + state.elapsed * 0.024 + Math.random() * 0.42,
-    radius: 0.34,
+    speed: 0,
+    radius: config.radius,
+    hp: config.hp,
+    maxHp: config.hp,
+    state: initialState,
+    stateTimer: 0,
+    telegraph: 0,
     wobble: Math.random() * TAU,
     nearMissed: false,
+    dead: false,
+    priority: 1,
+    ...overrides,
   };
   enemies.push(enemy);
   return enemy;
+}
+
+function createChaser(position = randomEdgePosition()) {
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.chaserGlowMaterial);
+  glow.scale.setScalar(1.45);
+  const body = new THREE.Mesh(shared.enemyGeometry, shared.chaserMaterial);
+  const eye = new THREE.Mesh(shared.bossCoreGeometry, shared.bossMaterial);
+  eye.scale.setScalar(0.095);
+  eye.position.set(0, 0.1, 0.06);
+  group.add(glow, body, eye);
+  return registerEnemy("chaser", position, group, "chase", {
+    speed: 1.05 + state.elapsed * 0.012 + Math.random() * 0.35,
+    visuals: { glow, body },
+  });
+}
+
+function createStriker(position = randomEdgePosition()) {
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.strikerGlowMaterial);
+  glow.scale.set(1.25, 1.8, 1);
+  const body = new THREE.Mesh(shared.strikerGeometry, shared.strikerMaterial);
+  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+  line.position.z = -0.08;
+  line.visible = false;
+  group.add(line, glow, body);
+  return registerEnemy("striker", position, group, "track", {
+    speed: 1.25,
+    stateTimer: 0.8 + Math.random() * 0.7,
+    dashDirection: new THREE.Vector2(),
+    visuals: { glow, body, line },
+    priority: 2,
+  });
+}
+
+function createMine(position = randomShardPosition()) {
+  if (enemies.filter((enemy) => enemy.type === "mine" && !enemy.dead).length >= MAX_MINES) return null;
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
+  glow.scale.setScalar(1.65);
+  const body = new THREE.Mesh(shared.mineGeometry, shared.mineMaterial);
+  const ring = new THREE.Mesh(shared.mineRingGeometry, shared.dangerRingMaterial);
+  ring.position.z = -0.05;
+  group.add(glow, ring, body);
+  return registerEnemy("mine", position, group, "arming", {
+    stateTimer: 1.35,
+    telegraph: 1.35,
+    dangerRadius: 0,
+    previousDangerRadius: 0,
+    pulseHit: false,
+    visuals: { glow, body, ring },
+    priority: 2,
+  });
+}
+
+function createElite(position = randomEdgePosition(1.1)) {
+  const group = new THREE.Group();
+  const outer = new THREE.Mesh(shared.eliteOuterGeometry, shared.bossMaterial);
+  const shield = new THREE.Mesh(shared.eliteShieldGeometry, shared.warningRingMaterial);
+  const body = new THREE.Mesh(shared.enemyGeometry, shared.eliteMaterial);
+  body.scale.setScalar(1.75);
+  group.add(shield, outer, body);
+  return registerEnemy("elite", position, group, "chase", {
+    speed: 0.82 + Math.random() * 0.2,
+    visuals: { shield, outer, body },
+    priority: 3,
+  });
+}
+
+function createBoss() {
+  if (state.bossSpawned || enemies.some((enemy) => enemy.type === "boss" && !enemy.dead)) return null;
+  const group = new THREE.Group();
+  const outerRing = new THREE.Mesh(shared.bossOuterGeometry, shared.bossMaterial);
+  const middleRing = new THREE.Mesh(shared.bossMiddleGeometry, shared.warningRingMaterial);
+  const innerRing = new THREE.Mesh(shared.bossInnerGeometry, shared.dangerRingMaterial);
+  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial);
+  core.scale.set(1.15, 0.72, 1);
+  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+  line.visible = false;
+  const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, shared.dangerRingMaterial);
+  pulseRing.visible = false;
+  group.add(line, pulseRing, outerRing, middleRing, innerRing, core);
+  const enemy = registerEnemy("boss", new THREE.Vector2(0, view.halfHeight + 4.8), group, "enter", {
+    stateTimer: 1.5,
+    telegraph: 0,
+    attackIndex: 0,
+    attackKind: "charge",
+    dashDirection: new THREE.Vector2(),
+    dangerRadius: 0,
+    previousDangerRadius: 0,
+    pulseHit: false,
+    priority: 4,
+    visuals: { outerRing, middleRing, innerRing, core, line, pulseRing },
+  });
+  if (enemy) state.bossSpawned = true;
+  return enemy;
+}
+
+function spawnEnemy(type = null, position = null) {
+  if (enemies.length >= GAME.maxEnemies) return null;
+  let chosenType = type;
+  if (!chosenType) {
+    const roll = Math.random();
+    if (state.stageIndex === 0) chosenType = "chaser";
+    else if (state.stageIndex === 1) chosenType = roll < 0.34 ? "striker" : "chaser";
+    else if (roll < 0.42) chosenType = "chaser";
+    else if (roll < 0.7) chosenType = "striker";
+    else if (roll < 0.9) chosenType = "mine";
+    else chosenType = "elite";
+  }
+  const spawnPosition = position ?? (chosenType === "mine" ? randomShardPosition() : randomEdgePosition());
+  if (chosenType === "striker") return createStriker(spawnPosition);
+  if (chosenType === "mine") return createMine(spawnPosition);
+  if (chosenType === "elite") return createElite(spawnPosition);
+  if (chosenType === "boss") return createBoss();
+  return createChaser(spawnPosition);
 }
 
 function removeShard(index) {
@@ -545,11 +738,15 @@ function resetState() {
   state.shardSpawnTimer = 1.8;
   state.dashCharges = [1, 1];
   state.dashTimer = 0;
+  state.dashSequence = 0;
   state.hurtInvuln = 0;
   state.runFinished = false;
   state.shakeTime = 0;
   state.shakeStrength = 0;
   state.stageBannerTimer = 0;
+  state.upgradeTriggered = [false, false];
+  state.bossTriggered = false;
+  state.bossSpawned = false;
   state.ownedUpgrades = [];
   state.upgradeOptions = [];
   state.modifiers.speed = 1;
@@ -854,6 +1051,7 @@ function attemptDash(direction) {
   const dashDirection = direction.lengthSq() > 0.01 ? direction.clone().normalize() : player.facing.clone().normalize();
   state.dashCharges[chargeIndex] = 0;
   state.dashTimer = DASH_ACTIVE_WINDOW;
+  state.dashSequence += 1;
   player.facing.copy(dashDirection);
   player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * state.modifiers.speed);
   if (state.reducedMotion) player.group.scale.set(1, 1, 1);
@@ -914,41 +1112,257 @@ function collectShard(index) {
   }
 }
 
-function updateEnemies(dt) {
-  for (let index = enemies.length - 1; index >= 0; index -= 1) {
-    const enemy = enemies[index];
-    const toPlayer = new THREE.Vector2(player.position.x - enemy.group.position.x, player.position.y - enemy.group.position.y);
-    const distance = Math.max(toPlayer.length(), 0.001);
-    toPlayer.multiplyScalar(1 / distance);
-    const steering = toPlayer.clone().multiplyScalar(enemy.speed);
-    const wobble = new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(Math.sin(state.elapsed * 2.2 + enemy.wobble) * 0.22);
-    steering.add(wobble);
-    enemy.velocity.lerp(steering, 1 - Math.exp(-2.8 * dt));
-    enemy.group.position.x += enemy.velocity.x * dt;
-    enemy.group.position.y += enemy.velocity.y * dt;
-    enemy.group.rotation.z = Math.atan2(enemy.velocity.y, enemy.velocity.x) - Math.PI / 2;
-    enemy.group.children[0].scale.setScalar(1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08);
+function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
+  enemy.state = nextState;
+  enemy.stateTimer = duration;
+  enemy.telegraph = telegraph;
+}
 
-    const collisionDistance = player.radius + enemy.radius;
-    if (distance < collisionDistance) {
-      if (state.playerAttacking) breakEnemy(index);
-      else if (state.hurtInvuln <= 0) damagePlayer(enemy);
-      else enemy.velocity.addScaledVector(toPlayer, -2.1);
-    } else if (!enemy.nearMissed && distance < collisionDistance + 0.6 && enemy.velocity.dot(toPlayer) < 0) {
-      enemy.nearMissed = true;
-      const reward = computeReward("nearMiss", state.combo, state.modifiers.score);
-      state.score += reward.score;
-      state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
-      state.stats.nearMisses += 1;
-      audio.event("nearMiss");
+function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wobbleStrength = 0.2) {
+  const steering = toPlayer.clone().multiplyScalar(speed);
+  if (wobbleStrength > 0) {
+    steering.add(new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(
+      Math.sin(state.elapsed * 2.2 + enemy.wobble) * wobbleStrength
+    ));
+  }
+  enemy.velocity.lerp(steering, 1 - Math.exp(-response * dt));
+}
+
+function updateChaser(enemy, dt, toPlayer) {
+  steerEnemy(enemy, toPlayer, dt);
+  const pulse = 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
+  enemy.visuals.glow.scale.setScalar(1.45 * pulse);
+}
+
+function updateStriker(enemy, dt, toPlayer) {
+  enemy.stateTimer -= dt;
+  if (enemy.state === "track") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.4, 0.12);
+    if (enemy.stateTimer <= 0) {
+      enemy.dashDirection.copy(toPlayer);
+      enemy.visuals.line.visible = true;
+      setEnemyState(enemy, "telegraph", 0.62, 0.62);
     }
+  } else if (enemy.state === "telegraph") {
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    enemy.velocity.multiplyScalar(Math.exp(-8 * dt));
+    enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+    enemy.visuals.body.scale.setScalar(1 + Math.sin(state.elapsed * 32) * 0.12);
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.line.visible = false;
+      enemy.visuals.body.scale.setScalar(1);
+      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(12.5);
+      setEnemyState(enemy, "dash", 0.42);
+    }
+  } else if (enemy.state === "dash") {
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "recover", 0.72);
+  } else if (enemy.state === "recover") {
+    enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "track", 0.9 + Math.random() * 0.65);
   }
 }
 
-function breakEnemy(index) {
-  const enemy = enemies[index];
+function updateMine(enemy, dt) {
+  enemy.stateTimer -= dt;
+  enemy.group.rotation.z += dt * (enemy.state === "arming" ? 0.8 : 2.5);
+  if (enemy.state === "arming") {
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    const pulse = 0.9 + (1 - enemy.telegraph / 1.35) * 0.35 + Math.sin(state.elapsed * 22) * 0.05;
+    enemy.visuals.ring.scale.setScalar(pulse);
+    if (enemy.stateTimer <= 0) {
+      enemy.previousDangerRadius = 0;
+      enemy.dangerRadius = 0;
+      setEnemyState(enemy, "detonate", 0.78);
+    }
+  } else if (enemy.state === "detonate") {
+    const progress = 1 - Math.max(0, enemy.stateTimer / 0.78);
+    enemy.previousDangerRadius = enemy.dangerRadius;
+    enemy.dangerRadius = THREE.MathUtils.lerp(0.55, 4.8, progress);
+    enemy.visuals.ring.scale.setScalar(enemy.dangerRadius / 0.9);
+    enemy.visuals.glow.scale.setScalar(1.4 + progress * 1.2);
+    if (enemy.stateTimer <= 0) enemy.dead = true;
+  }
+}
+
+function updateElite(enemy, dt, toPlayer) {
+  steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.15, 0.08);
+  enemy.visuals.shield.rotation.z += dt * 1.4;
+  enemy.visuals.outer.rotation.z -= dt * 0.9;
+  const shieldScale = 1 + Math.sin(state.elapsed * 5 + enemy.wobble) * 0.07;
+  enemy.visuals.shield.scale.setScalar(shieldScale);
+}
+
+function beginBossTelegraph(enemy) {
+  enemy.attackKind = ["charge", "pulse", "summon"][enemy.attackIndex % 3];
+  enemy.attackIndex += 1;
+  enemy.pulseHit = false;
+  enemy.previousDangerRadius = 0;
+  enemy.dangerRadius = 0;
+  enemy.visuals.line.visible = enemy.attackKind === "charge";
+  enemy.visuals.pulseRing.visible = enemy.attackKind !== "charge";
+  if (enemy.attackKind === "charge") enemy.dashDirection.copy(player.position).sub(enemy.group.position).normalize();
+  setEnemyState(enemy, "telegraph", BOSS_TELEGRAPH_TIME, BOSS_TELEGRAPH_TIME);
+}
+
+function beginBossExecute(enemy) {
+  enemy.visuals.line.visible = false;
+  if (enemy.attackKind === "charge") {
+    enemy.velocity.copy(enemy.dashDirection).multiplyScalar(9.5);
+    setEnemyState(enemy, "execute", 0.72);
+  } else if (enemy.attackKind === "pulse") {
+    enemy.dangerRadius = 0.9;
+    setEnemyState(enemy, "execute", 1.05);
+  } else {
+    const availableSlots = Math.max(0, Math.min(2, GAME.maxEnemies - enemies.length));
+    for (let i = 0; i < availableSlots; i += 1) {
+      const angle = (i / Math.max(1, availableSlots)) * TAU + enemy.wobble;
+      createChaser(new THREE.Vector2(
+        enemy.group.position.x + Math.cos(angle) * 2.8,
+        enemy.group.position.y + Math.sin(angle) * 2.2
+      ));
+    }
+    setEnemyState(enemy, "execute", 0.56);
+  }
+}
+
+function updateBoss(enemy, dt) {
+  enemy.stateTimer -= dt;
+  enemy.visuals.outerRing.rotation.z += dt * 0.32;
+  enemy.visuals.middleRing.rotation.z -= dt * 0.58;
+  enemy.visuals.innerRing.rotation.z += dt * 0.9;
+  if (enemy.state === "enter") {
+    enemy.group.position.y = THREE.MathUtils.damp(enemy.group.position.y, 3.2, 3.2, dt);
+    if (enemy.stateTimer <= 0 || Math.abs(enemy.group.position.y - 3.2) < 0.12) setEnemyState(enemy, "choose", 0.35);
+    return;
+  }
+  if (enemy.state === "choose") {
+    enemy.velocity.multiplyScalar(Math.exp(-5 * dt));
+    if (enemy.stateTimer <= 0) beginBossTelegraph(enemy);
+  } else if (enemy.state === "telegraph") {
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    enemy.velocity.multiplyScalar(Math.exp(-7 * dt));
+    if (enemy.attackKind === "charge") {
+      enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+    } else {
+      const warningScale = 1 + (1 - enemy.telegraph / BOSS_TELEGRAPH_TIME) * 2.1;
+      enemy.visuals.pulseRing.scale.setScalar(warningScale);
+    }
+    if (enemy.stateTimer <= 0) beginBossExecute(enemy);
+  } else if (enemy.state === "execute") {
+    if (enemy.attackKind === "pulse") {
+      const progress = 1 - Math.max(0, enemy.stateTimer / 1.05);
+      enemy.previousDangerRadius = enemy.dangerRadius;
+      enemy.dangerRadius = THREE.MathUtils.lerp(0.9, Math.max(view.halfWidth, view.halfHeight) + 2, progress);
+      enemy.visuals.pulseRing.scale.setScalar(enemy.dangerRadius);
+    } else if (enemy.attackKind !== "charge") {
+      enemy.visuals.pulseRing.scale.setScalar(1 + Math.sin(state.elapsed * 18) * 0.18);
+    }
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.pulseRing.visible = false;
+      setEnemyState(enemy, "recover", 0.82);
+    }
+  } else if (enemy.state === "recover") {
+    enemy.velocity.multiplyScalar(Math.exp(-4.5 * dt));
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "choose", 0.28);
+  }
+}
+
+function waveReachedPlayer(enemy, distance) {
+  if (enemy.pulseHit || enemy.dangerRadius <= 0) return false;
+  const band = player.radius + 0.34;
+  return distance + band >= enemy.previousDangerRadius && distance - band <= enemy.dangerRadius;
+}
+
+function registerNearMiss(enemy, distance, toPlayer) {
+  if (enemy.nearMissed || enemy.type === "mine" || enemy.type === "boss") return;
+  const collisionDistance = player.radius + enemy.radius;
+  if (distance >= collisionDistance + 0.62 || enemy.velocity.dot(toPlayer) <= 0) return;
+  enemy.nearMissed = true;
+  const reward = computeReward("nearMiss", state.combo, state.modifiers.score);
+  state.score += reward.score;
+  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
+  state.stats.nearMisses += 1;
+  audio.event("nearMiss");
+}
+
+function dashHitsEnemy(enemy, distance) {
+  if (!state.playerAttacking || enemy.lastDashId === state.dashSequence) return false;
+  const targetRadius = enemy.type === "boss" ? 0.95 : enemy.radius;
+  return distance < player.radius + targetRadius;
+}
+
+function damageEnemy(enemy, index) {
+  enemy.lastDashId = state.dashSequence;
+  enemy.hp -= enemy.type === "boss" ? BOSS_DASH_DAMAGE : 1;
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
-  removeEnemy(index);
+  if (enemy.hp <= 0) {
+    enemy.dead = true;
+    breakEnemy(index, enemy);
+    return;
+  }
+  const away = position.clone().sub(player.position).normalize();
+  enemy.velocity.addScaledVector(away, enemy.type === "elite" ? 2.4 : 1.2);
+  spawnParticleBurst(position, enemy.type === "boss" ? 0xe7ffff : 0xff506f, 12, 3.2, 0.9);
+  spawnRipple(position, enemy.type === "boss" ? 0x64f5ff : 0xff506f, enemy.type === "boss" ? 1.8 : 1.1);
+  audio.event(enemy.type === "boss" ? "bossHit" : "break", 0.65);
+}
+
+function updateEnemies(dt) {
+  const initialCount = enemies.length;
+  for (let index = initialCount - 1; index >= 0; index -= 1) {
+    const enemy = enemies[index];
+    if (!enemy || enemy.dead) continue;
+    const toPlayer = player.position.clone().sub(enemy.group.position);
+    const distance = Math.max(toPlayer.length(), 0.001);
+    toPlayer.multiplyScalar(1 / distance);
+    if (enemy.type === "striker") updateStriker(enemy, dt, toPlayer);
+    else if (enemy.type === "mine") updateMine(enemy, dt);
+    else if (enemy.type === "elite") updateElite(enemy, dt, toPlayer);
+    else if (enemy.type === "boss") updateBoss(enemy, dt);
+    else updateChaser(enemy, dt, toPlayer);
+    if (enemy.dead) continue;
+    if (enemy.type !== "mine" && enemy.state !== "enter") {
+      enemy.group.position.x += enemy.velocity.x * dt;
+      enemy.group.position.y += enemy.velocity.y * dt;
+      if (enemy.velocity.lengthSq() > 0.01 && enemy.state !== "telegraph") {
+        enemy.group.rotation.z = Math.atan2(enemy.velocity.y, enemy.velocity.x) - Math.PI / 2;
+      }
+    }
+  }
+
+  for (let index = enemies.length - 1; index >= 0; index -= 1) {
+    const enemy = enemies[index];
+    if (!enemy || enemy.dead) continue;
+    const distance = player.position.distanceTo(enemy.group.position);
+    if (dashHitsEnemy(enemy, distance)) damageEnemy(enemy, index);
+  }
+
+  for (let index = enemies.length - 1; index >= 0 && state.mode === "playing"; index -= 1) {
+    const enemy = enemies[index];
+    if (!enemy || enemy.dead) continue;
+    const toPlayer = player.position.clone().sub(enemy.group.position);
+    const distance = Math.max(toPlayer.length(), 0.001);
+    toPlayer.multiplyScalar(1 / distance);
+    registerNearMiss(enemy, distance, toPlayer);
+    if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
+    const contactRadius = enemy.type === "boss" ? 2.25 : enemy.radius;
+    const bodyContact = enemy.type !== "mine" && enemy.state !== "enter" && distance < player.radius + contactRadius;
+    const waveContact = (enemy.type === "mine" || enemy.type === "boss") && waveReachedPlayer(enemy, distance);
+    if (bodyContact || waveContact) {
+      enemy.pulseHit = waveContact || enemy.pulseHit;
+      damagePlayer(enemy);
+    }
+  }
+
+  for (let index = enemies.length - 1; index >= 0; index -= 1) {
+    if (enemies[index].dead) removeEnemy(index);
+  }
+}
+
+function breakEnemy(index, enemy = enemies[index]) {
+  if (!enemy) return;
+  const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+  if (enemies[index] === enemy) removeEnemy(index);
   const reward = computeReward("break", state.combo, state.modifiers.score);
   state.score += reward.score;
   state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
@@ -956,6 +1370,7 @@ function breakEnemy(index) {
   spawnParticleBurst(position, 0xff4fd8, 20, 4.5, 1.1);
   spawnRipple(position, 0xff4fd8, 1.5);
   audio.event("break");
+  if (enemy.type === "boss") finishRun("victory");
 }
 
 function damagePlayer(enemy) {
@@ -982,9 +1397,10 @@ function updateSpawning(dt) {
   const spawnBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
   const stage = STAGES[state.stageIndex];
   const enemyInterval = Math.max(0.38, (1.18 - state.elapsed * 0.009) / stage.spawnRate);
-  if (state.enemySpawnTimer <= 0) {
-    if (enemies.length < spawnBudget) spawnEnemy();
-    if (enemies.length < spawnBudget && state.elapsed > 38 && Math.random() < 0.22) spawnEnemy();
+  if (state.enemySpawnTimer <= 0 && state.stageIndex < 3) {
+    const cappedBudget = Math.min(GAME.maxEnemies, spawnBudget);
+    if (enemies.length < cappedBudget) spawnEnemy();
+    if (enemies.length < cappedBudget && state.stageIndex === 2 && Math.random() < 0.22) spawnEnemy();
     state.enemySpawnTimer = enemyInterval;
   }
 
@@ -1085,8 +1501,9 @@ function updateHUD(dt) {
   dom.stageName.textContent = STAGE_LABELS[state.stageIndex] ?? stage.name;
   dom.stageProgress.style.width = `${stageProgress}%`;
   dom.stageTrack.setAttribute("aria-valuenow", String(Math.round(stageProgress)));
-  dom.bossPanel.hidden = true;
-  dom.bossFill.style.width = "100%";
+  const boss = enemies.find((enemy) => enemy.type === "boss" && !enemy.dead);
+  dom.bossPanel.hidden = !boss;
+  dom.bossFill.style.width = `${boss ? THREE.MathUtils.clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 100}%`;
   if (state.toastTimer > 0) {
     state.toastTimer -= dt;
     if (state.toastTimer <= 0) dom.toast.classList.remove("show");
@@ -1102,10 +1519,28 @@ function updateStage() {
   if (nextStageIndex === state.stageIndex) return;
   state.stageIndex = nextStageIndex;
   audio.setStage(nextStageIndex);
-  dom.stageBannerTitle.textContent = STAGE_LABELS[nextStageIndex] ?? STAGES[nextStageIndex].name;
+  dom.stageBannerTitle.textContent = nextStageIndex === 3
+    ? "终幕 · 潮汐守卫"
+    : STAGE_LABELS[nextStageIndex] ?? STAGES[nextStageIndex].name;
   dom.stageBanner.classList.add("show");
-  state.stageBannerTimer = 1.6;
-  beginUpgrade(nextStageIndex);
+  state.stageBannerTimer = nextStageIndex === 3 ? 2.2 : 1.6;
+  if ((nextStageIndex === 1 || nextStageIndex === 2) && !state.upgradeTriggered[nextStageIndex - 1]) {
+    state.upgradeTriggered[nextStageIndex - 1] = true;
+    beginUpgrade(nextStageIndex);
+  } else if (nextStageIndex === 3 && !state.bossTriggered) {
+    state.bossTriggered = true;
+    beginBossStage();
+  }
+}
+
+function beginBossStage() {
+  for (let index = enemies.length - 1; index >= 0; index -= 1) {
+    if (enemies[index].priority < 4) removeEnemy(index);
+  }
+  state.enemySpawnTimer = Infinity;
+  toast("潮汐守卫已锁定", "danger");
+  spawnParticleBurst(new THREE.Vector2(0, view.halfHeight - 0.6), 0xe7ffff, 28, 4.2, 1.25);
+  createBoss();
 }
 
 function shake(strength, duration) {
@@ -1260,7 +1695,7 @@ function animate() {
       if (state.mode === "playing") updateSpawning(dt);
       updateParticles(dt);
       updateRipples(dt);
-      if (state.timeLeft <= 0) finishRun("victory");
+      if (state.timeLeft <= 0) finishRun("gameover");
     }
   } else {
     updateParticles(dt);
