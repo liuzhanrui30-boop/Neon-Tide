@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  computeFrameDeltas,
   computeRank,
   computeReward,
   computeSpawnBudget,
@@ -9,7 +10,22 @@ import {
   getStageIndex,
   pickUpgradeOptions,
 } from '../src/game/gameplay.js';
-import { STAGES, UPGRADES } from '../src/game/config.js';
+import { GAME, STAGES, UPGRADES } from '../src/game/config.js';
+
+test('a long wall frame advances authoritative time while simulation remains capped', () => {
+  const frame = computeFrameDeltas(2, 1);
+  const slowedFrame = computeFrameDeltas(2, 0.5);
+
+  assert.equal(frame.wallDt, 2);
+  assert.equal(frame.simDt, 0.05);
+  assert.equal(slowedFrame.wallDt, 2);
+  assert.equal(slowedFrame.simDt, 0.025);
+});
+
+test('session timing is derived from boss entry and the boss window', () => {
+  assert.equal(GAME.bossStart, STAGES[3].start);
+  assert.equal(GAME.duration, GAME.bossStart + GAME.bossWindow);
+});
 
 test('stage boundaries begin each phase exactly at 0, 18, 38, and 53 seconds', () => {
   assert.equal(getStageIndex(0), 0);

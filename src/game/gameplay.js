@@ -2,6 +2,15 @@ import { ENEMY_TYPES, GAME, RANK_THRESHOLDS, REWARDS, STAGES, UPGRADES } from '.
 
 export { GAME, STAGES, ENEMY_TYPES, UPGRADES };
 
+export function computeFrameDeltas(rawWallDt, slowMotionScale = 1) {
+  const wallDt = Number.isFinite(rawWallDt) ? Math.max(0, rawWallDt) : 0;
+  const simulationScale = Math.min(1, Math.max(0, Number(slowMotionScale) || 0));
+  return Object.freeze({
+    wallDt,
+    simDt: Math.min(wallDt, 0.05) * simulationScale,
+  });
+}
+
 export function getStageIndex(elapsed) {
   const seconds = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
   let index = 0;

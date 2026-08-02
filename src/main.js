@@ -6,6 +6,7 @@ import {
   GAME,
   STAGES,
   UPGRADES,
+  computeFrameDeltas,
   computeRank,
   computeReward,
   computeSpawnBudget,
@@ -16,7 +17,7 @@ import {
 const TAU = Math.PI * 2;
 const WORLD_HEIGHT = 14;
 const STORAGE_KEY = "neon-tide-high-score";
-const MAX_HEALTH = 3;
+const BASE_MAX_HEALTH = 3;
 const MOVE_ACCELERATION = 17.5;
 const TURN_ACCELERATION = 31;
 const MOVE_DAMPING = 4.4;
@@ -43,6 +44,7 @@ const STAGE_PALETTES = Object.freeze([
 ]);
 const FEEDBACK_TIERS = Object.freeze({
   small: { trauma: 0.13, slowScale: 1, slowDuration: 0, zoom: 0 },
+  nearMiss: { trauma: 0.18, slowScale: 0.72, slowDuration: 0.1, zoom: 0.012 },
   medium: { trauma: 0.38, slowScale: 0.72, slowDuration: 0.045, zoom: 0.018 },
   large: { trauma: 0.78, slowScale: 0.5, slowDuration: 0.1, zoom: 0.045 },
 });
@@ -77,6 +79,7 @@ const dom = {
   resultScore: document.querySelector("#result-score"),
   resultHigh: document.querySelector("#result-high"),
   score: document.querySelector("#score-value"),
+  timeLabel: document.querySelector(".time-card > span"),
   time: document.querySelector("#time-value"),
   health: document.querySelector("#health-pips"),
   energy: document.querySelector("#energy-value"),
@@ -94,6 +97,7 @@ const dom = {
   missionPanel: document.querySelector("#mission-panel"),
   missionObjective: document.querySelector("#mission-objective"),
   bossPanel: document.querySelector("#boss-panel"),
+  bossTrack: document.querySelector(".boss-track"),
   bossFill: document.querySelector("#boss-fill"),
   flash: document.querySelector("#flash"),
   toast: document.querySelector("#toast"),
@@ -116,11 +120,7 @@ dom.floatingLayer.id = "floating-text-layer";
 dom.floatingLayer.setAttribute("aria-hidden", "true");
 dom.root.parentElement.appendChild(dom.floatingLayer);
 
-dom.healthPips = Array.from({ length: 3 }, () => {
-  const pip = document.createElement("i");
-  dom.health.appendChild(pip);
-  return pip;
-});
+dom.healthPips = [];
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x050816);
@@ -161,10 +161,11 @@ const reducedMotionPreference = window.matchMedia?.("(prefers-reduced-motion: re
 const state = {
   mode: "menu",
   elapsed: 0,
-  timeLeft: GAME.duration,
+  timeLeft: GAME.bossStart,
   score: 0,
   highScore: Number.parseInt(localStorage.getItem(STORAGE_KEY) || "0", 10),
-  health: MAX_HEALTH,
+  health: BASE_MAX_HEALTH,
+  maxHealth: BASE_MAX_HEALTH,
   energy: 0,
   combo: 0,
   comboTimer: 0,
@@ -191,10 +192,13 @@ const state = {
   zoomPunch: 0,
   toastTimer: 0,
   stageBannerTimer: 0,
+  stageQueue: [],
   upgradeTriggered: [false, false],
   bossTriggered: false,
   bossSpawned: false,
+  bossStart: null,
   bossDeadline: null,
+  terminalReason: null,
   muted: false,
   ownedUpgrades: [],
   upgradeOptions: [],
@@ -217,6 +221,14 @@ const input = {
 const audio = new NeonAudio();
 let activeDialog = null;
 let restoreFocusTarget = null;
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "a[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 const shards = [];
 const enemies = [];
@@ -273,6 +285,14 @@ const player = {
 const shared = {
   shardGeometry: new THREE.OctahedronGeometry(0.24, 0),
   shardMaterial: new THREE.MeshBasicMaterial({ color: 0xffd166, transparent: true }),
+  shardRingGeometry: new THREE.RingGeometry(0.31, 0.325, 24),
+  shardRingMaterial: new THREE.MeshBasicMaterial({
+    color: 0xffd166,
+    transparent: true,
+    opacity: 0.62,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
   shardGlowGeometry: new THREE.CircleGeometry(0.42, 20),
   shardGlowMaterial: new THREE.MeshBasicMaterial({
     color: 0xff8f3f,
@@ -702,6 +722,7 @@ function spawnParticleBurst(position, color, count = 12, speed = 3.2, size = 1) 
 }
 
 function spawnRipple(position, color, scale = 1) {
+  if (state.reducedMotion) return null;
   const material = new THREE.MeshBasicMaterial({
     color,
     transparent: true,
@@ -749,6 +770,57 @@ function applyReducedMotionPreference(matches) {
     trail.group.visible = false;
     trail.meshes.forEach((mesh) => { mesh.material.opacity = 0; });
   }
+  for (const ripple of ripples.splice(0)) {
+    world.remove(ripple.mesh);
+    ripple.mesh.material.dispose();
+  }
+  for (const particle of particles.splice(0)) {
+    particle.mesh.visible = false;
+    particle.mesh.material.opacity = 0;
+  }
+}
+
+function getWarningStep(remaining, duration, stepCount = 4) {
+  const progress = 1 - THREE.MathUtils.clamp(remaining / Math.max(duration, 0.001), 0, 1);
+  return Math.min(stepCount - 1, Math.floor(progress * stepCount));
+}
+
+function applyDiscreteWarning(material, remaining, duration) {
+  if (!material) return 0;
+  const step = getWarningStep(remaining, duration);
+  const colors = [0xffd166, 0xff9f43, 0xff6b5f, 0xff305f];
+  const opacities = [0.3, 0.46, 0.64, 0.86];
+  material.color?.set(colors[step]);
+  material.opacity = opacities[step];
+  return step;
+}
+
+function syncHealthPips() {
+  while (dom.healthPips.length < state.maxHealth) {
+    const pip = document.createElement("i");
+    dom.health.appendChild(pip);
+    dom.healthPips.push(pip);
+  }
+  while (dom.healthPips.length > state.maxHealth) {
+    dom.healthPips.pop()?.remove();
+  }
+  dom.healthPips.forEach((pip, index) => pip.classList.toggle("empty", index >= state.health));
+  dom.health.setAttribute("aria-valuemin", "0");
+  dom.health.setAttribute("aria-valuemax", String(state.maxHealth));
+  dom.health.setAttribute("aria-valuenow", String(state.health));
+  dom.health.setAttribute("aria-valuetext", `船体 ${state.health} / ${state.maxHealth}`);
+}
+
+function syncBossProgress(boss = enemies.find((enemy) => enemy.type === "boss" && !enemy.dead)) {
+  const percent = boss ? THREE.MathUtils.clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 0;
+  const totalHits = boss ? Math.ceil(boss.maxHp / BOSS_DASH_DAMAGE) : Math.ceil(ENEMY_TYPES.boss.hp / BOSS_DASH_DAMAGE);
+  const remainingHits = boss ? Math.max(0, Math.ceil(boss.hp / BOSS_DASH_DAMAGE)) : 0;
+  dom.bossPanel.hidden = !boss;
+  dom.bossFill.style.width = `${percent}%`;
+  dom.bossTrack.setAttribute("aria-valuemin", "0");
+  dom.bossTrack.setAttribute("aria-valuemax", "100");
+  dom.bossTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+  dom.bossTrack.setAttribute("aria-valuetext", `深潮主脑稳定度 ${remainingHits} / ${totalHits}`);
 }
 
 function showFloatingText(text, position, tone = "cyan", tier = "small") {
@@ -761,8 +833,8 @@ function showFloatingText(text, position, tone = "cyan", tier = "small") {
   const item = {
     element,
     position: new THREE.Vector3(position.x, position.y, 4.8),
-    life: tier === "large" ? 1.15 : tier === "medium" ? 0.9 : 0.7,
-    maxLife: tier === "large" ? 1.15 : tier === "medium" ? 0.9 : 0.7,
+    life: tier === "large" ? 1.15 : tier === "medium" || tier === "nearMiss" ? 0.9 : 0.7,
+    maxLife: tier === "large" ? 1.15 : tier === "medium" || tier === "nearMiss" ? 0.9 : 0.7,
     drift: Math.sin(state.elapsed * 17.3 + floatingTexts.length * 2.1) * 22,
   };
   floatingTexts.push(item);
@@ -846,16 +918,7 @@ function spawnShard(position) {
   glow.position.z = -0.05;
   const gem = new THREE.Mesh(shared.shardGeometry, shared.shardMaterial);
   gem.scale.set(0.86, 1.12, 0.7);
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.31, 0.325, 24),
-    new THREE.MeshBasicMaterial({
-      color: 0xffd166,
-      transparent: true,
-      opacity: 0.62,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-  );
+  const ring = new THREE.Mesh(shared.shardRingGeometry, shared.shardRingMaterial);
   group.add(glow, ring, gem);
   world.add(group);
   const shard = { group, gem, ring, baseY: position.y, phase: Math.random() * TAU };
@@ -895,6 +958,10 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
     telegraph: 0,
     wobble: Math.random() * TAU,
     nearMissed: false,
+    nearMissCandidate: false,
+    nearMissMinDistance: Infinity,
+    nearMissPreviousDistance: Infinity,
+    nearMissResolved: false,
     dead: false,
     priority: 1,
     ...overrides,
@@ -923,7 +990,8 @@ function createStriker(position = randomEdgePosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.strikerGlowMaterial);
   glow.scale.set(1.25, 1.8, 1);
   const body = new THREE.Mesh(shared.strikerGeometry, shared.strikerMaterial);
-  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+  const lineMaterial = shared.telegraphMaterial.clone();
+  const line = new THREE.Line(shared.telegraphLineGeometry, lineMaterial);
   line.position.z = -0.08;
   line.visible = false;
   group.add(line, glow, body);
@@ -932,6 +1000,7 @@ function createStriker(position = randomEdgePosition()) {
     stateTimer: 0.8 + Math.random() * 0.7,
     dashDirection: new THREE.Vector2(),
     visuals: { glow, body, line },
+    ownedMaterials: [lineMaterial],
     priority: 2,
   });
 }
@@ -942,7 +1011,8 @@ function createMine(position = randomShardPosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
   glow.scale.setScalar(1.65);
   const body = new THREE.Mesh(shared.mineGeometry, shared.mineMaterial);
-  const ring = new THREE.Mesh(shared.mineRingGeometry, shared.dangerRingMaterial);
+  const ringMaterial = shared.dangerRingMaterial.clone();
+  const ring = new THREE.Mesh(shared.mineRingGeometry, ringMaterial);
   ring.position.z = -0.05;
   group.add(glow, ring, body);
   return registerEnemy("mine", position, group, "arming", {
@@ -952,6 +1022,7 @@ function createMine(position = randomShardPosition()) {
     previousDangerRadius: 0,
     pulseHit: false,
     visuals: { glow, body, ring },
+    ownedMaterials: [ringMaterial],
     priority: 2,
   });
 }
@@ -983,9 +1054,11 @@ function createBoss() {
   core.scale.set(1.15, 0.72, 1);
   const coreGlow = new THREE.Mesh(shared.bossCoreGlowGeometry, shared.bossCoreGlowMaterial);
   coreGlow.scale.set(1.22, 0.76, 1);
-  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+  const lineMaterial = shared.telegraphMaterial.clone();
+  const line = new THREE.Line(shared.telegraphLineGeometry, lineMaterial);
   line.visible = false;
-  const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, shared.dangerRingMaterial);
+  const pulseMaterial = shared.dangerRingMaterial.clone();
+  const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, pulseMaterial);
   pulseRing.visible = false;
   const orbitNodes = new THREE.Group();
   for (let i = 0; i < 4; i += 1) {
@@ -1010,8 +1083,12 @@ function createBoss() {
     hitReactTimer: 0,
     priority: 4,
     visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing },
+    ownedMaterials: [lineMaterial, pulseMaterial],
   });
-  if (enemy) state.bossSpawned = true;
+  if (enemy) {
+    state.bossSpawned = true;
+    syncBossProgress(enemy);
+  }
   return enemy;
 }
 
@@ -1038,14 +1115,15 @@ function spawnEnemy(type = null, position = null) {
 function removeShard(index) {
   const shard = shards[index];
   world.remove(shard.group);
-  shard.ring.material.dispose();
   shards.splice(index, 1);
 }
 
 function removeEnemy(index) {
   const enemy = enemies[index];
   world.remove(enemy.group);
+  enemy.ownedMaterials?.forEach((material) => material.dispose());
   enemies.splice(index, 1);
+  if (enemy.type === "boss") syncBossProgress(null);
 }
 
 function clearWorldEntities() {
@@ -1090,13 +1168,27 @@ function randomShardPosition() {
 
 function resetState() {
   clearWorldEntities();
+  clearCombo();
+  state.toastTimer = 0;
+  dom.toast.classList.remove("show");
+  dom.toast.textContent = "";
+  dom.toast.removeAttribute("style");
+  state.stageBannerTimer = 0;
+  dom.stageBanner.classList.remove("show");
+  dom.stageBannerTitle.textContent = "";
+  delete dom.stageBanner.dataset.tone;
+  dom.upgradeOptions.replaceChildren();
+  dom.upgradePanel.hidden = true;
+  window.clearTimeout(flash.timeout);
+  flash.timeout = null;
+  dom.flash.style.opacity = "0";
+  dom.combo.innerHTML = "连击 ×<b>2</b>";
   state.elapsed = 0;
-  state.timeLeft = GAME.duration;
+  state.timeLeft = GAME.bossStart;
   state.score = 0;
-  state.health = MAX_HEALTH;
+  state.maxHealth = BASE_MAX_HEALTH;
+  state.health = state.maxHealth;
   state.energy = 0;
-  state.combo = 0;
-  state.comboTimer = 0;
   state.stageIndex = 0;
   state.enemySpawnTimer = 1.1;
   state.shardSpawnTimer = 1.8;
@@ -1112,29 +1204,57 @@ function resetState() {
   state.slowMotionScale = 1;
   state.slowMotionTimer = 0;
   state.zoomPunch = 0;
-  state.stageBannerTimer = 0;
   state.upgradeTriggered = [false, false];
+  state.stageQueue = [];
   state.bossTriggered = false;
   state.bossSpawned = false;
+  state.bossStart = null;
   state.bossDeadline = null;
+  state.terminalReason = null;
   state.ownedUpgrades = [];
   state.upgradeOptions = [];
   state.stats.maxCombo = 0;
   state.stats.nearMisses = 0;
   state.stats.breaks = 0;
-  dom.missionObjective.textContent = `坚持 ${STAGES[3].start} 秒，定位深潮主脑`;
+  dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
+  dom.score.textContent = "0000";
+  dom.timeLabel.textContent = "首领接入";
+  dom.time.textContent = `00:${String(GAME.bossStart).padStart(2, "0")}`;
+  dom.time.classList.remove("warning");
+  dom.energy.textContent = "0";
+  dom.energyFill.style.width = "0%";
+  dom.overdriveLabel.classList.remove("active");
+  dom.overdriveLabel.textContent = "OVERDRIVE // 待机";
+  dom.stageProgress.style.width = "0%";
+  dom.stageName.textContent = STAGE_LABELS[0];
+  dom.stageTrack.setAttribute("aria-valuenow", "0");
   state.cameraLookAhead.set(0, 0);
   input.dashBuffer = 0;
+  input.keys.clear();
+  resetJoystick();
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
   player.facing.set(0, 1);
   player.group.scale.set(1, 1, 1);
   player.group.rotation.z = 0;
   player.group.rotation.y = 0;
+  player.flame.scale.setScalar(1);
+  player.core.scale.setScalar(1);
+  player.coreGlow.scale.setScalar(1);
   player.shield.visible = false;
   player.trailTimer = 0;
+  camera.position.set(0, 0, 20);
+  camera.rotation.z = 0;
+  camera.zoom = 1;
+  camera.updateProjectionMatrix();
+  backgroundGroup.position.x = 0;
+  backgroundGroup.position.y = 0;
+  decorGroup.scale.setScalar(1);
   syncPlayerTransform();
+  syncHealthPips();
+  syncBossProgress(null);
   seedShards();
+  audio.suspendBeat();
   audio.setStage(0);
   setPalette(0, true);
 }
@@ -1176,6 +1296,30 @@ function showOverlay(kicker, title, copy, label, showResult = false) {
   openDialog(dom.overlay, dom.primaryButton);
 }
 
+function getDialogFocusable(dialog) {
+  if (!dialog || dialog.hidden) return [];
+  return Array.from(dialog.querySelectorAll(FOCUSABLE_SELECTOR)).filter((element) => (
+    !element.hidden && element.getAttribute("aria-hidden") !== "true" && !element.closest("[hidden]")
+  ));
+}
+
+function trapDialogFocus(event) {
+  if (event.key !== "Tab" || !activeDialog || activeDialog.hidden) return false;
+  const focusable = getDialogFocusable(activeDialog);
+  event.preventDefault();
+  if (focusable.length === 0) {
+    activeDialog.focus({ preventScroll: true });
+    return true;
+  }
+  const currentIndex = focusable.indexOf(document.activeElement);
+  const offset = event.shiftKey ? -1 : 1;
+  const nextIndex = currentIndex < 0
+    ? (event.shiftKey ? focusable.length - 1 : 0)
+    : (currentIndex + offset + focusable.length) % focusable.length;
+  focusable[nextIndex].focus({ preventScroll: true });
+  return true;
+}
+
 function openDialog(dialog, focusTarget) {
   if (!activeDialog) restoreFocusTarget = document.activeElement;
   if (activeDialog && activeDialog !== dialog) {
@@ -1185,10 +1329,14 @@ function openDialog(dialog, focusTarget) {
   }
   activeDialog = dialog;
   dialog.hidden = false;
+  dialog.tabIndex = -1;
   dialog.setAttribute("aria-modal", "true");
   if (dialog === dom.overlay) dialog.classList.add("visible");
   setBackgroundInert(true);
-  window.requestAnimationFrame(() => focusTarget?.focus({ preventScroll: true }));
+  focusTarget?.focus({ preventScroll: true });
+  window.requestAnimationFrame(() => {
+    if (activeDialog === dialog) focusTarget?.focus({ preventScroll: true });
+  });
 }
 
 function closeDialogs({ restoreFocus = true } = {}) {
@@ -1205,9 +1353,12 @@ function closeDialogs({ restoreFocus = true } = {}) {
   }
   const candidate = restoreFocusTarget;
   restoreFocusTarget = null;
+  const target = candidate && candidate !== document.body && candidate.isConnected ? candidate : dom.pauseButton;
+  target?.focus({ preventScroll: true });
   window.requestAnimationFrame(() => {
-    const target = candidate && candidate !== document.body && candidate.isConnected ? candidate : dom.pauseButton;
-    target?.focus({ preventScroll: true });
+    if (!activeDialog) {
+      target?.focus({ preventScroll: true });
+    }
   });
 }
 
@@ -1253,7 +1404,7 @@ function renderMode(mode, previousMode, payload = {}) {
     showOverlay(
       "ARCADE SURVIVAL // THREE.JS",
       "NEON<br /><em>TIDE</em>",
-      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${STAGES[3].start} 秒定位深潮主脑，并在 18 秒内将其摧毁。`,
+      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${GAME.bossStart} 秒定位深潮主脑，并在 ${GAME.bossWindow} 秒内将其摧毁。`,
       "进入潮汐"
     );
   } else if (mode === "paused") {
@@ -1264,10 +1415,13 @@ function renderMode(mode, previousMode, payload = {}) {
       "继续潮汐"
     );
   } else if (mode === "gameover") {
+    const deadlineExpired = state.terminalReason === "bossDeadline";
     showOverlay(
-      "SIGNAL LOST // HULL BREACH",
+      deadlineExpired ? "SIGNAL LOST // WINDOW CLOSED" : "SIGNAL LOST // HULL BREACH",
       "SIGNAL<br /><em>LOST</em>",
-      "船体已经失效，未能完成终幕目标：定位并摧毁深潮主脑。",
+      deadlineExpired
+        ? "终幕窗口已经关闭，深潮主脑仍保持稳定，信号链路已经崩解。"
+        : "船体已经失效，未能完成终幕目标：定位并摧毁深潮主脑。",
       "重新接入",
       true
     );
@@ -1282,9 +1436,10 @@ function renderMode(mode, previousMode, payload = {}) {
   }
 }
 
-function finishRun(outcome) {
+function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "hullBreach") {
   if (state.runFinished || state.mode !== "playing" || !["gameover", "victory"].includes(outcome)) return false;
   state.runFinished = true;
+  state.terminalReason = reason;
   if (outcome === "victory") state.score += 250;
   updateHighScore();
   transitionTo(outcome);
@@ -1402,7 +1557,11 @@ function applyUpgrade(id) {
   const upgrade = UPGRADES.find((candidate) => candidate.id === id);
   if (!upgrade || state.ownedUpgrades.includes(id)) return false;
   state.ownedUpgrades.push(id);
-  if (id === "repair-swarm") state.health = Math.min(MAX_HEALTH, state.health + upgrade.effect);
+  if (id === "repair-swarm") {
+    state.maxHealth = Math.max(state.maxHealth, 4);
+    state.health = Math.min(state.maxHealth, state.health + upgrade.effect);
+    syncHealthPips();
+  }
   return true;
 }
 
@@ -1419,7 +1578,7 @@ function renderUpgradeOptions(options) {
     "echo-shield": "防护 +0.08 秒",
     "magnet-field": "拾取范围 +25%",
     overclock: "充能 +20%",
-    "repair-swarm": "修复船体 +1",
+    "repair-swarm": "最大船体 4 · 立即修复 +1",
   };
   const buttons = options.map((upgrade, index) => {
     const button = document.createElement("button");
@@ -1567,7 +1726,9 @@ function updateShards(dt) {
   for (const shard of shards) {
     shard.gem.rotation.z += dt * 1.8;
     shard.ring.rotation.z -= dt * 0.8;
-    shard.group.position.y = shard.baseY + Math.sin(state.elapsed * 2.5 + shard.phase) * 0.12;
+    shard.group.position.y = state.reducedMotion
+      ? shard.baseY
+      : shard.baseY + Math.sin(state.elapsed * 2.5 + shard.phase) * 0.12;
     const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 5 + shard.phase) * 0.09;
     shard.group.scale.setScalar(pulse);
   }
@@ -1636,6 +1797,11 @@ function updateStriker(enemy, dt, toPlayer) {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
     enemy.velocity.multiplyScalar(Math.exp(-8 * dt));
     enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.62);
+    else {
+      enemy.visuals.line.material.color.set(0xff7ae6);
+      enemy.visuals.line.material.opacity = 0.72;
+    }
     const telegraphScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 32) * 0.12;
     enemy.visuals.body.scale.setScalar(telegraphScale);
     if (enemy.stateTimer <= 0) {
@@ -1657,8 +1823,13 @@ function updateMine(enemy, dt) {
   enemy.group.rotation.z += dt * (enemy.state === "arming" ? 0.8 : 2.5);
   if (enemy.state === "arming") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.ring.material, enemy.telegraph, 1.35);
+    else {
+      enemy.visuals.ring.material.color.set(0xff9f43);
+      enemy.visuals.ring.material.opacity = 0.72;
+    }
     const pulse = state.reducedMotion
-      ? 1.1
+      ? 1.05
       : 0.9 + (1 - enemy.telegraph / 1.35) * 0.35 + Math.sin(state.elapsed * 22) * 0.05;
     enemy.visuals.ring.scale.setScalar(pulse);
     if (enemy.stateTimer <= 0) {
@@ -1671,6 +1842,8 @@ function updateMine(enemy, dt) {
     enemy.previousDangerRadius = enemy.dangerRadius;
     enemy.dangerRadius = THREE.MathUtils.lerp(0.55, 4.8, progress);
     enemy.visuals.ring.scale.setScalar(enemy.dangerRadius / 0.9);
+    enemy.visuals.ring.material.color.set(0xff506f);
+    enemy.visuals.ring.material.opacity = 0.8;
     const glowScale = state.reducedMotion ? 1.4 : 1.4 + progress * 1.2;
     enemy.visuals.glow.scale.setScalar(glowScale);
     if (enemy.stateTimer <= 0) enemy.dead = true;
@@ -1751,11 +1924,21 @@ function updateBoss(enemy, dt) {
     enemy.velocity.multiplyScalar(Math.exp(-7 * dt));
     if (enemy.attackKind === "charge") {
       enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+      if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
+      else {
+        enemy.visuals.line.material.color.set(0xff7ae6);
+        enemy.visuals.line.material.opacity = 0.72;
+      }
     } else {
       const warningScale = state.reducedMotion
-        ? 2.4
+        ? 1.85
         : 1 + (1 - enemy.telegraph / BOSS_TELEGRAPH_TIME) * 2.1;
       enemy.visuals.pulseRing.scale.setScalar(warningScale);
+      if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.pulseRing.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
+      else {
+        enemy.visuals.pulseRing.material.color.set(0xff9f43);
+        enemy.visuals.pulseRing.material.opacity = 0.72;
+      }
     }
     if (enemy.stateTimer <= 0) beginBossExecute(enemy);
   } else if (enemy.state === "execute") {
@@ -1784,17 +1967,59 @@ function waveReachedPlayer(enemy, distance) {
   return distance + band >= enemy.previousDangerRadius && distance - band <= enemy.dangerRadius;
 }
 
-function registerNearMiss(enemy) {
-  if (enemy.nearMissed || enemy.type === "mine" || enemy.type === "boss") return;
+function registerNearMiss(enemy, distance, collided = false) {
+  if (enemy.nearMissed || enemy.nearMissResolved || enemy.type === "mine" || enemy.type === "boss") return false;
   const toPlayer = player.position.clone().sub(enemy.group.position);
-  const distance = Math.max(toPlayer.length(), 0.001);
-  toPlayer.multiplyScalar(1 / distance);
+  toPlayer.multiplyScalar(1 / Math.max(distance, 0.001));
   const collisionDistance = player.radius + enemy.radius;
-  if (distance <= collisionDistance || distance >= collisionDistance + 0.62 || enemy.velocity.dot(toPlayer) <= 0) return;
+  const nearMissEdge = collisionDistance + 0.62;
+  const previousDistance = enemy.nearMissPreviousDistance;
+  const approachedSinceLastFrame = Number.isFinite(previousDistance) && distance < previousDistance - 0.006;
+  const movingTowardPlayer = enemy.velocity.dot(toPlayer) > 0.02;
+
+  if (collided || distance <= collisionDistance) {
+    enemy.nearMissCandidate = false;
+    enemy.nearMissResolved = true;
+    enemy.nearMissPreviousDistance = distance;
+    return false;
+  }
+
+  if (!enemy.nearMissCandidate && distance < nearMissEdge && (approachedSinceLastFrame || movingTowardPlayer)) {
+    enemy.nearMissCandidate = true;
+    enemy.nearMissMinDistance = distance;
+  }
+
+  let safelyPassed = false;
+  if (enemy.nearMissCandidate) {
+    enemy.nearMissMinDistance = Math.min(enemy.nearMissMinDistance, distance);
+    const increasing = Number.isFinite(previousDistance) && distance > previousDistance + 0.012;
+    const clearedCollisionBand = distance > collisionDistance + 0.04;
+    const exitedNearMissBand = distance >= nearMissEdge && distance > enemy.nearMissMinDistance + 0.02;
+    safelyPassed = (increasing && clearedCollisionBand) || exitedNearMissBand;
+  }
+
+  enemy.nearMissPreviousDistance = distance;
+  if (!safelyPassed) return false;
+
   enemy.nearMissed = true;
+  enemy.nearMissCandidate = false;
+  enemy.nearMissResolved = true;
+  const previousScore = state.score;
   awardReward("nearMiss");
   state.stats.nearMisses += 1;
-  audio.event("nearMiss");
+  const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+  triggerFeedback("nearMiss", {
+    position,
+    color: 0xffd166,
+    particles: 8,
+    speed: 3.2,
+    size: 0.9,
+    rippleScale: 1.05,
+    text: `NEAR MISS +${state.score - previousScore}`,
+    tone: "gold",
+  });
+  audio.event("nearMiss", 0.8);
+  return true;
 }
 
 function dashHitsEnemy(enemy, distance) {
@@ -1806,11 +2031,13 @@ function dashHitsEnemy(enemy, distance) {
 function damageEnemy(enemy) {
   enemy.lastDashId = state.dashSequence;
   enemy.hp -= enemy.type === "boss" ? BOSS_DASH_DAMAGE : 1;
+  if (enemy.type === "boss") syncBossProgress(enemy);
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
   if (enemy.hp <= 0) {
     destroyEnemy(enemy, "dash");
     return;
   }
+  if (enemy.type === "boss") awardReward("bossHit");
   const away = position.clone().sub(player.position).normalize();
   enemy.velocity.addScaledVector(away, enemy.type === "elite" ? 2.4 : 1.2);
   enemy.hitReactTimer = 0.18;
@@ -1861,11 +2088,11 @@ function updateEnemies(dt) {
     const enemy = enemies[index];
     if (!enemy || enemy.dead) continue;
     const distance = Math.max(player.position.distanceTo(enemy.group.position), 0.001);
-    registerNearMiss(enemy);
-    if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
     const contactRadius = enemy.type === "boss" ? 2.25 : enemy.radius;
     const bodyContact = enemy.type !== "mine" && enemy.state !== "enter" && distance < player.radius + contactRadius;
     const waveContact = (enemy.type === "mine" || enemy.type === "boss") && waveReachedPlayer(enemy, distance);
+    registerNearMiss(enemy, distance, bodyContact || waveContact);
+    if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
     if (bodyContact || waveContact) {
       enemy.pulseHit = waveContact || enemy.pulseHit;
       damagePlayer(enemy);
@@ -1905,7 +2132,10 @@ function destroyEnemy(enemy, source) {
 }
 
 function damagePlayer(enemy) {
-  state.health -= 1;
+  state.health = Math.max(0, state.health - 1);
+  enemy.nearMissCandidate = false;
+  enemy.nearMissResolved = true;
+  syncHealthPips();
   state.hurtInvuln = HURT_INVULNERABILITY;
   clearCombo();
   player.velocity.multiplyScalar(-0.3);
@@ -1924,12 +2154,12 @@ function damagePlayer(enemy) {
   });
   toast("船体受损", "danger");
   audio.event("hurt");
-  if (state.health <= 0) finishRun("gameover");
+  if (state.health <= 0) finishRun("gameover", "hullBreach");
 }
 
 function updateSpawning(dt) {
   state.enemySpawnTimer -= dt;
-  const healthPercent = (state.health / MAX_HEALTH) * 100;
+  const healthPercent = (state.health / Math.max(1, state.maxHealth)) * 100;
   const spawnBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
   const stage = STAGES[state.stageIndex];
   const enemyInterval = Math.max(0.38, (1.18 - state.elapsed * 0.009) / stage.spawnRate);
@@ -1956,7 +2186,7 @@ function updateParticles(dt) {
     particle.velocity.multiplyScalar(Math.exp(-3.4 * dt));
     const lifeRatio = Math.max(0, particle.life / particle.maxLife);
     particle.mesh.material.opacity = lifeRatio * 0.85;
-    particle.mesh.scale.multiplyScalar(1 + dt * 1.8);
+    if (!state.reducedMotion) particle.mesh.scale.multiplyScalar(1 + dt * 1.8);
     if (particle.life <= 0) {
       particle.mesh.visible = false;
       particle.mesh.material.opacity = 0;
@@ -2075,6 +2305,7 @@ function updateHUD(dt) {
   const totalSeconds = Math.max(0, Math.ceil(state.timeLeft));
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
+  dom.timeLabel.textContent = state.bossDeadline === null ? "首领接入" : "首领窗口";
   dom.time.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   dom.time.classList.toggle("warning", state.timeLeft <= 10 && state.mode === "playing");
   dom.energy.textContent = String(Math.round(state.energy));
@@ -2085,7 +2316,7 @@ function updateHUD(dt) {
   dom.overdriveLabel.textContent = overdriveActive
     ? `OVERDRIVE // ${state.overdriveTimer.toFixed(1)}S`
     : "OVERDRIVE // 待机";
-  dom.healthPips.forEach((pip, index) => pip.classList.toggle("empty", index >= state.health));
+  syncHealthPips();
   state.dashCharges.forEach((charge, index) => {
     const pip = dom.dashPips[index];
     pip.classList.toggle("spent", charge <= 0.001);
@@ -2102,15 +2333,14 @@ function updateHUD(dt) {
   const stage = STAGES[state.stageIndex];
   const stageEnd = state.stageIndex === 3 && state.bossDeadline !== null
     ? state.bossDeadline
-    : Number.isFinite(stage.end) ? stage.end : GAME.duration;
+    : Number.isFinite(stage.end) ? stage.end : GAME.bossStart + GAME.bossWindow;
   const stageDuration = Math.max(0.001, stageEnd - stage.start);
   const stageProgress = THREE.MathUtils.clamp(((state.elapsed - stage.start) / stageDuration) * 100, 0, 100);
   dom.stageName.textContent = STAGE_LABELS[state.stageIndex] ?? stage.name;
   dom.stageProgress.style.width = `${stageProgress}%`;
   dom.stageTrack.setAttribute("aria-valuenow", String(Math.round(stageProgress)));
   const boss = enemies.find((enemy) => enemy.type === "boss" && !enemy.dead);
-  dom.bossPanel.hidden = !boss;
-  dom.bossFill.style.width = `${boss ? THREE.MathUtils.clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 100}%`;
+  syncBossProgress(boss ?? null);
   if (state.toastTimer > 0) {
     state.toastTimer -= dt;
     if (state.toastTimer <= 0) dom.toast.classList.remove("show");
@@ -2122,8 +2352,14 @@ function updateHUD(dt) {
 }
 
 function updateStage() {
-  const nextStageIndex = getStageIndex(state.elapsed);
-  if (nextStageIndex === state.stageIndex) return;
+  const targetStageIndex = getStageIndex(state.elapsed);
+  const queuedThrough = state.stageQueue.at(-1) ?? state.stageIndex;
+  for (let index = Math.max(state.stageIndex, queuedThrough) + 1; index <= targetStageIndex; index += 1) {
+    state.stageQueue.push(index);
+  }
+  if (state.mode !== "playing" || state.stageQueue.length === 0) return;
+
+  const nextStageIndex = state.stageQueue.shift();
   state.stageIndex = nextStageIndex;
   audio.setStage(nextStageIndex);
   setPalette(nextStageIndex);
@@ -2144,10 +2380,11 @@ function beginBossStage() {
   for (let index = enemies.length - 1; index >= 0; index -= 1) {
     if (enemies[index].priority < 4) removeEnemy(index);
   }
-  state.bossDeadline = state.elapsed + 18;
-  state.timeLeft = 18;
+  state.bossStart = GAME.bossStart;
+  state.bossDeadline = state.bossStart + GAME.bossWindow;
+  state.timeLeft = Math.max(0, state.bossDeadline - state.elapsed);
   state.enemySpawnTimer = Infinity;
-  dom.missionObjective.textContent = "在 18 秒内摧毁深潮主脑";
+  dom.missionObjective.textContent = `在 ${GAME.bossWindow} 秒内摧毁深潮主脑`;
   toast("潮汐守卫已锁定", "danger");
   const entrancePosition = new THREE.Vector2(0, view.halfHeight - 0.6);
   triggerFeedback("large", {
@@ -2198,17 +2435,24 @@ function requestDash() {
   if (state.mode === "playing") input.dashBuffer = DASH_BUFFER_WINDOW;
 }
 
+function isControlTarget(target) {
+  return Boolean(target?.closest?.("button,[role='button'],input,select,textarea,a,[contenteditable='true']"));
+}
+
 function onKeyDown(event) {
-  audio.unlock();
+  if (trapDialogFocus(event)) return;
+  if (!event.repeat) audio.unlock();
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
-  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) event.preventDefault();
-  input.keys.add(key);
-  if (event.code === "Space") requestDash();
-  if (state.mode === "upgrade" && /^[1-3]$/.test(key)) {
+  const controlTarget = isControlTarget(event.target);
+  const gameplayControlKey = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key);
+  if (state.mode === "playing" && gameplayControlKey && !controlTarget) event.preventDefault();
+  if (state.mode === "playing") input.keys.add(key);
+  if (!event.repeat && !controlTarget && event.code === "Space") requestDash();
+  if (!event.repeat && state.mode === "upgrade" && /^[1-3]$/.test(key)) {
     const option = state.upgradeOptions[Number(key) - 1];
     if (option) chooseUpgrade(option.id);
   }
-  if (key === "p" || event.key === "Escape") {
+  if (!event.repeat && (key === "p" || event.key === "Escape")) {
     if (state.mode === "playing") pauseGame();
     else if (state.mode === "paused") resumeGame();
   }
@@ -2241,6 +2485,12 @@ function setupInput() {
   window.addEventListener("blur", () => {
     input.keys.clear();
     resetJoystick();
+    if (state.mode === "playing") pauseGame();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && state.mode === "playing") pauseGame();
+  });
+  window.addEventListener("pagehide", () => {
     if (state.mode === "playing") pauseGame();
   });
   dom.primaryButton.addEventListener("click", () => {
@@ -2291,48 +2541,49 @@ function resize() {
 }
 
 function animate() {
-  const realDt = Math.min(clock.getDelta(), 0.05);
+  const rawWallDt = clock.getDelta();
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
-  const dt = realDt * simulationScale;
+  const { wallDt, simDt } = computeFrameDeltas(rawWallDt, simulationScale);
   if (state.slowMotionTimer > 0) {
-    state.slowMotionTimer = Math.max(0, state.slowMotionTimer - realDt);
+    state.slowMotionTimer = Math.max(0, state.slowMotionTimer - wallDt);
     if (state.slowMotionTimer <= 0) state.slowMotionScale = 1;
   }
   if (state.mode === "playing") {
-    state.elapsed += realDt;
-    const runDeadline = state.bossDeadline ?? GAME.duration;
-    state.timeLeft = Math.max(0, runDeadline - state.elapsed);
-    state.dashTimer = Math.max(0, state.dashTimer - dt);
-    state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - dt);
-    state.hurtInvuln = Math.max(0, state.hurtInvuln - dt);
-    state.overdriveTimer = Math.max(0, state.overdriveTimer - dt);
-    input.dashBuffer = Math.max(0, input.dashBuffer - dt);
+    state.elapsed += wallDt;
+    state.dashTimer = Math.max(0, state.dashTimer - simDt);
+    state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - simDt);
+    state.hurtInvuln = Math.max(0, state.hurtInvuln - simDt);
+    state.overdriveTimer = Math.max(0, state.overdriveTimer - simDt);
+    input.dashBuffer = Math.max(0, input.dashBuffer - simDt);
     const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
-    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (dt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
-    state.comboTimer = Math.max(0, state.comboTimer - dt);
+    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
+    state.comboTimer = Math.max(0, state.comboTimer - simDt);
     if (state.comboTimer <= 0 && state.combo > 0) {
       clearCombo();
     }
     updateStage();
-    if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover");
+    const countdownTarget = state.bossDeadline ?? GAME.bossStart;
+    state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
+    if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
     if (state.mode === "playing") {
-      updatePlayer(dt);
-      updateShards(dt);
-      updateEnemies(dt);
-      if (state.mode === "playing") updateSpawning(dt);
-      updateParticles(dt);
-      updateRipples(dt);
-      updateTrails(dt);
+      updatePlayer(simDt);
+      updateShards(simDt);
+      updateEnemies(simDt);
+      if (state.mode === "playing") updateSpawning(simDt);
+      updateParticles(simDt);
+      updateRipples(simDt);
+      updateTrails(simDt);
     }
   } else {
-    updateParticles(realDt);
-    updateRipples(realDt);
-    updateTrails(realDt);
+    const idleSimDt = Math.min(wallDt, 0.05);
+    updateParticles(idleSimDt);
+    updateRipples(idleSimDt);
+    updateTrails(idleSimDt);
   }
   const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / GAME.overdriveEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / MAX_ENEMIES) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
-  updateVisuals(realDt);
+  updateVisuals(wallDt);
   renderer.render(scene, camera);
 }
 

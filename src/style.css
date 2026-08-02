@@ -429,7 +429,8 @@ canvas {
   transform-origin: center;
 }
 
-.floating-text.medium {
+.floating-text.medium,
+.floating-text.nearMiss {
   font-size: clamp(17px, 2.1vw, 23px);
 }
 
@@ -1215,6 +1216,42 @@ kbd {
 
   .upgrade-description {
     line-height: 1.3;
+  }
+}
+
+@media (pointer: coarse) {
+  #mission-panel {
+    display: block;
+    bottom: calc(max(28px, env(safe-area-inset-bottom)) + 128px);
+    left: var(--safe-left);
+    width: min(280px, calc(100vw - var(--safe-left) - var(--safe-right)));
+    padding: 9px 11px 10px;
+    pointer-events: none;
+  }
+
+  #mission-panel strong {
+    margin: 1px 0 6px;
+    overflow: hidden;
+    font-size: 14px;
+    line-height: 1.15;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #mission-panel small,
+  #overdrive-label {
+    font-size: 9px;
+  }
+
+  #overdrive-label {
+    margin-top: 6px;
+  }
+}
+
+@media (pointer: coarse) and (max-width: 480px) {
+  #mission-panel {
+    bottom: calc(max(20px, env(safe-area-inset-bottom)) + 120px);
+    width: min(240px, calc(100vw - var(--safe-left) - var(--safe-right)));
   }
 }
 

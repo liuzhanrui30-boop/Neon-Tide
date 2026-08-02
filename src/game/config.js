@@ -6,10 +6,15 @@ const freeze = (value) => {
   return value;
 };
 
+const STAGE_BOUNDARIES = [0, 18, 38, 53];
+const BOSS_WINDOW = 18;
+
 export const GAME = freeze({
   version: '2.0.0',
-  duration: 65,
-  stageBoundaries: [0, 18, 38, 53],
+  bossStart: STAGE_BOUNDARIES.at(-1),
+  bossWindow: BOSS_WINDOW,
+  duration: STAGE_BOUNDARIES.at(-1) + BOSS_WINDOW,
+  stageBoundaries: STAGE_BOUNDARIES,
   maxEnemies: 24,
   maxParticles: 220,
   maxTrailNodes: 36,
@@ -39,7 +44,7 @@ export const UPGRADES = freeze([
   { id: 'echo-shield', name: 'Echo Shield', description: 'Extend dash invulnerability.', effect: 0.08 },
   { id: 'magnet-field', name: 'Magnet Field', description: 'Collect pickups from farther away.', effect: 0.25 },
   { id: 'overclock', name: 'Overclock', description: 'Charge overdrive more quickly.', effect: 0.2 },
-  { id: 'repair-swarm', name: 'Repair Swarm', description: 'Recover a little health after breaks.', effect: 1 },
+  { id: 'repair-swarm', name: 'Repair Swarm', description: 'Restore 1 hull now and raise maximum hull to 4.', effect: 1 },
 ]);
 
 export const REWARDS = freeze({

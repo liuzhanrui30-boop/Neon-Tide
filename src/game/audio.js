@@ -27,7 +27,7 @@ function setParam(param, method, ...args) {
 
 /** Owns the game's Web Audio graph. Creation is deliberately deferred to unlock(). */
 export class NeonAudio {
-  constructor() {
+  constructor({ contextFactory = null } = {}) {
     this.context = null;
     this.masterGain = null;
     this.muted = false;
@@ -35,16 +35,18 @@ export class NeonAudio {
     this.nextBeatTime = 0;
     this._beatInitialized = false;
     this._unlocked = false;
+    this._contextFactory = contextFactory;
   }
 
   unlock() {
     if (this.context) {
       if (this.context.state === 'suspended' && typeof this.context.resume === 'function') {
-        Promise.resolve(this.context.resume()).catch(() => {});
+        this.suspendBeat();
+        Promise.resolve(this.context.resume()).then(() => this.suspendBeat()).catch(() => {});
       }
       return true;
     }
-    const AudioContextClass = globalThis.AudioContext || globalThis.webkitAudioContext;
+    const AudioContextClass = this._contextFactory || globalThis.AudioContext || globalThis.webkitAudioContext;
     if (typeof AudioContextClass !== 'function') return false;
     try {
       this.context = new AudioContextClass();
@@ -53,7 +55,8 @@ export class NeonAudio {
       setParam(this.masterGain.gain, 'setValueAtTime', this.muted ? 0 : 0.7, this.context.currentTime || 0);
       this._unlocked = true;
       if (this.context.state === 'suspended' && typeof this.context.resume === 'function') {
-        Promise.resolve(this.context.resume()).catch(() => {});
+        this.suspendBeat();
+        Promise.resolve(this.context.resume()).then(() => this.suspendBeat()).catch(() => {});
       }
       return true;
     } catch {
@@ -65,13 +68,20 @@ export class NeonAudio {
 
   setMuted(muted) {
     this.muted = Boolean(muted);
-    if (this.masterGain && this.context && this.context.state !== 'suspended') {
-      setParam(this.masterGain.gain, 'setTargetAtTime', this.muted ? 0 : 0.7, this.context.currentTime || 0, 0.015);
+    this.suspendBeat();
+    if (this.masterGain && this.context && this.context.state !== 'closed') {
+      try {
+        setParam(this.masterGain.gain, 'setTargetAtTime', this.muted ? 0 : 0.7, this.context.currentTime || 0, 0.015);
+      } catch {
+        // Audio may close between a UI event and the gain update; mute state still remains authoritative.
+      }
     }
   }
 
   setStage(index) {
-    this.stageIndex = Math.round(clamp(index, 0, STAGE_BEAT_INTERVALS.length - 1));
+    const nextStageIndex = Math.round(clamp(index, 0, STAGE_BEAT_INTERVALS.length - 1));
+    if (nextStageIndex !== this.stageIndex) this.suspendBeat();
+    this.stageIndex = nextStageIndex;
   }
 
   update(realTime = 0, intensity = 0, mode = 'playing') {
@@ -79,9 +89,15 @@ export class NeonAudio {
       this.suspendBeat();
       return;
     }
-    if (!this._ready()) return;
+    if (!this._ready()) {
+      this.suspendBeat();
+      return;
+    }
     const now = Number(this.context.currentTime) || 0;
     const interval = STAGE_BEAT_INTERVALS[this.stageIndex];
+    if (this._beatInitialized && (!Number.isFinite(this.nextBeatTime) || this.nextBeatTime < now)) {
+      this.suspendBeat();
+    }
     if (!this._beatInitialized) {
       const phase = Math.max(0, Number(realTime) || 0) % interval;
       this.nextBeatTime = now + (interval - phase) % interval;
