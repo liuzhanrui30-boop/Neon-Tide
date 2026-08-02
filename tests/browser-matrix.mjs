@@ -702,6 +702,43 @@ async function reducedMotionScenario() {
   });
 }
 
+async function renderQualityScenario() {
+  await withPage('render-quality-desktop', {}, async (page) => {
+    page.requireDev('desktop render-quality probe');
+    await page.startGame();
+    const quality = await page.gameEvaluate(`return {
+      tier:document.documentElement.dataset.renderQuality,
+      selected:renderQuality.tier,
+      composer:Boolean(postProcessing && postProcessing.enabled),
+      bloom:Boolean(postProcessing && postProcessing.bloomPass),
+      output:Boolean(postProcessing && postProcessing.outputPass),
+    }`);
+    assert.deepEqual(quality, { tier:'desktop', selected:'desktop', composer:true, bloom:true, output:true });
+  });
+
+  await withPage('render-quality-coarse', { width:1024, height:768, mobile:true, touch:true }, async (page) => {
+    page.requireDev('coarse render-quality probe');
+    await page.startGame();
+    const quality = await page.gameEvaluate(`return {
+      tier:document.documentElement.dataset.renderQuality,
+      selected:renderQuality.tier,
+      composer:Boolean(postProcessing && postProcessing.enabled),
+    }`);
+    assert.deepEqual(quality, { tier:'mobile', selected:'mobile', composer:false });
+  });
+
+  await withPage('render-quality-reduced-motion', { reducedMotion:true }, async (page) => {
+    page.requireDev('reduced-motion render-quality probe');
+    await page.startGame();
+    const quality = await page.gameEvaluate(`return {
+      tier:document.documentElement.dataset.renderQuality,
+      selected:renderQuality.tier,
+      composer:Boolean(postProcessing && postProcessing.enabled),
+    }`);
+    assert.deepEqual(quality, { tier:'reduced-motion', selected:'reduced-motion', composer:false });
+  });
+}
+
 async function repairAndAriaScenario() {
   await withPage('repair-aria', {}, async (page) => {
     page.requireDev('Repair Swarm and combat ARIA probe');
@@ -1058,6 +1095,7 @@ const scenarios = [
   ['phone coarse layout 390x844', () => coarseLayoutScenario('phone-390x844', 390, 844, 2)],
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
   ['reduced-motion warnings', reducedMotionScenario],
+  ['desktop, coarse, and reduced-motion render quality', renderQualityScenario],
   ['Repair Swarm and combat ARIA', repairAndAriaScenario],
   ['replay cleanup and geometry stability', replayCleanupScenario],
   ['boss victory', victoryScenario],

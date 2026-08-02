@@ -79,6 +79,11 @@ canvas {
   touch-action: none;
 }
 
+canvas:focus-visible {
+  outline: 2px solid var(--cyan-bright);
+  outline-offset: -5px;
+}
+
 #vignette,
 #flash {
   position: absolute;
@@ -1102,7 +1107,9 @@ kbd {
   }
 
   #boss-panel {
-    top: calc(var(--safe-top) + 96px);
+    /* The phase ticks + formation label make the two HUD rows taller on
+       phones; keep the boss bar below both rows instead of covering stats. */
+    top: calc(var(--safe-top) + 144px);
     width: calc(100% - var(--safe-left) - var(--safe-right));
     padding: 8px 11px 10px;
   }

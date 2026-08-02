@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const COMPACT_VIEWPORT = 900;
 const MOBILE_PIXEL_RATIO = 1.5;
@@ -68,6 +69,7 @@ export function createPostProcessing({ renderer, scene, camera, quality, width, 
     enabled: false,
     composer: null,
     bloomPass: null,
+    outputPass: null,
     render() { renderer.render(scene, camera); },
     resize() {},
     dispose() {},
@@ -84,13 +86,16 @@ export function createPostProcessing({ renderer, scene, camera, quality, width, 
     0.38,
     0.72,
   );
+  const outputPass = new OutputPass();
   composer.addPass(renderPass);
   composer.addPass(bloomPass);
+  composer.addPass(outputPass);
 
   return {
     enabled: true,
     composer,
     bloomPass,
+    outputPass,
     render() { composer.render(); },
     resize(nextWidth, nextHeight, pixelRatio = quality.pixelRatio) {
       composer.setPixelRatio(pixelRatio);
@@ -98,6 +103,8 @@ export function createPostProcessing({ renderer, scene, camera, quality, width, 
       bloomPass.setSize(nextWidth, nextHeight);
     },
     dispose() {
+      outputPass.dispose();
+      bloomPass.dispose();
       composer.dispose();
     },
   };

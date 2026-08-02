@@ -10,6 +10,9 @@ import {
   computeRank,
   computeReward,
   computeSpawnBudget,
+  capActiveCount,
+  clampFinite,
+  finiteOr,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
 import { FORMATION_TEMPLATES } from "./game/config.js";
@@ -44,6 +47,8 @@ const BOSS_TELEGRAPH_TIME = 0.68;
 const TRAUMA_DECAY = 1.35;
 const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
+const MAX_RIPPLES = 64;
+const MAX_FLOATING_TEXTS = 24;
 
 function getEnemyCap() {
   return getActiveEnemyCap({
@@ -283,6 +288,15 @@ const trails = [];
 const trailPool = [];
 const floatingTexts = [];
 const flowLines = [];
+const inputListeners = [];
+let inputBound = false;
+const runtimeStats = {
+  inputSetupCount: 0,
+  composerRefreshCount: 0,
+  composerDisposeCount: 0,
+  finiteGuards: 0,
+  orphanGuards: 0,
+};
 
 const scenery = {
   backdrop: null,
@@ -687,7 +701,6 @@ function createPlayer() {
       new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.72 - index * 0.12, depthWrite: false, blending: THREE.AdditiveBlending }),
     );
     segment.position.set(x, -0.45, z);
-    segment.rotation.z = Math.PI;
     return segment;
   });
 
@@ -813,9 +826,12 @@ function spawnTrail(force = false) {
 }
 
 function spawnParticleBurst(position, color, count = 12, speed = 3.2, size = 1) {
-  for (let i = 0; i < count; i += 1) {
+  if (!position || particles.length >= MAX_PARTICLES) return 0;
+  const requested = capActiveCount(count, MAX_PARTICLES - particles.length);
+  let spawned = 0;
+  for (let i = 0; i < requested; i += 1) {
     const particle = particlePool.find((candidate) => !candidate.mesh.visible);
-    if (!particle) return;
+    if (!particle) break;
     const angle = Math.random() * TAU;
     const force = speed * (0.38 + Math.random() * 0.8);
     particle.life = particle.maxLife = 0.28 + Math.random() * 0.42;
@@ -826,11 +842,15 @@ function spawnParticleBurst(position, color, count = 12, speed = 3.2, size = 1) 
     particle.mesh.material.opacity = 0.9;
     particle.mesh.visible = true;
     particles.push(particle);
+    spawned += 1;
   }
+  return spawned;
 }
 
 function spawnRipple(position, color, scale = 1) {
   if (state.reducedMotion) return null;
+  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null;
+  while (ripples.length >= MAX_RIPPLES) removeRippleAt(0);
   const material = new THREE.MeshBasicMaterial({
     color,
     transparent: true,
@@ -844,6 +864,15 @@ function spawnRipple(position, color, scale = 1) {
   mesh.scale.setScalar(scale * 0.4);
   world.add(mesh);
   ripples.push({ mesh, life: 0.44, maxLife: 0.44, grow: scale * 2.7 });
+}
+
+function removeRippleAt(index) {
+  const ripple = ripples[index];
+  if (!ripple) return false;
+  world.remove(ripple.mesh);
+  ripple.mesh.material.dispose();
+  ripples.splice(index, 1);
+  return true;
 }
 
 function addTrauma(amount) {
@@ -901,7 +930,10 @@ function refreshRenderQuality() {
   renderer.setPixelRatio(renderQuality.pixelRatio);
   document.documentElement.dataset.renderQuality = renderQuality.tier;
   if (!changed && postProcessing) return renderQuality;
-  postProcessing?.dispose();
+  if (postProcessing) {
+    postProcessing.dispose();
+    runtimeStats.composerDisposeCount += 1;
+  }
   postProcessing = createPostProcessing({
     renderer,
     scene,
@@ -910,6 +942,7 @@ function refreshRenderQuality() {
     width: window.innerWidth,
     height: window.innerHeight,
   });
+  runtimeStats.composerRefreshCount += 1;
   return renderQuality;
 }
 
@@ -957,8 +990,8 @@ function syncBossProgress(boss = enemies.find((enemy) => enemy.type === "boss" &
 }
 
 function showFloatingText(text, position, tone = "cyan", tier = "small") {
-  if (!text || !position) return null;
-  if (floatingTexts.length >= 32) floatingTexts.shift().element.remove();
+  if (!text || !position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) return null;
+  if (floatingTexts.length >= MAX_FLOATING_TEXTS) floatingTexts.shift().element.remove();
   const element = document.createElement("span");
   element.className = `floating-text ${tone} ${tier}`;
   element.textContent = text;
@@ -2001,16 +2034,16 @@ function updatePlayer(dt) {
   if (state.reducedMotion) {
     player.group.scale.set(1, 1, 1);
     player.flame.scale.setScalar(1);
-    player.core.scale.setScalar(1);
-    player.coreGlow.scale.setScalar(1);
+    player.core.scale.set(1, 0.72, 1);
+    player.coreGlow.scale.set(1.22, 0.76, 1);
   } else {
     const targetScale = state.dashTimer > 0 ? 1.22 : 1;
     player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
     player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
     player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
     const corePulse = 1 + Math.sin(state.elapsed * (state.overdriveTimer > 0 ? 16 : 7)) * (state.overdriveTimer > 0 ? 0.16 : 0.08);
-    player.core.scale.setScalar(corePulse);
-    player.coreGlow.scale.setScalar(corePulse * (state.overdriveTimer > 0 ? 1.42 : 1.12));
+    player.core.scale.set(1.12 * corePulse, 0.72 * corePulse, 1);
+    player.coreGlow.scale.set(1.22 * corePulse * (state.overdriveTimer > 0 ? 1.42 : 1.12), 0.76 * corePulse, 1);
   }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
   player.flameSegments.forEach((segment, index) => {
@@ -2909,11 +2942,95 @@ function updateRipples(dt) {
     ripple.mesh.scale.setScalar(0.4 + progress * ripple.grow);
     ripple.mesh.material.opacity = (1 - progress) * 0.72;
     if (ripple.life <= 0) {
-      world.remove(ripple.mesh);
-      ripple.mesh.material.dispose();
-      ripples.splice(i, 1);
+      removeRippleAt(i);
     }
   }
+}
+
+function sanitizeRuntimeState() {
+  let corrected = false;
+  const finite = (value, fallback) => {
+    if (Number.isFinite(value)) return value;
+    corrected = true;
+    return fallback;
+  };
+  const finiteOrInfinity = (value, fallback) => {
+    if (value === Infinity) return value;
+    return finite(value, fallback);
+  };
+  state.elapsed = Math.max(0, finite(state.elapsed, 0));
+  state.timeLeft = Math.max(0, finite(state.timeLeft, GAME.bossStart));
+  // Infinity is an intentional sentinel during the boss window.
+  state.enemySpawnTimer = finiteOrInfinity(state.enemySpawnTimer, 0);
+  state.formationTimer = finite(state.formationTimer, 0);
+  state.shardSpawnTimer = finite(state.shardSpawnTimer, 0);
+  state.dashTimer = Math.max(0, finite(state.dashTimer, 0));
+  state.dashInvulnTimer = Math.max(0, finite(state.dashInvulnTimer, 0));
+  state.hurtInvuln = Math.max(0, finite(state.hurtInvuln, 0));
+  state.overdriveTimer = Math.max(0, finite(state.overdriveTimer, 0));
+  state.trauma = clampFinite(state.trauma, 0, 1, 0);
+  state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
+  state.slowMotionTimer = Math.max(0, finite(state.slowMotionTimer, 0));
+  state.zoomPunch = Math.max(0, finite(state.zoomPunch, 0));
+  state.dashCharges.forEach((charge, index) => {
+    state.dashCharges[index] = clampFinite(charge, 0, 1, 0);
+  });
+  [player.position, player.velocity, player.facing].forEach((vector) => {
+    vector.x = finite(vector.x, 0);
+    vector.y = finite(vector.y, 0);
+  });
+
+  for (let index = enemies.length - 1; index >= 0; index -= 1) {
+    const enemy = enemies[index];
+    if (!enemy || enemy.dead || !enemy.group) continue;
+    const position = enemy.group.position;
+    const velocity = enemy.velocity;
+    const valid = Number.isFinite(position.x) && Number.isFinite(position.y)
+      && Number.isFinite(velocity.x) && Number.isFinite(velocity.y)
+      && Number.isFinite(enemy.hp) && Number.isFinite(enemy.stateTimer);
+    if (!valid) {
+      enemy.dead = true;
+      runtimeStats.orphanGuards += 1;
+      removeEnemy(index);
+      corrected = true;
+      continue;
+    }
+    position.x = finite(position.x, 0);
+    position.y = finite(position.y, 0);
+    velocity.x = finite(velocity.x, 0);
+    velocity.y = finite(velocity.y, 0);
+    enemy.hp = finite(enemy.hp, 0);
+    enemy.stateTimer = finite(enemy.stateTimer, 0);
+  }
+  const cap = getEnemyCap();
+  while (enemies.length > cap) {
+    removeEnemy(enemies.length - 1);
+    runtimeStats.orphanGuards += 1;
+    corrected = true;
+  }
+  for (let index = particles.length - 1; index >= 0; index -= 1) {
+    const particle = particles[index];
+    if (!particle || !particle.mesh || !Number.isFinite(particle.life) || !Number.isFinite(particle.maxLife)
+      || !Number.isFinite(particle.velocity.x) || !Number.isFinite(particle.velocity.y)) {
+      if (particle?.mesh) particle.mesh.visible = false;
+      particles.splice(index, 1);
+      corrected = true;
+    }
+  }
+  while (particles.length > MAX_PARTICLES) {
+    const particle = particles.pop();
+    if (particle?.mesh) particle.mesh.visible = false;
+    corrected = true;
+  }
+  while (trails.length > MAX_TRAIL_NODES) {
+    const trail = trails.pop();
+    if (trail?.group) trail.group.visible = false;
+    corrected = true;
+  }
+  state.stats.activeHazards = Math.max(0, finite(state.stats.activeHazards, 0));
+  state.stats.enemyPeak = Math.max(0, finite(state.stats.enemyPeak, enemies.length));
+  if (corrected) runtimeStats.finiteGuards += 1;
+  return corrected;
 }
 
 function sampleShakeAxis(seed, time) {
@@ -3156,31 +3273,44 @@ function resetJoystick() {
   dom.joystickKnob.style.transform = "translate(-50%, -50%)";
 }
 
+function bindInputListener(target, type, listener, options) {
+  target.addEventListener(type, listener, options);
+  inputListeners.push(() => target.removeEventListener(type, listener, options));
+}
+
+function teardownInput() {
+  inputListeners.splice(0).forEach((remove) => remove());
+  inputBound = false;
+}
+
 function setupInput() {
-  window.addEventListener("keydown", onKeyDown, { passive: false });
-  window.addEventListener("keyup", onKeyUp);
-  window.addEventListener("blur", () => {
+  if (inputBound) return false;
+  inputBound = true;
+  runtimeStats.inputSetupCount += 1;
+  bindInputListener(window, "keydown", onKeyDown, { passive: false });
+  bindInputListener(window, "keyup", onKeyUp);
+  bindInputListener(window, "blur", () => {
     input.keys.clear();
     resetJoystick();
     if (state.mode === "playing") pauseGame();
   });
-  document.addEventListener("visibilitychange", () => {
+  bindInputListener(document, "visibilitychange", () => {
     if (document.hidden && state.mode === "playing") pauseGame();
   });
-  window.addEventListener("pagehide", () => {
+  bindInputListener(window, "pagehide", () => {
     if (state.mode === "playing") pauseGame();
   });
-  dom.primaryButton.addEventListener("click", () => {
+  bindInputListener(dom.primaryButton, "click", () => {
     audio.unlock();
     if (state.mode === "menu" || state.mode === "gameover" || state.mode === "victory") startGame();
     else if (state.mode === "paused") resumeGame();
   });
-  dom.pauseButton.addEventListener("click", () => {
+  bindInputListener(dom.pauseButton, "click", () => {
     audio.unlock();
     if (state.mode === "playing") pauseGame();
     else if (state.mode === "paused") resumeGame();
   });
-  dom.muteButton.addEventListener("click", () => {
+  bindInputListener(dom.muteButton, "click", () => {
     audio.unlock();
     state.muted = !state.muted;
     audio.setMuted(state.muted);
@@ -3188,27 +3318,28 @@ function setupInput() {
     dom.muteButton.setAttribute("aria-label", state.muted ? "取消静音" : "静音");
     dom.muteButton.textContent = state.muted ? "×" : "♪";
   });
-  dom.upgradeOptions.addEventListener("click", (event) => {
+  bindInputListener(dom.upgradeOptions, "click", (event) => {
     const button = event.target.closest("button[data-upgrade-id]");
     if (button) chooseUpgrade(button.dataset.upgradeId);
   });
-  dom.dashButton.addEventListener("pointerdown", (event) => {
+  bindInputListener(dom.dashButton, "pointerdown", (event) => {
     event.preventDefault();
     audio.unlock();
     requestDash();
   });
-  dom.joystick.addEventListener("pointerdown", (event) => {
+  bindInputListener(dom.joystick, "pointerdown", (event) => {
     event.preventDefault();
     audio.unlock();
     input.joystickPointerId = event.pointerId;
     dom.joystick.setPointerCapture(event.pointerId);
     setJoystickFromEvent(event);
   });
-  dom.joystick.addEventListener("pointermove", (event) => {
+  bindInputListener(dom.joystick, "pointermove", (event) => {
     if (event.pointerId === input.joystickPointerId) setJoystickFromEvent(event);
   });
-  dom.joystick.addEventListener("pointerup", resetJoystick);
-  dom.joystick.addEventListener("pointercancel", resetJoystick);
+  bindInputListener(dom.joystick, "pointerup", resetJoystick);
+  bindInputListener(dom.joystick, "pointercancel", resetJoystick);
+  return true;
 }
 
 function resize() {
@@ -3222,6 +3353,7 @@ function animate() {
   const rawWallDt = clock.getDelta();
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
   const { wallDt, simDt } = computeFrameDeltas(rawWallDt, simulationScale);
+  sanitizeRuntimeState();
   if (state.slowMotionTimer > 0) {
     state.slowMotionTimer = Math.max(0, state.slowMotionTimer - wallDt);
     if (state.slowMotionTimer <= 0) state.slowMotionScale = 1;
@@ -3262,6 +3394,7 @@ function animate() {
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(wallDt);
+  sanitizeRuntimeState();
   postProcessing?.render();
 }
 

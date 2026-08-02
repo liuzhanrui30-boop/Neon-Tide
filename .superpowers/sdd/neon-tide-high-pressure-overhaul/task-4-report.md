@@ -23,6 +23,16 @@ Complete. The device-quality policy, renderer integration, visual hierarchy, and
   - the ocean field now has three distinct fluid-line depths plus two fog-light layers;
   - HUD includes phase tick marks, a short-lived formation label, fine separators, and tabular numerals.
 - Reduced motion remains discrete/static for camera motion, telegraphs, fog, reticle rotation, and post-processing.
+- Follow-up review fixes:
+  - Composer now includes `OutputPass` for the final sRGB color transform;
+  - disposal explicitly frees `OutputPass` and `UnrealBloomPass` resources before Composer targets;
+  - phone boss HUD is moved below the expanded two-row HUD;
+  - browser matrix probes assert desktop/coarse/reduced quality tiers and Composer state;
+  - exhaust direction and player core ellipse are corrected.
+- The shared `main.js` snapshot also carries the companion finite-state/pool
+  guard wave from Task 5 (helpers, input teardown, and frame sanitization);
+  those changes are behavior-preserving and are tracked separately in the
+  final review against commit `e7e7535`.
 
 ## Validation
 
