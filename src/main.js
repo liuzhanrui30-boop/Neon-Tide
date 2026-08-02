@@ -1454,10 +1454,8 @@ function destroyEnemy(enemy, source) {
 
 function damagePlayer(enemy) {
   state.health -= 1;
-  state.energy = Math.max(0, state.energy - 18);
   state.hurtInvuln = HURT_INVULNERABILITY;
   clearCombo();
-  state.score = Math.max(0, state.score - 12);
   player.velocity.multiplyScalar(-0.3);
   const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
   spawnParticleBurst(hitPosition, 0xff506f, 22, 4.2, 1.1);
