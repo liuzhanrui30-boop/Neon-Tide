@@ -739,6 +739,45 @@ async function renderQualityScenario() {
   });
 }
 
+async function runtimeGuardScenario() {
+  await withPage('runtime-guards', {}, async (page) => {
+    page.requireDev('runtime guard, cap, and listener lifecycle probe');
+    await page.startGame();
+    const injected = await page.gameEvaluate(`
+      const before={setup:runtimeStats.inputSetupCount,refresh:runtimeStats.composerRefreshCount};
+      setupInput();
+      setupInput();
+      clearWorldEntities();
+      const bad=spawnEnemy('chaser',new THREE.Vector2(0,0));
+      bad.group.position.x=NaN;
+      bad.velocity.y=Infinity;
+      $player.position.x=NaN;
+      $state.enemySpawnTimer=Infinity;
+      return {before,afterSetup:runtimeStats.inputSetupCount};
+    `);
+    assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
+    await sleep(100);
+    const healed = await page.gameEvaluate(`return {
+      guards:runtimeStats.finiteGuards,
+      orphans:runtimeStats.orphanGuards,
+      cleanup:$state.stats.activeCleanupCount,
+      enemies:$enemies.length,
+      playerFinite:Number.isFinite($player.position.x)&&Number.isFinite($player.position.y),
+      spawnSentinel:Number.isFinite($state.enemySpawnTimer)?'finite':String($state.enemySpawnTimer),
+      particles:particles.length,
+      trails:trails.length,
+    }`);
+    assert.ok(healed.guards > 0, `finite guard did not run: ${JSON.stringify(healed)}`);
+    assert.ok(healed.orphans > 0 && healed.cleanup > 0, `orphan entity was not cleaned: ${JSON.stringify(healed)}`);
+    assert.equal(healed.enemies, 0);
+    assert.equal(healed.playerFinite, true);
+    assert.equal(healed.spawnSentinel, 'Infinity');
+    assert.ok(healed.particles <= 300 && healed.trails <= 48);
+    const resized = await page.gameEvaluate(`const before=runtimeStats.composerRefreshCount;resize();return {before,after:runtimeStats.composerRefreshCount}`);
+    assert.deepEqual(resized, { before: injected.before.refresh, after: injected.before.refresh }, 'resize recreated Composer');
+  });
+}
+
 async function repairAndAriaScenario() {
   await withPage('repair-aria', {}, async (page) => {
     page.requireDev('Repair Swarm and combat ARIA probe');
@@ -1070,8 +1109,9 @@ async function bossPhaseTwoScenario() {
         advance(0.1);
         flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
       }
-      return {seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
+      return {mode:$state.mode,seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
     `);
+    assert.equal(attacks.mode, 'playing', `phase 2 live hazard loop ended before victory probe: ${JSON.stringify(attacks)}`);
     assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'trianglePulse', 'flankSwarm']);
     assert.ok(attacks.seen.every((attack) => attack.telegraph >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.seen)}`);
     assert.ok(attacks.seen.find((attack) => attack.kind === 'sweepBeam')?.line, 'sweep beam telegraph was not visible');
@@ -1082,6 +1122,28 @@ async function bossPhaseTwoScenario() {
     assert.ok(attacks.stats.some((attack) => attack.kind === 'sweepBeam' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'trianglePulse' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'flankSwarm' && attack.phase === 2));
+
+    const victory = await page.gameEvaluate(`
+      const before=finishRun('victory','bossDestroyed');
+      return {accepted:before,mode:$state.mode,enemies:$enemies.length,hazards:$state.stats.activeHazards,reason:$state.terminalReason};
+    `);
+    assert.deepEqual(victory, { accepted:true, mode:'victory', enemies:0, hazards:0, reason:'bossDestroyed' });
+    await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    await sleep(100);
+    const restart = await page.gameEvaluate(`return {
+      mode:$state.mode,bossPhase:$state.stats.bossPhase,bossAttackLog:$state.stats.bossAttackLog.length,
+      bossAttackTelegraphs:$state.stats.bossAttackTelegraphs.length,enemies:$enemies.length,hazards:$state.stats.activeHazards,
+      bossSpawned:$state.bossSpawned,bossTriggered:$state.bossTriggered,
+    }`);
+    assert.deepEqual(restart, {
+      mode:'playing',bossPhase:1,bossAttackLog:0,bossAttackTelegraphs:0,enemies:0,hazards:0,
+      bossSpawned:false,bossTriggered:false,
+    });
+
+    const restartedBoss = await jumpToBoss(page);
+    assert.equal(restartedBoss.stage, 3);
     await page.gameEvaluate('$state.elapsed=$state.bossDeadline-0.05;return $state.elapsed', { stallMs: WALL_STALL_MS });
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('WINDOW CLOSED')`);
     const cleanup = await page.gameEvaluate('return {enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode}');
@@ -1096,6 +1158,7 @@ const scenarios = [
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
   ['reduced-motion warnings', reducedMotionScenario],
   ['desktop, coarse, and reduced-motion render quality', renderQualityScenario],
+  ['runtime finite guards and listener lifecycle', runtimeGuardScenario],
   ['Repair Swarm and combat ARIA', repairAndAriaScenario],
   ['replay cleanup and geometry stability', replayCleanupScenario],
   ['boss victory', victoryScenario],
