@@ -31,6 +31,23 @@ const UPGRADE_GRACE_PERIOD = 0.8;
 const MAX_MINES = 4;
 const BOSS_DASH_DAMAGE = 5;
 const BOSS_TELEGRAPH_TIME = 0.68;
+const TRAUMA_DECAY = 1.35;
+const MAX_TRAIL_NODES = Math.min(GAME.maxTrailNodes, 36);
+const MAX_PARTICLES = Math.min(GAME.maxParticles, 220);
+const MAX_ENEMIES = Math.min(GAME.maxEnemies, 24);
+const STAGE_PALETTES = Object.freeze([
+  { background: 0x030b18, grid: 0x124b63, fog: 0x0d5477, ring: 0x36e0ff, primary: 0x36e0ff, secondary: 0x6677ff },
+  { background: 0x0b061b, grid: 0x49306c, fog: 0x4e1f75, ring: 0xa56bff, primary: 0xa56bff, secondary: 0xff4fd8 },
+  { background: 0x15050f, grid: 0x6c244a, fog: 0x7b1f3a, ring: 0xff4fba, primary: 0xff4fba, secondary: 0xff9f43 },
+  { background: 0x06131a, grid: 0x477a86, fog: 0x3b8996, ring: 0xe7ffff, primary: 0xe7ffff, secondary: 0x64f5ff },
+]);
+const FEEDBACK_TIERS = Object.freeze({
+  small: { trauma: 0.13, slowScale: 1, slowDuration: 0, zoom: 0 },
+  medium: { trauma: 0.38, slowScale: 0.72, slowDuration: 0.045, zoom: 0.018 },
+  large: { trauma: 0.78, slowScale: 0.5, slowDuration: 0.1, zoom: 0.045 },
+});
+const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
+const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
 const OVERDRIVE_MODIFIERS = Object.freeze({
   speed: 1.18,
   score: 1.5,
@@ -93,6 +110,11 @@ const dom = {
   dashRing: document.querySelector("#dash-ring"),
 };
 
+dom.floatingLayer = document.createElement("div");
+dom.floatingLayer.id = "floating-text-layer";
+dom.floatingLayer.setAttribute("aria-hidden", "true");
+dom.root.parentElement.appendChild(dom.floatingLayer);
+
 dom.healthPips = Array.from({ length: 3 }, () => {
   const pip = document.createElement("i");
   dom.health.appendChild(pip);
@@ -133,6 +155,8 @@ const view = {
   halfHeight: WORLD_HEIGHT / 2,
 };
 
+const reducedMotionPreference = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+
 const state = {
   mode: "menu",
   elapsed: 0,
@@ -159,8 +183,11 @@ const state = {
     return this.dashInvulnTimer > 0;
   },
   runFinished: false,
-  shakeTime: 0,
-  shakeStrength: 0,
+  trauma: 0,
+  traumaClock: 0,
+  slowMotionScale: 1,
+  slowMotionTimer: 0,
+  zoomPunch: 0,
   toastTimer: 0,
   stageBannerTimer: 0,
   upgradeTriggered: [false, false],
@@ -176,7 +203,7 @@ const state = {
     breaks: 0,
   },
   cameraLookAhead: new THREE.Vector2(),
-  reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
+  reducedMotion: reducedMotionPreference?.matches ?? false,
 };
 
 const input = {
@@ -195,6 +222,36 @@ const enemies = [];
 const particles = [];
 const particlePool = [];
 const ripples = [];
+const trails = [];
+const trailPool = [];
+const floatingTexts = [];
+const flowLines = [];
+
+const scenery = {
+  backdrop: null,
+  grid: null,
+  glow: null,
+  boundary: null,
+  decorMaterials: [],
+};
+
+const paletteState = {
+  background: new THREE.Color(STAGE_PALETTES[0].background),
+  grid: new THREE.Color(STAGE_PALETTES[0].grid),
+  fog: new THREE.Color(STAGE_PALETTES[0].fog),
+  ring: new THREE.Color(STAGE_PALETTES[0].ring),
+  primary: new THREE.Color(STAGE_PALETTES[0].primary),
+  secondary: new THREE.Color(STAGE_PALETTES[0].secondary),
+  target: STAGE_PALETTES[0],
+  targetColors: {
+    background: new THREE.Color(STAGE_PALETTES[0].background),
+    grid: new THREE.Color(STAGE_PALETTES[0].grid),
+    fog: new THREE.Color(STAGE_PALETTES[0].fog),
+    ring: new THREE.Color(STAGE_PALETTES[0].ring),
+    primary: new THREE.Color(STAGE_PALETTES[0].primary),
+    secondary: new THREE.Color(STAGE_PALETTES[0].secondary),
+  },
+};
 
 const player = {
   group: null,
@@ -202,6 +259,10 @@ const player = {
   glow: null,
   flame: null,
   shield: null,
+  core: null,
+  coreGlow: null,
+  wings: [],
+  trailTimer: 0,
   position: new THREE.Vector2(0, -1.2),
   velocity: new THREE.Vector2(),
   facing: new THREE.Vector2(0, 1),
@@ -240,6 +301,7 @@ const shared = {
   bossOuterGeometry: new THREE.RingGeometry(2.28, 2.42, 64),
   bossMiddleGeometry: new THREE.RingGeometry(1.62, 1.76, 56),
   bossInnerGeometry: new THREE.RingGeometry(1.12, 1.24, 48),
+  bossHaloGeometry: new THREE.RingGeometry(2.72, 2.77, 72),
   bossPulseGeometry: new THREE.RingGeometry(0.94, 1.02, 52),
   telegraphLineGeometry: new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(0, 0, 0),
@@ -309,6 +371,17 @@ function createTriangleGeometry(nose, tailWidth, tailY) {
   return new THREE.ShapeGeometry(shape);
 }
 
+function createWingGeometry() {
+  const shape = new THREE.Shape();
+  shape.moveTo(0.08, 0.25);
+  shape.lineTo(0.7, -0.06);
+  shape.lineTo(0.88, -0.38);
+  shape.lineTo(0.3, -0.26);
+  shape.lineTo(0.02, -0.08);
+  shape.closePath();
+  return new THREE.ShapeGeometry(shape);
+}
+
 shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
 shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
 
@@ -319,6 +392,7 @@ function createBackground() {
   );
   backdrop.position.z = -8;
   backgroundGroup.add(backdrop);
+  scenery.backdrop = backdrop;
 
   const linePositions = [];
   const extent = 45;
@@ -336,6 +410,7 @@ function createBackground() {
   );
   grid.position.z = -4;
   backgroundGroup.add(grid);
+  scenery.grid = grid;
 
   const glow = new THREE.Mesh(
     new THREE.CircleGeometry(7.5, 48),
@@ -349,6 +424,51 @@ function createBackground() {
   );
   glow.position.set(7, 2.5, -3.7);
   backgroundGroup.add(glow);
+  scenery.glow = glow;
+
+  for (let layer = 0; layer < 2; layer += 1) {
+    for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
+      const points = [];
+      const phase = lineIndex * 0.83 + layer * 1.7;
+      for (let pointIndex = 0; pointIndex <= 48; pointIndex += 1) {
+        const x = -18 + (pointIndex / 48) * 36;
+        const y = Math.sin(pointIndex * 0.22 + phase) * (0.58 + layer * 0.22);
+        points.push(new THREE.Vector3(x, y, 0));
+      }
+      const material = new THREE.LineBasicMaterial({
+        color: layer === 0 ? 0x36e0ff : 0x6677ff,
+        transparent: true,
+        opacity: layer === 0 ? 0.075 : 0.12,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      });
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material);
+      line.position.set((lineIndex - 2) * 6.8, -5.2 + lineIndex * 2.55 + layer * 0.7, -3.45 + layer * 0.08);
+      line.rotation.z = layer === 0 ? -0.08 : 0.11;
+      backgroundGroup.add(line);
+      flowLines.push({ line, material, layer, phase, baseX: line.position.x, baseY: line.position.y });
+    }
+  }
+
+  const boundaryPoints = [
+    new THREE.Vector3(-9, -6.25, 0),
+    new THREE.Vector3(9, -6.25, 0),
+    new THREE.Vector3(9, 6.25, 0),
+    new THREE.Vector3(-9, 6.25, 0),
+  ];
+  const boundary = new THREE.LineLoop(
+    new THREE.BufferGeometry().setFromPoints(boundaryPoints),
+    new THREE.LineBasicMaterial({
+      color: 0x36e0ff,
+      transparent: true,
+      opacity: 0.08,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  boundary.position.z = -3.25;
+  backgroundGroup.add(boundary);
+  scenery.boundary = boundary;
 
   const starPositions = [];
   const starColors = [];
@@ -391,6 +511,7 @@ function createBackground() {
     );
     ring.position.set(x, y, 0);
     decorGroup.add(ring);
+    scenery.decorMaterials.push(ring.material);
   }
 }
 
@@ -435,7 +556,32 @@ function createPlayer() {
   );
   shield.visible = false;
 
-  group.add(glow, flame, body, outline, shield);
+  const wingGeometry = createWingGeometry();
+  const wingMaterial = new THREE.MeshBasicMaterial({ color: 0x4aaeff, transparent: true, opacity: 0.92 });
+  const rightWing = new THREE.Mesh(wingGeometry, wingMaterial);
+  const leftWing = new THREE.Mesh(wingGeometry, wingMaterial.clone());
+  rightWing.position.set(0.13, -0.02, -0.01);
+  leftWing.position.set(-0.13, -0.02, -0.01);
+  leftWing.scale.x = -1;
+
+  const coreGlow = new THREE.Mesh(
+    new THREE.CircleGeometry(0.22, 20),
+    new THREE.MeshBasicMaterial({
+      color: 0x64f5ff,
+      transparent: true,
+      opacity: 0.22,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  coreGlow.position.set(0, 0.03, 0.05);
+  const core = new THREE.Mesh(
+    new THREE.CircleGeometry(0.095, 16),
+    new THREE.MeshBasicMaterial({ color: 0xe7ffff })
+  );
+  core.position.set(0, 0.03, 0.07);
+
+  group.add(glow, flame, leftWing, rightWing, body, outline, coreGlow, core, shield);
   world.add(group);
 
   player.group = group;
@@ -443,6 +589,9 @@ function createPlayer() {
   player.glow = glow;
   player.flame = flame;
   player.shield = shield;
+  player.core = core;
+  player.coreGlow = coreGlow;
+  player.wings = [leftWing, rightWing];
   player.position.set(0, -1.2);
   syncPlayerTransform();
 }
@@ -452,7 +601,7 @@ function syncPlayerTransform() {
   player.group.position.y = player.position.y;
 }
 
-function createParticlePool(count = 150) {
+function createParticlePool(count = MAX_PARTICLES) {
   for (let i = 0; i < count; i += 1) {
     const material = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -467,6 +616,52 @@ function createParticlePool(count = 150) {
     world.add(mesh);
     particlePool.push({ mesh, life: 0, maxLife: 0, velocity: new THREE.Vector2() });
   }
+}
+
+function createTrailPool(count = MAX_TRAIL_NODES) {
+  const bodyGeometry = createTriangleGeometry(0.58, 0.34, -0.38);
+  const wingGeometry = createWingGeometry();
+  for (let i = 0; i < count; i += 1) {
+    const group = new THREE.Group();
+    const makeMaterial = () => new THREE.MeshBasicMaterial({
+      color: 0x64f5ff,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const body = new THREE.Mesh(bodyGeometry, makeMaterial());
+    const rightWing = new THREE.Mesh(wingGeometry, makeMaterial());
+    const leftWing = new THREE.Mesh(wingGeometry, makeMaterial());
+    rightWing.position.set(0.13, -0.02, -0.01);
+    leftWing.position.set(-0.13, -0.02, -0.01);
+    leftWing.scale.x = -1;
+    group.add(leftWing, rightWing, body);
+    group.visible = false;
+    group.position.z = 2.65;
+    world.add(group);
+    trailPool.push({ group, meshes: [body, leftWing, rightWing], life: 0, maxLife: 0 });
+  }
+}
+
+function spawnTrail(force = false) {
+  if (state.reducedMotion || state.mode !== "playing") return null;
+  const speed = player.velocity.length();
+  if (!force && speed < 2.2) return null;
+  const node = trailPool.find((candidate) => !candidate.group.visible);
+  if (!node || trails.length >= MAX_TRAIL_NODES) return null;
+  node.life = node.maxLife = state.dashTimer > 0 ? 0.34 : 0.2;
+  node.group.visible = true;
+  node.group.position.set(player.position.x, player.position.y, 2.65);
+  node.group.rotation.copy(player.group.rotation);
+  node.group.scale.copy(player.group.scale);
+  const dashMix = state.dashTimer > 0 ? 1 : 0.35;
+  node.meshes.forEach((mesh, index) => {
+    mesh.material.color.copy(index === 0 ? paletteState.primary : paletteState.secondary);
+    mesh.material.opacity = (index === 0 ? 0.28 : 0.2) + dashMix * 0.16;
+  });
+  trails.push(node);
+  return node;
 }
 
 function spawnParticleBurst(position, color, count = 12, speed = 3.2, size = 1) {
@@ -500,6 +695,128 @@ function spawnRipple(position, color, scale = 1) {
   mesh.scale.setScalar(scale * 0.4);
   world.add(mesh);
   ripples.push({ mesh, life: 0.44, maxLife: 0.44, grow: scale * 2.7 });
+}
+
+function addTrauma(amount) {
+  if (state.reducedMotion || !Number.isFinite(amount) || amount <= 0) return state.trauma;
+  state.trauma = THREE.MathUtils.clamp(state.trauma + amount, 0, 1);
+  return state.trauma;
+}
+
+function triggerSlowMotion(scale, duration) {
+  if (state.reducedMotion) {
+    state.slowMotionScale = 1;
+    state.slowMotionTimer = 0;
+    return false;
+  }
+  if (!Number.isFinite(scale) || !Number.isFinite(duration) || scale <= 0 || duration <= 0) return false;
+  state.slowMotionScale = Math.min(state.slowMotionScale, THREE.MathUtils.clamp(scale, 0.25, 1));
+  state.slowMotionTimer = Math.max(state.slowMotionTimer, duration);
+  return true;
+}
+
+function applyReducedMotionPreference(matches) {
+  state.reducedMotion = Boolean(matches);
+  if (!state.reducedMotion) return;
+  state.trauma = 0;
+  state.slowMotionScale = 1;
+  state.slowMotionTimer = 0;
+  state.zoomPunch = 0;
+  camera.zoom = 1;
+  camera.rotation.z = 0;
+  camera.updateProjectionMatrix();
+  for (const trail of trails.splice(0)) {
+    trail.group.visible = false;
+    trail.meshes.forEach((mesh) => { mesh.material.opacity = 0; });
+  }
+}
+
+function showFloatingText(text, position, tone = "cyan", tier = "small") {
+  if (!text || !position) return null;
+  if (floatingTexts.length >= 32) floatingTexts.shift().element.remove();
+  const element = document.createElement("span");
+  element.className = `floating-text ${tone} ${tier}`;
+  element.textContent = text;
+  dom.floatingLayer.appendChild(element);
+  const item = {
+    element,
+    position: new THREE.Vector3(position.x, position.y, 4.8),
+    life: tier === "large" ? 1.15 : tier === "medium" ? 0.9 : 0.7,
+    maxLife: tier === "large" ? 1.15 : tier === "medium" ? 0.9 : 0.7,
+    drift: Math.sin(state.elapsed * 17.3 + floatingTexts.length * 2.1) * 22,
+  };
+  floatingTexts.push(item);
+  return item;
+}
+
+function showStageBanner(title, duration = 1.6, tone = "stage") {
+  dom.stageBannerTitle.textContent = title;
+  dom.stageBanner.dataset.tone = tone;
+  dom.stageBanner.classList.remove("show");
+  void dom.stageBanner.offsetWidth;
+  dom.stageBanner.classList.add("show");
+  state.stageBannerTimer = Math.max(0.4, duration);
+}
+
+function setPalette(stageIndex, immediate = false) {
+  const palette = STAGE_PALETTES[THREE.MathUtils.clamp(stageIndex, 0, STAGE_PALETTES.length - 1)];
+  paletteState.target = palette;
+  Object.entries(paletteState.targetColors).forEach(([key, color]) => color.set(palette[key]));
+  if (immediate) {
+    paletteState.background.set(palette.background);
+    paletteState.grid.set(palette.grid);
+    paletteState.fog.set(palette.fog);
+    paletteState.ring.set(palette.ring);
+    paletteState.primary.set(palette.primary);
+    paletteState.secondary.set(palette.secondary);
+    applyPalette();
+  }
+  return palette;
+}
+
+function applyPalette() {
+  scene.background.copy(paletteState.background);
+  scenery.backdrop?.material.color.copy(paletteState.background);
+  scenery.grid?.material.color.copy(paletteState.grid);
+  scenery.glow?.material.color.copy(paletteState.fog);
+  scenery.boundary?.material.color.copy(paletteState.ring);
+  scenery.decorMaterials.forEach((material, index) => {
+    material.color.copy(index % 2 ? paletteState.secondary : paletteState.ring);
+  });
+  flowLines.forEach(({ material, layer }) => {
+    material.color.copy(layer === 0 ? paletteState.primary : paletteState.secondary);
+  });
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty("--stage-primary", `#${paletteState.primary.getHexString()}`);
+  rootStyle.setProperty("--stage-secondary", `#${paletteState.secondary.getHexString()}`);
+}
+
+function updatePalette(dt) {
+  const blend = 1 - Math.exp(-2.6 * dt);
+  paletteState.background.lerp(paletteState.targetColors.background, blend);
+  paletteState.grid.lerp(paletteState.targetColors.grid, blend);
+  paletteState.fog.lerp(paletteState.targetColors.fog, blend);
+  paletteState.ring.lerp(paletteState.targetColors.ring, blend);
+  paletteState.primary.lerp(paletteState.targetColors.primary, blend);
+  paletteState.secondary.lerp(paletteState.targetColors.secondary, blend);
+  applyPalette();
+}
+
+function triggerFeedback(tierName, options = {}) {
+  const tier = FEEDBACK_TIERS[tierName] ?? FEEDBACK_TIERS.small;
+  addTrauma(tier.trauma);
+  if (tier.slowDuration > 0) triggerSlowMotion(tier.slowScale, tier.slowDuration);
+  if (!state.reducedMotion) state.zoomPunch = Math.max(state.zoomPunch, tier.zoom);
+  if (options.flashColor) flash(options.flashColor, options.flashOpacity ?? 0.1);
+  if (options.position && options.color && options.particles) {
+    spawnParticleBurst(options.position, options.color, options.particles, options.speed ?? 3.2, options.size ?? 1);
+  }
+  if (options.position && options.color && options.rippleScale) {
+    spawnRipple(options.position, options.color, options.rippleScale);
+  }
+  if (options.text && options.position) {
+    showFloatingText(options.text, options.position, options.tone ?? "cyan", tierName);
+  }
 }
 
 function spawnShard(position) {
@@ -541,7 +858,7 @@ function randomEdgePosition(margin = 0.8) {
 }
 
 function registerEnemy(type, position, group, initialState, overrides = {}) {
-  if (enemies.length >= GAME.maxEnemies) return null;
+  if (enemies.length >= MAX_ENEMIES) return null;
   const config = ENEMY_TYPES[type];
   group.position.set(position.x, position.y, 2);
   world.add(group);
@@ -639,13 +956,36 @@ function createBoss() {
   const outerRing = new THREE.Mesh(shared.bossOuterGeometry, shared.bossMaterial);
   const middleRing = new THREE.Mesh(shared.bossMiddleGeometry, shared.warningRingMaterial);
   const innerRing = new THREE.Mesh(shared.bossInnerGeometry, shared.dangerRingMaterial);
-  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial);
+  const haloRing = new THREE.Mesh(shared.bossHaloGeometry, shared.warningRingMaterial.clone());
+  haloRing.material.opacity = 0.34;
+  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial.clone());
   core.scale.set(1.15, 0.72, 1);
+  const coreGlow = new THREE.Mesh(
+    new THREE.CircleGeometry(1.14, 36),
+    new THREE.MeshBasicMaterial({
+      color: 0xff506f,
+      transparent: true,
+      opacity: 0.18,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    })
+  );
+  coreGlow.scale.set(1.22, 0.76, 1);
   const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
   line.visible = false;
   const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, shared.dangerRingMaterial);
   pulseRing.visible = false;
-  group.add(line, pulseRing, outerRing, middleRing, innerRing, core);
+  const orbitNodes = new THREE.Group();
+  for (let i = 0; i < 4; i += 1) {
+    const node = new THREE.Mesh(
+      new THREE.CircleGeometry(0.11, 12),
+      new THREE.MeshBasicMaterial({ color: i % 2 ? 0x64f5ff : 0xff506f })
+    );
+    const angle = (i / 4) * TAU;
+    node.position.set(Math.cos(angle) * 2.72, Math.sin(angle) * 2.72, 0.04);
+    orbitNodes.add(node);
+  }
+  group.add(line, pulseRing, haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core);
   const enemy = registerEnemy("boss", new THREE.Vector2(0, view.halfHeight + 4.8), group, "enter", {
     stateTimer: 1.5,
     telegraph: 0,
@@ -655,15 +995,16 @@ function createBoss() {
     dangerRadius: 0,
     previousDangerRadius: 0,
     pulseHit: false,
+    hitReactTimer: 0,
     priority: 4,
-    visuals: { outerRing, middleRing, innerRing, core, line, pulseRing },
+    visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing },
   });
   if (enemy) state.bossSpawned = true;
   return enemy;
 }
 
 function spawnEnemy(type = null, position = null) {
-  if (enemies.length >= GAME.maxEnemies) return null;
+  if (enemies.length >= MAX_ENEMIES) return null;
   let chosenType = type;
   if (!chosenType) {
     const roll = Math.random();
@@ -708,6 +1049,12 @@ function clearWorldEntities() {
     particle.mesh.material.opacity = 0;
   }
   particles.length = 0;
+  for (const trail of trailPool) {
+    trail.group.visible = false;
+    trail.meshes.forEach((mesh) => { mesh.material.opacity = 0; });
+  }
+  trails.length = 0;
+  floatingTexts.splice(0).forEach((item) => item.element.remove());
 }
 
 function seedShards() {
@@ -748,8 +1095,11 @@ function resetState() {
   state.hurtInvuln = 0;
   state.overdriveTimer = 0;
   state.runFinished = false;
-  state.shakeTime = 0;
-  state.shakeStrength = 0;
+  state.trauma = 0;
+  state.traumaClock = 0;
+  state.slowMotionScale = 1;
+  state.slowMotionTimer = 0;
+  state.zoomPunch = 0;
   state.stageBannerTimer = 0;
   state.upgradeTriggered = [false, false];
   state.bossTriggered = false;
@@ -769,9 +1119,11 @@ function resetState() {
   player.group.rotation.z = 0;
   player.group.rotation.y = 0;
   player.shield.visible = false;
+  player.trailTimer = 0;
   syncPlayerTransform();
   seedShards();
   audio.setStage(0);
+  setPalette(0, true);
 }
 
 function startGame() {
@@ -924,14 +1276,32 @@ function finishRun(outcome) {
   updateHighScore();
   transitionTo(outcome);
   if (outcome === "victory") {
-    flash("#64f5ff", 0.28);
-    spawnParticleBurst(player.position, 0x64f5ff, 36, 3.6, 1.5);
-    spawnRipple(player.position, 0x64f5ff, 3.2);
+    triggerFeedback("large", {
+      position: player.position,
+      color: 0x64f5ff,
+      particles: 36,
+      speed: 3.6,
+      size: 1.5,
+      rippleScale: 3.2,
+      flashColor: "#64f5ff",
+      flashOpacity: 0.28,
+      text: "TIDE CLEARED",
+      tone: "cyan",
+    });
     audio.event("victory");
   } else {
-    flash("#ff506f", 0.24);
-    spawnParticleBurst(player.position, 0xff506f, 28, 4.8, 1.4);
-    spawnRipple(player.position, 0xff506f, 2.4);
+    triggerFeedback("large", {
+      position: player.position,
+      color: 0xff506f,
+      particles: 28,
+      speed: 4.8,
+      size: 1.4,
+      rippleScale: 2.4,
+      flashColor: "#ff506f",
+      flashOpacity: 0.24,
+      text: "SIGNAL LOST",
+      tone: "danger",
+    });
     audio.event("defeat");
   }
   return true;
@@ -975,10 +1345,18 @@ function triggerOverdrive() {
   state.energy = 0;
   state.overdriveTimer = GAME.overdriveDuration;
   toast("潮汐超载", "cyan");
-  flash("#64f5ff", 0.2);
-  shake(0.16, 0.22);
-  spawnParticleBurst(player.position, 0x64f5ff, 26, 4.2, 1.2);
-  spawnRipple(player.position, 0x64f5ff, 2);
+  triggerFeedback("large", {
+    position: player.position,
+    color: 0x64f5ff,
+    particles: 30,
+    speed: 4.2,
+    size: 1.2,
+    rippleScale: 2,
+    flashColor: "#64f5ff",
+    flashOpacity: 0.2,
+    text: "OVERDRIVE",
+    tone: "cyan",
+  });
   audio.event("overdrive");
 }
 
@@ -1048,7 +1426,9 @@ function chooseUpgrade(upgradeId) {
   state.upgradeOptions = [];
   state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
-  transitionTo("playing", { upgraded: true });
+  if (transitionTo("playing", { upgraded: true })) {
+    showStageBanner(STAGE_LABELS[state.stageIndex] ?? STAGES[state.stageIndex].name, 1.5, "stage");
+  }
 }
 
 function updateHighScore() {
@@ -1108,17 +1488,32 @@ function updatePlayer(dt) {
   const flameScale = 0.75 + Math.min(speed / 5, 1) * 0.7;
   if (state.reducedMotion) {
     player.group.scale.set(1, 1, 1);
-    player.flame.scale.setScalar(flameScale);
+    player.flame.scale.setScalar(1);
+    player.core.scale.setScalar(1);
+    player.coreGlow.scale.setScalar(1);
   } else {
     const targetScale = state.dashTimer > 0 ? 1.22 : 1;
     player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
     player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
     player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
+    const corePulse = 1 + Math.sin(state.elapsed * (state.overdriveTimer > 0 ? 16 : 7)) * (state.overdriveTimer > 0 ? 0.16 : 0.08);
+    player.core.scale.setScalar(corePulse);
+    player.coreGlow.scale.setScalar(corePulse * (state.overdriveTimer > 0 ? 1.42 : 1.12));
   }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
   player.glow.material.opacity = state.overdriveTimer > 0 ? 0.36 : 0.18;
+  player.coreGlow.material.opacity = state.overdriveTimer > 0 ? 0.42 : 0.22;
+  player.wings.forEach((wing, index) => {
+    wing.material.color.copy(index === 0 ? paletteState.secondary : paletteState.primary);
+  });
   player.shield.visible = state.dashInvulnerable || state.hurtInvuln > 0;
-  player.shield.material.opacity = 0.48 + Math.sin(state.elapsed * 24) * 0.2;
+  player.shield.material.opacity = state.reducedMotion ? 0.68 : 0.48 + Math.sin(state.elapsed * 24) * 0.2;
+  player.trailTimer -= dt;
+  const trailInterval = state.dashTimer > 0 ? 0.025 : 0.075;
+  if (player.trailTimer <= 0 && (state.dashTimer > 0 || speed > 3.5)) {
+    spawnTrail(state.dashTimer > 0);
+    player.trailTimer = trailInterval;
+  }
   syncPlayerTransform();
 }
 
@@ -1135,9 +1530,10 @@ function attemptDash(direction) {
   player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getDerivedValues().speedMultiplier);
   if (state.reducedMotion) player.group.scale.set(1, 1, 1);
   else player.group.scale.set(1.25, 0.78, 1);
-  spawnParticleBurst(player.position, 0x64f5ff, 15, 3.7, 0.85);
+  spawnTrail(true);
+  spawnParticleBurst(player.position, 0x64f5ff, 10, 3.7, 0.85);
   spawnRipple(player.position, 0x64f5ff, 1.2);
-  shake(0.08, 0.12);
+  addTrauma(0.08);
   audio.event("dash");
   return true;
 }
@@ -1159,7 +1555,7 @@ function updateShards(dt) {
     shard.gem.rotation.z += dt * 1.8;
     shard.ring.rotation.z -= dt * 0.8;
     shard.group.position.y = shard.baseY + Math.sin(state.elapsed * 2.5 + shard.phase) * 0.12;
-    const pulse = 1 + Math.sin(state.elapsed * 5 + shard.phase) * 0.09;
+    const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 5 + shard.phase) * 0.09;
     shard.group.scale.setScalar(pulse);
   }
 
@@ -1177,9 +1573,18 @@ function collectShard(index) {
   const shard = shards[index];
   const position = new THREE.Vector2(shard.group.position.x, shard.group.position.y);
   removeShard(index);
+  const previousScore = state.score;
   awardReward("pickup");
-  spawnParticleBurst(position, 0xffd166, 16, 3.5, 0.9);
-  spawnRipple(position, 0xffd166, 1.1);
+  triggerFeedback("small", {
+    position,
+    color: 0xffd166,
+    particles: 5,
+    speed: 3.2,
+    size: 0.82,
+    rippleScale: 0.82,
+    text: `+${state.score - previousScore}`,
+    tone: "gold",
+  });
   audio.event("pickup", Math.min(1, state.combo / GAME.comboCap));
 }
 
@@ -1288,7 +1693,7 @@ function beginBossExecute(enemy) {
     enemy.dangerRadius = 0.9;
     setEnemyState(enemy, "execute", 1.05);
   } else {
-    const availableSlots = Math.max(0, Math.min(2, GAME.maxEnemies - enemies.length));
+    const availableSlots = Math.max(0, Math.min(2, MAX_ENEMIES - enemies.length));
     for (let i = 0; i < availableSlots; i += 1) {
       const angle = (i / Math.max(1, availableSlots)) * TAU + enemy.wobble;
       createChaser(new THREE.Vector2(
@@ -1302,9 +1707,24 @@ function beginBossExecute(enemy) {
 
 function updateBoss(enemy, dt) {
   enemy.stateTimer -= dt;
-  enemy.visuals.outerRing.rotation.z += dt * 0.32;
-  enemy.visuals.middleRing.rotation.z -= dt * 0.58;
-  enemy.visuals.innerRing.rotation.z += dt * 0.9;
+  enemy.hitReactTimer = Math.max(0, enemy.hitReactTimer - dt);
+  const ringMotion = state.reducedMotion ? 0 : 1;
+  enemy.visuals.haloRing.rotation.z -= dt * 0.18 * ringMotion;
+  enemy.visuals.outerRing.rotation.z += dt * 0.32 * ringMotion;
+  enemy.visuals.middleRing.rotation.z -= dt * 0.58 * ringMotion;
+  enemy.visuals.innerRing.rotation.z += dt * 0.9 * ringMotion;
+  enemy.visuals.orbitNodes.rotation.z -= dt * 0.44 * ringMotion;
+  const hitStrength = THREE.MathUtils.clamp(enemy.hitReactTimer / 0.18, 0, 1);
+  enemy.visuals.core.material.color.lerpColors(BOSS_CORE_IDLE_COLOR, BOSS_CORE_HIT_COLOR, hitStrength);
+  enemy.visuals.coreGlow.material.opacity = 0.18 + hitStrength * 0.48;
+  if (state.reducedMotion) {
+    enemy.visuals.core.scale.set(1.15, 0.72, 1);
+    enemy.visuals.coreGlow.scale.set(1.22, 0.76, 1);
+  } else {
+    const corePulse = 1 + Math.sin(state.elapsed * 5) * 0.045 + hitStrength * 0.22;
+    enemy.visuals.core.scale.set(1.15 * corePulse, 0.72 * corePulse, 1);
+    enemy.visuals.coreGlow.scale.set(1.22 * corePulse, 0.76 * corePulse, 1);
+  }
   if (enemy.state === "enter") {
     enemy.group.position.y = THREE.MathUtils.damp(enemy.group.position.y, 3.2, 3.2, dt);
     if (enemy.stateTimer <= 0 || Math.abs(enemy.group.position.y - 3.2) < 0.12) setEnemyState(enemy, "choose", 0.35);
@@ -1380,8 +1800,17 @@ function damageEnemy(enemy) {
   }
   const away = position.clone().sub(player.position).normalize();
   enemy.velocity.addScaledVector(away, enemy.type === "elite" ? 2.4 : 1.2);
-  spawnParticleBurst(position, enemy.type === "boss" ? 0xe7ffff : 0xff506f, 12, 3.2, 0.9);
-  spawnRipple(position, enemy.type === "boss" ? 0x64f5ff : 0xff506f, enemy.type === "boss" ? 1.8 : 1.1);
+  enemy.hitReactTimer = 0.18;
+  triggerFeedback("medium", {
+    position,
+    color: enemy.type === "boss" ? 0xe7ffff : 0xff506f,
+    particles: enemy.type === "boss" ? 14 : 10,
+    speed: 3.2,
+    size: 0.9,
+    rippleScale: enemy.type === "boss" ? 1.8 : 1.1,
+    text: enemy.type === "boss" ? `-${BOSS_DASH_DAMAGE} STABILITY` : "ARMOR CRACK",
+    tone: enemy.type === "boss" ? "cyan" : "danger",
+  });
   audio.event(enemy.type === "boss" ? "bossHit" : "break", 0.65);
 }
 
@@ -1445,8 +1874,18 @@ function destroyEnemy(enemy, source) {
     awardReward("break");
     state.stats.breaks += 1;
   }
-  spawnParticleBurst(position, 0xff4fd8, 20, 4.5, 1.1);
-  spawnRipple(position, 0xff4fd8, 1.5);
+  if (enemy.type !== "boss") {
+    triggerFeedback("medium", {
+      position,
+      color: 0xff4fd8,
+      particles: 16,
+      speed: 4.5,
+      size: 1.1,
+      rippleScale: 1.5,
+      text: "SIGNAL BREAK",
+      tone: "magenta",
+    });
+  }
   audio.event("break");
   if (enemy.type === "boss") finishRun("victory");
   return true;
@@ -1458,10 +1897,18 @@ function damagePlayer(enemy) {
   clearCombo();
   player.velocity.multiplyScalar(-0.3);
   const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
-  spawnParticleBurst(hitPosition, 0xff506f, 22, 4.2, 1.1);
-  spawnRipple(hitPosition, 0xff506f, 1.5);
-  shake(0.2, 0.28);
-  flash("#ff506f", 0.13);
+  triggerFeedback("medium", {
+    position: hitPosition,
+    color: 0xff506f,
+    particles: 18,
+    speed: 4.2,
+    size: 1.1,
+    rippleScale: 1.5,
+    flashColor: "#ff506f",
+    flashOpacity: 0.13,
+    text: "-1 HULL",
+    tone: "danger",
+  });
   toast("船体受损", "danger");
   audio.event("hurt");
   if (state.health <= 0) finishRun("gameover");
@@ -1474,7 +1921,7 @@ function updateSpawning(dt) {
   const stage = STAGES[state.stageIndex];
   const enemyInterval = Math.max(0.38, (1.18 - state.elapsed * 0.009) / stage.spawnRate);
   if (state.enemySpawnTimer <= 0 && state.stageIndex < 3) {
-    const cappedBudget = Math.min(GAME.maxEnemies, spawnBudget);
+    const cappedBudget = Math.min(MAX_ENEMIES, spawnBudget);
     if (enemies.length < cappedBudget) spawnEnemy();
     if (enemies.length < cappedBudget && state.stageIndex === 2 && Math.random() < 0.22) spawnEnemy();
     state.enemySpawnTimer = enemyInterval;
@@ -1505,6 +1952,45 @@ function updateParticles(dt) {
   }
 }
 
+function updateTrails(dt) {
+  for (let i = trails.length - 1; i >= 0; i -= 1) {
+    const trail = trails[i];
+    trail.life -= dt;
+    const ratio = Math.max(0, trail.life / trail.maxLife);
+    trail.meshes.forEach((mesh, index) => {
+      mesh.material.opacity = ratio * (index === 0 ? 0.42 : 0.28);
+    });
+    trail.group.scale.multiplyScalar(1 + dt * 0.45);
+    if (trail.life <= 0) {
+      trail.group.visible = false;
+      trail.meshes.forEach((mesh) => { mesh.material.opacity = 0; });
+      trails.splice(i, 1);
+    }
+  }
+}
+
+function updateFloatingTexts(dt) {
+  camera.updateMatrixWorld();
+  for (let i = floatingTexts.length - 1; i >= 0; i -= 1) {
+    const item = floatingTexts[i];
+    item.life -= dt;
+    const progress = 1 - Math.max(0, item.life / item.maxLife);
+    const projected = item.position.clone().project(camera);
+    const x = (projected.x * 0.5 + 0.5) * window.innerWidth;
+    const baseY = (-projected.y * 0.5 + 0.5) * window.innerHeight;
+    const driftY = state.reducedMotion ? 0 : progress * 58;
+    const driftX = state.reducedMotion ? 0 : Math.sin(progress * Math.PI) * item.drift;
+    item.element.style.left = `${x + driftX}px`;
+    item.element.style.top = `${baseY - driftY}px`;
+    item.element.style.opacity = String(Math.sin(Math.min(1, progress) * Math.PI));
+    item.element.style.setProperty("--float-scale", state.reducedMotion ? "1" : String(0.82 + Math.sin(progress * Math.PI) * 0.28));
+    if (item.life <= 0) {
+      item.element.remove();
+      floatingTexts.splice(i, 1);
+    }
+  }
+}
+
 function updateRipples(dt) {
   for (let i = ripples.length - 1; i >= 0; i -= 1) {
     const ripple = ripples[i];
@@ -1520,28 +2006,54 @@ function updateRipples(dt) {
   }
 }
 
+function sampleShakeAxis(seed, time) {
+  return Math.sin(time * 17 + seed) * 0.62 + Math.sin(time * 29 + seed * 2.3) * 0.38;
+}
+
 function updateVisuals(dt) {
-  const visualSpeed = state.reducedMotion ? 0.35 : 1;
+  updatePalette(dt);
+  const visualSpeed = state.reducedMotion ? 0 : 1;
   decorGroup.rotation.z += dt * 0.004 * visualSpeed;
   starsGroup.rotation.z -= dt * 0.0015 * visualSpeed;
-  backgroundGroup.position.x = Math.sin(state.elapsed * 0.19) * 0.12;
-  backgroundGroup.position.y = Math.cos(state.elapsed * 0.16) * 0.08;
-  const lookAheadTarget = player.position.clone().multiplyScalar(0.035).addScaledVector(player.velocity, 0.11);
-  lookAheadTarget.clampLength(0, state.reducedMotion ? 0.18 : 0.72);
-  state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
-  let shakeX = 0;
-  let shakeY = 0;
-  if (state.shakeTime > 0) {
-    state.shakeTime -= dt;
-    const falloff = Math.max(0, state.shakeTime / 0.3);
-    shakeX = (Math.random() - 0.5) * state.shakeStrength * falloff;
-    shakeY = (Math.random() - 0.5) * state.shakeStrength * falloff;
+  const decorPulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 0.55) * 0.008;
+  decorGroup.scale.setScalar(decorPulse);
+  backgroundGroup.position.x = state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.19) * 0.12;
+  backgroundGroup.position.y = state.reducedMotion ? 0 : Math.cos(state.elapsed * 0.16) * 0.08;
+  for (const flow of flowLines) {
+    const speed = flow.layer === 0 ? 0.72 : -0.46;
+    flow.line.position.x = state.reducedMotion
+      ? flow.baseX
+      : flow.baseX + Math.sin(state.elapsed * speed + flow.phase) * (flow.layer === 0 ? 2.2 : 3.1);
+    flow.line.position.y = flow.baseY + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.34 + flow.phase) * 0.22);
+    flow.material.opacity = (flow.layer === 0 ? 0.065 : 0.105)
+      + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.8 + flow.phase) * 0.018);
   }
+  if (scenery.boundary) {
+    scenery.boundary.material.opacity = state.reducedMotion
+      ? 0.13
+      : 0.08 + (Math.sin(state.elapsed * 2.1) * 0.5 + 0.5) * 0.09;
+  }
+  const lookAheadTarget = player.position.clone().multiplyScalar(0.035).addScaledVector(player.velocity, 0.11);
+  lookAheadTarget.clampLength(0, state.reducedMotion ? 0 : 0.72);
+  state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
+  state.traumaClock += dt;
+  state.trauma = state.reducedMotion ? 0 : Math.max(0, state.trauma - TRAUMA_DECAY * dt);
+  const shakeAmount = state.reducedMotion ? 0 : state.trauma * state.trauma;
+  const shakeX = sampleShakeAxis(1.7, state.traumaClock) * 0.22 * shakeAmount;
+  const shakeY = sampleShakeAxis(4.1, state.traumaClock) * 0.15 * shakeAmount;
   camera.position.x = state.cameraLookAhead.x + shakeX;
   camera.position.y = state.cameraLookAhead.y + shakeY;
   camera.position.z = 20;
-  const cameraBank = state.reducedMotion ? 0 : THREE.MathUtils.clamp(-player.velocity.x * 0.0025, -0.012, 0.012);
+  const cameraBank = state.reducedMotion
+    ? 0
+    : THREE.MathUtils.clamp(-player.velocity.x * 0.0025, -0.012, 0.012)
+      + sampleShakeAxis(7.3, state.traumaClock) * 0.012 * shakeAmount;
   camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, cameraBank, 1 - Math.exp(-4 * dt));
+  state.zoomPunch = state.reducedMotion ? 0 : Math.max(0, state.zoomPunch - dt * 0.42);
+  const targetZoom = state.reducedMotion ? 1 : 1 + state.zoomPunch;
+  camera.zoom = THREE.MathUtils.lerp(camera.zoom, targetZoom, 1 - Math.exp(-14 * dt));
+  camera.updateProjectionMatrix();
+  updateFloatingTexts(dt);
   updateHUD(dt);
 }
 
@@ -1601,11 +2113,11 @@ function updateStage() {
   if (nextStageIndex === state.stageIndex) return;
   state.stageIndex = nextStageIndex;
   audio.setStage(nextStageIndex);
-  dom.stageBannerTitle.textContent = nextStageIndex === 3
+  setPalette(nextStageIndex);
+  const bannerTitle = nextStageIndex === 3
     ? "终幕 · 潮汐守卫"
     : STAGE_LABELS[nextStageIndex] ?? STAGES[nextStageIndex].name;
-  dom.stageBanner.classList.add("show");
-  state.stageBannerTimer = nextStageIndex === 3 ? 2.2 : 1.6;
+  showStageBanner(bannerTitle, nextStageIndex === 3 ? 2.2 : 1.6, nextStageIndex === 3 ? "boss" : "stage");
   if ((nextStageIndex === 1 || nextStageIndex === 2) && !state.upgradeTriggered[nextStageIndex - 1]) {
     state.upgradeTriggered[nextStageIndex - 1] = true;
     beginUpgrade(nextStageIndex);
@@ -1623,14 +2135,20 @@ function beginBossStage() {
   state.timeLeft = 18;
   state.enemySpawnTimer = Infinity;
   toast("潮汐守卫已锁定", "danger");
-  spawnParticleBurst(new THREE.Vector2(0, view.halfHeight - 0.6), 0xe7ffff, 28, 4.2, 1.25);
+  const entrancePosition = new THREE.Vector2(0, view.halfHeight - 0.6);
+  triggerFeedback("large", {
+    position: entrancePosition,
+    color: 0xe7ffff,
+    particles: 30,
+    speed: 4.2,
+    size: 1.25,
+    rippleScale: 2.2,
+    flashColor: "#e7ffff",
+    flashOpacity: 0.16,
+    text: "TIDAL GUARDIAN",
+    tone: "cyan",
+  });
   createBoss();
-}
-
-function shake(strength, duration) {
-  if (state.reducedMotion) return;
-  state.shakeStrength = Math.max(state.shakeStrength, strength);
-  state.shakeTime = Math.max(state.shakeTime, duration);
 }
 
 function flash(color, opacity = 0.16) {
@@ -1659,6 +2177,7 @@ function updateBounds() {
   camera.top = view.halfHeight;
   camera.bottom = -view.halfHeight;
   camera.updateProjectionMatrix();
+  if (scenery.boundary) scenery.boundary.scale.set(view.halfWidth / 9, view.halfHeight / 6.25, 1);
 }
 
 function requestDash() {
@@ -1758,7 +2277,13 @@ function resize() {
 }
 
 function animate() {
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const realDt = Math.min(clock.getDelta(), 0.05);
+  const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
+  const dt = realDt * simulationScale;
+  if (state.slowMotionTimer > 0) {
+    state.slowMotionTimer = Math.max(0, state.slowMotionTimer - realDt);
+    if (state.slowMotionTimer <= 0) state.slowMotionScale = 1;
+  }
   if (state.mode === "playing") {
     state.elapsed += dt;
     const runDeadline = state.bossDeadline ?? GAME.duration;
@@ -1782,26 +2307,30 @@ function animate() {
       if (state.mode === "playing") updateSpawning(dt);
       updateParticles(dt);
       updateRipples(dt);
+      updateTrails(dt);
       if (state.timeLeft <= 0) finishRun("gameover");
     }
   } else {
-    updateParticles(dt);
-    updateRipples(dt);
+    updateParticles(realDt);
+    updateRipples(realDt);
+    updateTrails(realDt);
   }
   const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / GAME.overdriveEnergy;
-  const intensity = THREE.MathUtils.clamp((enemies.length / GAME.maxEnemies) * 0.7 + energyIntensity * 0.3, 0, 1);
+  const intensity = THREE.MathUtils.clamp((enemies.length / MAX_ENEMIES) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
-  updateVisuals(dt);
+  updateVisuals(realDt);
   renderer.render(scene, camera);
 }
 
 createBackground();
 createPlayer();
 createParticlePool();
+createTrailPool();
 setupInput();
 updateBounds();
 resetState();
 renderMode("menu", null);
 const clock = new THREE.Clock();
 window.addEventListener("resize", resize);
+reducedMotionPreference?.addEventListener?.("change", (event) => applyReducedMotionPreference(event.matches));
 renderer.setAnimationLoop(animate);

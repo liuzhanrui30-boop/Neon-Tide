@@ -8,6 +8,8 @@
   --magenta-soft: rgba(255, 79, 216, 0.18);
   --gold: #ffd166;
   --danger: #ff506f;
+  --stage-primary: #36e0ff;
+  --stage-secondary: #6677ff;
   --ink: #050816;
   --panel: rgba(7, 13, 32, 0.82);
   --panel-line: rgba(112, 221, 255, 0.18);
@@ -107,7 +109,7 @@ canvas {
   display: grid;
   width: max-content;
   padding: 10px 16px 10px 14px;
-  border-left: 3px solid var(--cyan);
+  border-left: 3px solid var(--stage-primary);
   background: linear-gradient(90deg, rgba(9, 20, 43, 0.9), transparent);
   filter: drop-shadow(0 0 18px rgba(100, 245, 255, 0.18));
 }
@@ -193,8 +195,8 @@ canvas {
 
 #stage-progress {
   width: 0%;
-  background: linear-gradient(90deg, var(--magenta), var(--cyan));
-  box-shadow: 0 0 12px var(--cyan);
+  background: linear-gradient(90deg, var(--stage-secondary), var(--stage-primary));
+  box-shadow: 0 0 12px var(--stage-primary);
 }
 
 .hud-cluster {
@@ -405,6 +407,49 @@ canvas {
   transition: opacity 150ms ease, transform 150ms ease;
 }
 
+#floating-text-layer {
+  position: absolute;
+  z-index: 17;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.floating-text {
+  --float-scale: 1;
+  position: absolute;
+  color: var(--stage-primary);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  white-space: nowrap;
+  text-shadow: 0 0 12px currentColor, 0 2px 0 rgba(0, 0, 0, 0.7);
+  transform: translate(-50%, -50%) scale(var(--float-scale));
+  transform-origin: center;
+}
+
+.floating-text.medium {
+  font-size: clamp(17px, 2.1vw, 23px);
+}
+
+.floating-text.large {
+  font-size: clamp(21px, 3vw, 34px);
+  letter-spacing: 0.18em;
+}
+
+.floating-text.gold {
+  color: var(--gold);
+}
+
+.floating-text.magenta {
+  color: var(--stage-secondary);
+}
+
+.floating-text.danger {
+  color: var(--danger);
+}
+
 #combo {
   top: 19%;
   color: var(--gold);
@@ -446,8 +491,33 @@ canvas {
   transform: translate(-50%, -50%) scale(1.16);
   background:
     linear-gradient(90deg, transparent, rgba(5, 12, 30, 0.94) 22% 78%, transparent),
-    linear-gradient(90deg, transparent 6%, var(--magenta) 35%, var(--cyan) 65%, transparent 94%) top / 100% 1px no-repeat;
+    linear-gradient(90deg, transparent 6%, var(--stage-secondary) 35%, var(--stage-primary) 65%, transparent 94%) top / 100% 1px no-repeat;
   transition: opacity 180ms ease, transform 280ms cubic-bezier(0.2, 0.75, 0.2, 1);
+}
+
+#stage-banner::before,
+#stage-banner::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  width: 25%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--stage-primary));
+  box-shadow: 0 0 16px var(--stage-primary);
+  opacity: 0;
+  transform: scaleX(0.25);
+  transition: opacity 160ms ease, transform 300ms ease-out;
+}
+
+#stage-banner::before {
+  right: 74%;
+  transform-origin: right;
+}
+
+#stage-banner::after {
+  left: 74%;
+  background: linear-gradient(90deg, var(--stage-secondary), transparent);
+  transform-origin: left;
 }
 
 #stage-banner.show {
@@ -455,9 +525,21 @@ canvas {
   transform: translate(-50%, -50%) scale(1);
 }
 
+#stage-banner.show::before,
+#stage-banner.show::after {
+  opacity: 0.78;
+  transform: scaleX(1);
+}
+
+#stage-banner[data-tone="boss"] {
+  background:
+    linear-gradient(90deg, transparent, rgba(18, 7, 20, 0.96) 18% 82%, transparent),
+    linear-gradient(90deg, transparent 4%, var(--danger) 32%, var(--stage-primary) 68%, transparent 96%) top / 100% 2px no-repeat;
+}
+
 #stage-banner span {
   display: block;
-  color: var(--magenta);
+  color: var(--stage-secondary);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.34em;
@@ -469,7 +551,7 @@ canvas {
   font-size: clamp(32px, 7vw, 72px);
   line-height: 1;
   letter-spacing: 0.06em;
-  text-shadow: 7px 0 0 rgba(255, 79, 216, 0.18), -6px 0 0 rgba(100, 245, 255, 0.16);
+  text-shadow: 7px 0 0 color-mix(in srgb, var(--stage-secondary) 22%, transparent), -6px 0 0 color-mix(in srgb, var(--stage-primary) 20%, transparent);
 }
 
 #overlay,
@@ -1150,11 +1232,22 @@ kbd {
     transform: translate(-50%, -50%);
   }
 
+  #stage-banner::before,
+  #stage-banner::after,
+  #stage-banner.show::before,
+  #stage-banner.show::after {
+    transform: none;
+  }
+
   #combo,
   #combo.show,
   #toast,
   #toast.show {
     transform: translate(-50%, 0);
+  }
+
+  .floating-text {
+    transform: translate(-50%, -50%);
   }
 
   .icon-button:hover,
