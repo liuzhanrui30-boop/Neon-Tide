@@ -12,9 +12,11 @@ import {
   computeSpawnBudget,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
+import { FORMATION_TEMPLATES } from "./game/config.js";
 import {
   chooseFormation,
   getActiveEnemyCap,
+  getFormationBudget,
   getFormationSlots,
   getSpawnInterval,
   getStageIndex,
@@ -424,6 +426,9 @@ const shared = {
     color: 0xff506f, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
   }),
   lancerMaterial: new THREE.MeshBasicMaterial({ color: 0xffd166 }),
+  hunterTrailMaterial: new THREE.LineBasicMaterial({
+    color: 0xff7ae6, transparent: true, opacity: 0.76, depthWrite: false, blending: THREE.AdditiveBlending,
+  }),
   swarmMaterial: new THREE.MeshBasicMaterial({ color: 0x9af6ff }),
   swarmGlowMaterial: new THREE.MeshBasicMaterial({
     color: 0x36e0ff, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending,
@@ -1021,7 +1026,16 @@ function createChaser(position = randomEdgePosition()) {
   const eye = new THREE.Mesh(shared.bossCoreGeometry, shared.bossMaterial);
   eye.scale.setScalar(0.095);
   eye.position.set(0, 0.1, 0.06);
-  group.add(glow, body, eye);
+  const chargeArc = new THREE.Group();
+  for (let index = 0; index < 3; index += 1) {
+    const segment = new THREE.Line(shared.telegraphLineGeometry, shared.hunterTrailMaterial);
+    segment.position.set(0, 0.78 + index * 0.62, -0.04);
+    segment.scale.set(0.26 + index * 0.14, 0.34 + index * 0.18, 1);
+    segment.visible = false;
+    chargeArc.add(segment);
+  }
+  chargeArc.visible = false;
+  group.add(chargeArc, glow, body, eye);
   const intentTimer = 1.8 + Math.random() * 1.4;
   return registerEnemy("chaser", position, group, "chase", {
     speed: 2.0 + state.elapsed * 0.014 + Math.random() * 0.24,
@@ -1029,7 +1043,7 @@ function createChaser(position = randomEdgePosition()) {
     intentTimer,
     intentIndex: Math.floor(Math.random() * 3),
     dashDirection: new THREE.Vector2(),
-    visuals: { glow, body },
+    visuals: { glow, body, chargeArc },
   });
 }
 
@@ -1216,50 +1230,77 @@ function formationActiveCost() {
   return enemies.reduce((cost, enemy) => cost + (ENEMY_TYPES[enemy.type]?.threatCost ?? 1), 0);
 }
 
+function getFormationSpatialGap(templateName) {
+  const slots = getFormationSlots(templateName, { width: view.halfWidth * 2, height: view.halfHeight * 2 });
+  if (!slots.length) return Infinity;
+  return Math.min(...slots.map((slot) => Math.hypot(slot.x - player.position.x, slot.y - player.position.y)));
+}
+
 function spawnFormation() {
   if (state.stageIndex >= 3 || state.bossTriggered) return false;
   const cap = getEnemyCap();
-  const safeGap = Number.isFinite(state.lastFormationAt) ? state.elapsed - state.lastFormationAt : Infinity;
-  let template = chooseFormation({
+  const activeCost = formationActiveCost();
+  const cooldown = FORMATION_TEMPLATES[state.lastFormation]?.cooldown ?? 0;
+  const cooldownRemaining = Number.isFinite(state.lastFormationAt)
+    ? Math.max(0, state.lastFormationAt + cooldown - state.elapsed)
+    : 0;
+  const directorOptions = {
     stageIndex: state.stageIndex,
     elapsed: state.elapsed,
     lastFormation: state.lastFormation,
-    cooldownRemaining: 0,
-    activeCost: formationActiveCost(),
+    cooldownRemaining,
+    activeCost,
     maxEnemyCap: cap,
-    safeGap,
+    safeGap: Infinity,
     seed: Math.floor(state.elapsed * 10) + state.stats.formationCount * 17,
-  });
-  // Stage 1 has a deliberately small director budget; repeat the last valid
-  // template rather than dropping pressure when the candidate list is empty.
-  if (!template && state.stats.formationCount > 0) {
-    template = chooseFormation({
-      stageIndex: state.stageIndex, elapsed: state.elapsed, lastFormation: null, cooldownRemaining: 0,
-      activeCost: formationActiveCost(), maxEnemyCap: cap, safeGap,
-      seed: Math.floor(state.elapsed * 10) + state.stats.formationCount * 31,
-    });
-  }
+  };
+  let template = chooseFormation(directorOptions);
+  // If every alternative is over budget, repeating the prior template is
+  // allowed only after its declared cooldown. State.lastFormation is retained.
+  if (!template && cooldownRemaining <= 0) template = chooseFormation({ ...directorOptions, lastFormation: null, seed: directorOptions.seed + 31 });
   if (!template) return false;
+  const spatialGap = getFormationSpatialGap(template.name);
+  if (spatialGap < template.minSafeGap) return false;
+  const budget = getFormationBudget(state.stageIndex, state.elapsed, { activeCost, maxEnemyCap: cap });
+  let remainingBudget = budget;
+  let remainingCapacity = Math.max(0, cap - enemies.length);
   const slots = getFormationSlots(template.name, { width: view.halfWidth * 2, height: view.halfHeight * 2 });
-  const available = Math.max(0, cap - enemies.length);
   const spawnedRoles = [];
-  for (let i = 0; i < slots.length && spawnedRoles.length < available; i += 1) {
+  let actualThreatCost = 0;
+  for (let i = 0; i < slots.length && remainingCapacity > 0; i += 1) {
     const slot = slots[i];
-    const spawnPosition = new THREE.Vector2(slot.x, slot.y);
-    const swarmCount = slot.role === "swarm" ? Math.min(3, available - spawnedRoles.length) : 1;
-    for (let swarmIndex = 0; swarmIndex < swarmCount; swarmIndex += 1) {
+    const unitCost = ENEMY_TYPES[slot.role]?.threatCost ?? 1;
+    const expansion = slot.role === "swarm" ? 3 : 1;
+    const maxExpansion = Math.min(expansion, remainingCapacity, Math.floor(remainingBudget / unitCost));
+    if (maxExpansion <= 0) continue;
+    for (let swarmIndex = 0; swarmIndex < maxExpansion; swarmIndex += 1) {
       const offset = slot.role === "swarm"
         ? new THREE.Vector2((swarmIndex - 1) * 0.52, (swarmIndex % 2 ? 0.34 : -0.2))
         : new THREE.Vector2();
-      const created = spawnEnemy(slot.role, spawnPosition.clone().add(offset), { formation: template.name, formationIndex: i, wingSign: swarmIndex % 2 ? 1 : -1 });
-      if (created) spawnedRoles.push(created.type);
+      const created = spawnEnemy(slot.role, new THREE.Vector2(slot.x, slot.y).add(offset), {
+        formation: template.name,
+        formationIndex: i,
+        wingSign: swarmIndex % 2 ? 1 : -1,
+      });
+      if (!created) break;
+      spawnedRoles.push(created.type);
+      remainingCapacity -= 1;
+      remainingBudget -= unitCost;
+      actualThreatCost += unitCost;
     }
   }
   if (!spawnedRoles.length) return false;
   state.lastFormation = template.name;
   state.lastFormationAt = state.elapsed;
   state.stats.formationCount += 1;
-  state.stats.formationLog.push({ name: template.name, elapsed: Number(state.elapsed.toFixed(2)), roles: spawnedRoles });
+  state.stats.formationLog.push({
+    name: template.name,
+    elapsed: Number(state.elapsed.toFixed(2)),
+    roles: spawnedRoles,
+    threatCost: actualThreatCost,
+    budget,
+    spatialGap: Number(spatialGap.toFixed(2)),
+  });
   if (state.stats.formationLog.length > 24) state.stats.formationLog.shift();
   toast(`${template.name.toUpperCase()} 编队`, "danger");
   return true;
@@ -1277,6 +1318,8 @@ function removeEnemy(index) {
   enemy.ownedMaterials?.forEach((material) => material.dispose());
   enemies.splice(index, 1);
   state.stats.activeCleanupCount += 1;
+  enemy.visuals?.chargeArc?.children.forEach((segment) => { segment.visible = false; });
+  enemy.visuals?.chargeArc && (enemy.visuals.chargeArc.visible = false);
   if (enemy.type === "boss") syncBossProgress(null);
 }
 
@@ -1971,13 +2014,23 @@ function updateChaser(enemy, dt, toPlayer) {
     enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
     const warning = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 30) * 0.1;
     enemy.visuals.body.scale.setScalar(warning);
+    enemy.visuals.chargeArc.visible = true;
+    const progress = 1 - THREE.MathUtils.clamp(enemy.stateTimer / 0.52, 0, 1);
+    enemy.visuals.chargeArc.children.forEach((segment, index) => {
+      segment.visible = state.reducedMotion ? index === Math.min(2, Math.floor(progress * 3)) : true;
+      segment.material.opacity = state.reducedMotion ? 0.72 : 0.3 + progress * (0.22 + index * 0.08);
+      segment.scale.y = (0.34 + index * 0.18) * (0.8 + progress * 0.65);
+    });
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.chargeArc.children[Math.min(2, Math.floor(progress * 3))]?.material, enemy.stateTimer, 0.52);
     if (enemy.stateTimer <= 0) {
       enemy.visuals.body.scale.setScalar(1);
+      enemy.visuals.chargeArc.visible = false;
+      enemy.visuals.chargeArc.children.forEach((segment) => { segment.visible = false; });
       enemy.velocity.copy(enemy.dashDirection).multiplyScalar(8.8 + state.elapsed * 0.035);
       setEnemyState(enemy, "charge", 0.36);
-      spawnTrail(true);
     }
   } else if (enemy.state === "charge") {
+    enemy.visuals.chargeArc.visible = false;
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 2.1 + Math.random() * 0.7);
   }
   const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
