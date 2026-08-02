@@ -818,7 +818,7 @@ async function jumpToBoss(page) {
     $state.bossSpawned=false;
     $state.bossStart=null;
     $state.bossDeadline=null;
-    $state.elapsed=53;
+    $state.elapsed=100;
     $state.enemySpawnTimer=Infinity;
     updateStage();
     const boss=$enemies.find((enemy)=>enemy.type==='boss');
@@ -833,11 +833,11 @@ async function victoryScenario() {
     await page.startGame();
     const boss = await jumpToBoss(page);
     assert.equal(boss.stage, 3);
-    assert.equal(boss.deadline, 71);
-    assert.ok(boss.timeLeft > 17.5 && boss.timeLeft <= 18);
+    assert.equal(boss.deadline, 126);
+    assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
     assert.equal(boss.bossHp, 30);
     assert.equal(await page.evaluate(`document.querySelector('.time-card > span').textContent`), '首领窗口');
-    assert.equal(await page.evaluate(`document.querySelector('#time-value').textContent`), '00:18');
+    assert.equal(await page.evaluate(`document.querySelector('#time-value').textContent`), '00:26');
 
     const settled = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
@@ -883,6 +883,47 @@ async function bossTimeoutScenario() {
   });
 }
 
+async function bossPhaseTwoScenario() {
+  await withPage('boss-phase-two', {}, async (page) => {
+    await page.startGame();
+    const boss = await jumpToBoss(page);
+    assert.equal(boss.deadline, 126);
+    assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
+    const phase = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      boss.hp=16;
+      $state.dashSequence+=1;
+      damageEnemy(boss);
+      return {phase:$state.stats.bossPhase,enemyPhase:boss.phase,attacks:[...$state.stats.bossAttackLog]};
+    `);
+    assert.equal(phase.phase, 2, 'boss phase 2 did not latch below 50%');
+    assert.equal(phase.enemyPhase, 2, 'boss entity phase did not latch below 50%');
+    assert.ok(phase.attacks.some((attack) => attack.kind === 'phase2-enter'), `phase 2 log missing: ${JSON.stringify(phase.attacks)}`);
+
+    const attacks = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      boss.state='choose'; boss.stateTimer=0; boss.attackIndex=0;
+      const seen=[];
+      for (let attack=0; attack<3; attack+=1) {
+        boss.state='choose'; boss.stateTimer=0;
+        updateBoss(boss,0);
+        seen.push({kind:boss.attackKind,telegraph:boss.telegraph});
+        updateBoss(boss,0.68);
+        updateBoss(boss,0.2);
+      }
+      return {seen,stats:[...$state.stats.bossAttackLog],hazards:$state.stats.activeHazards};
+    `);
+    assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'trianglePulse', 'flankSwarm']);
+    assert.ok(attacks.seen.every((attack) => attack.telegraph >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.seen)}`);
+    assert.ok(attacks.stats.some((attack) => attack.kind === 'sweepBeam' && attack.phase === 2));
+    assert.ok(attacks.stats.some((attack) => attack.kind === 'trianglePulse' && attack.phase === 2));
+    assert.ok(attacks.stats.some((attack) => attack.kind === 'flankSwarm' && attack.phase === 2));
+    await page.gameEvaluate(`finishRun('gameover','bossDeadline');return true`);
+    const cleanup = await page.gameEvaluate('return {enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode}');
+    assert.deepEqual(cleanup, { enemies: 0, hazards: 0, mode: 'gameover' });
+  });
+}
+
 const scenarios = [
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],
@@ -893,6 +934,7 @@ const scenarios = [
   ['replay cleanup and geometry stability', replayCleanupScenario],
   ['boss victory', victoryScenario],
   ['boss timeout defeat', bossTimeoutScenario],
+  ['boss phase two and attack cleanup', bossPhaseTwoScenario],
 ];
 
 let passed = 0;
