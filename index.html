@@ -56,7 +56,7 @@
         </section>
 
         <div class="hud-actions">
-          <button id="mute-button" class="icon-button" type="button" aria-label="静音">♪</button>
+          <button id="mute-button" class="icon-button" type="button" aria-label="静音" aria-pressed="false">♪</button>
           <button id="pause-button" class="icon-button" type="button" aria-label="暂停游戏">Ⅱ</button>
         </div>
       </header>
@@ -79,14 +79,14 @@
         </div>
       </aside>
 
-      <div id="stage-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+      <div id="stage-banner" role="status" aria-live="polite" aria-atomic="true">
         <span>PHASE SHIFT</span>
-        <strong>第一幕 · 深潮接入</strong>
+        <strong></strong>
       </div>
       <div id="combo" aria-hidden="true">连击 ×<b>2</b></div>
       <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
-      <section id="overlay" class="visible" role="dialog" aria-modal="true" aria-labelledby="overlay-title" aria-describedby="overlay-copy">
+      <section id="overlay" class="visible" role="dialog" aria-labelledby="overlay-title" aria-describedby="overlay-copy">
         <div class="overlay-card">
           <div class="signal-mark" aria-hidden="true">
             <i></i><i></i><i></i>
@@ -115,7 +115,7 @@
         </div>
       </section>
 
-      <section id="upgrade-panel" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="upgrade-title" hidden>
+      <section id="upgrade-panel" class="modal-panel" role="dialog" aria-labelledby="upgrade-title" hidden>
         <div class="upgrade-card">
           <p class="kicker">SIGNAL FORK // 选择强化</p>
           <h2 id="upgrade-title">潮汐分岔</h2>
