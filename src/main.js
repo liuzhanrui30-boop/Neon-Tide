@@ -10,9 +10,15 @@ import {
   computeRank,
   computeReward,
   computeSpawnBudget,
-  getStageIndex,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
+import {
+  chooseFormation,
+  getActiveEnemyCap,
+  getFormationSlots,
+  getSpawnInterval,
+  getStageIndex,
+} from "./game/director.js";
 
 const TAU = Math.PI * 2;
 const WORLD_HEIGHT = 14;
@@ -29,13 +35,19 @@ const DASH_BUFFER_WINDOW = 0.16;
 const DASH_RECOVERY_TIME = 1.45;
 const HURT_INVULNERABILITY = 0.95;
 const UPGRADE_GRACE_PERIOD = 0.8;
-const MAX_MINES = 4;
+const MAX_MINES = 8;
 const BOSS_DASH_DAMAGE = 5;
 const BOSS_TELEGRAPH_TIME = 0.68;
 const TRAUMA_DECAY = 1.35;
-const MAX_TRAIL_NODES = Math.min(GAME.maxTrailNodes, 36);
-const MAX_PARTICLES = Math.min(GAME.maxParticles, 220);
-const MAX_ENEMIES = Math.min(GAME.maxEnemies, 24);
+const MAX_TRAIL_NODES = GAME.maxTrailNodes;
+const MAX_PARTICLES = GAME.maxParticles;
+
+function getEnemyCap() {
+  return getActiveEnemyCap({
+    coarsePointer: window.matchMedia?.("(pointer: coarse)").matches ?? false,
+    viewportWidth: window.innerWidth,
+  });
+}
 const STAGE_PALETTES = Object.freeze([
   { background: 0x030b18, grid: 0x124b63, fog: 0x0d5477, ring: 0x36e0ff, primary: 0x36e0ff, secondary: 0x6677ff },
   { background: 0x0b061b, grid: 0x49306c, fog: 0x4e1f75, ring: 0xa56bff, primary: 0xa56bff, secondary: 0xff4fd8 },
@@ -171,7 +183,11 @@ const state = {
   combo: 0,
   comboTimer: 0,
   stageIndex: 0,
+  spawnSequence: 0,
   enemySpawnTimer: 1.1,
+  formationTimer: 4.8,
+  lastFormation: null,
+  lastFormationAt: -Infinity,
   shardSpawnTimer: 1.8,
   dashCharges: [1, 1],
   dashTimer: 0,
@@ -207,6 +223,14 @@ const state = {
     maxCombo: 0,
     nearMisses: 0,
     breaks: 0,
+    enemyPeak: 0,
+    formationCount: 0,
+    formationLog: [],
+    roles: {},
+    beamPeak: 0,
+    activeHazards: 0,
+    chainBreaks: 0,
+    activeCleanupCount: 0,
   },
   cameraLookAhead: new THREE.Vector2(),
   reducedMotion: reducedMotionPreference?.matches ?? false,
@@ -320,7 +344,10 @@ const shared = {
   bossCoreGlowGeometry: new THREE.CircleGeometry(1.14, 36),
   bossOrbitNodeGeometry: new THREE.CircleGeometry(0.11, 12),
   mineRingGeometry: new THREE.RingGeometry(0.86, 0.94, 40),
+  mineTickGeometry: new THREE.RingGeometry(1.12, 1.16, 32),
   eliteOuterGeometry: new THREE.RingGeometry(0.76, 0.83, 32),
+  eliteShockGeometry: new THREE.RingGeometry(0.72, 0.88, 40),
+  swarmWingGeometry: null,
   eliteShieldGeometry: new THREE.RingGeometry(0.94, 1.0, 36),
   bossOuterGeometry: new THREE.RingGeometry(2.28, 2.42, 64),
   bossMiddleGeometry: new THREE.RingGeometry(1.62, 1.76, 56),
@@ -390,6 +417,17 @@ const shared = {
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   }),
+  lancerTelegraphMaterial: new THREE.LineBasicMaterial({
+    color: 0xff9f43, transparent: true, opacity: 0.64, depthWrite: false, blending: THREE.AdditiveBlending,
+  }),
+  lancerBeamMaterial: new THREE.LineBasicMaterial({
+    color: 0xff506f, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending,
+  }),
+  lancerMaterial: new THREE.MeshBasicMaterial({ color: 0xffd166 }),
+  swarmMaterial: new THREE.MeshBasicMaterial({ color: 0x9af6ff }),
+  swarmGlowMaterial: new THREE.MeshBasicMaterial({
+    color: 0x36e0ff, transparent: true, opacity: 0.16, depthWrite: false, blending: THREE.AdditiveBlending,
+  }),
   dangerRingMaterial: new THREE.MeshBasicMaterial({
     color: 0xff9f43,
     transparent: true,
@@ -425,6 +463,7 @@ function createWingGeometry() {
 
 shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
 shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
+shared.swarmWingGeometry = createWingGeometry();
 
 function createBackground() {
   const backdrop = new THREE.Mesh(
@@ -942,15 +981,15 @@ function randomEdgePosition(margin = 0.8) {
 }
 
 function registerEnemy(type, position, group, initialState, overrides = {}) {
-  if (enemies.length >= MAX_ENEMIES) return null;
-  const config = ENEMY_TYPES[type];
+  if (enemies.length >= getEnemyCap()) return null;
+  const config = ENEMY_TYPES[type] ?? ENEMY_TYPES.chaser;
   group.position.set(position.x, position.y, 2);
   world.add(group);
   const enemy = {
     type,
     group,
     velocity: new THREE.Vector2(),
-    speed: 0,
+    speed: config.speed,
     radius: config.radius,
     hp: config.hp,
     maxHp: config.hp,
@@ -968,6 +1007,9 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
     ...overrides,
   };
   enemies.push(enemy);
+  state.stats.enemyPeak = Math.max(state.stats.enemyPeak, enemies.length);
+  const role = config.role ?? type;
+  state.stats.roles[role] = (state.stats.roles[role] ?? 0) + 1;
   return enemy;
 }
 
@@ -980,8 +1022,13 @@ function createChaser(position = randomEdgePosition()) {
   eye.scale.setScalar(0.095);
   eye.position.set(0, 0.1, 0.06);
   group.add(glow, body, eye);
+  const intentTimer = 1.8 + Math.random() * 1.4;
   return registerEnemy("chaser", position, group, "chase", {
-    speed: 1.05 + state.elapsed * 0.012 + Math.random() * 0.35,
+    speed: 2.0 + state.elapsed * 0.014 + Math.random() * 0.24,
+    stateTimer: intentTimer,
+    intentTimer,
+    intentIndex: Math.floor(Math.random() * 3),
+    dashDirection: new THREE.Vector2(),
     visuals: { glow, body },
   });
 }
@@ -991,18 +1038,64 @@ function createStriker(position = randomEdgePosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.strikerGlowMaterial);
   glow.scale.set(1.25, 1.8, 1);
   const body = new THREE.Mesh(shared.strikerGeometry, shared.strikerMaterial);
-  const lineMaterial = shared.telegraphMaterial.clone();
-  const line = new THREE.Line(shared.telegraphLineGeometry, lineMaterial);
+  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
   line.position.z = -0.08;
   line.visible = false;
   group.add(line, glow, body);
   return registerEnemy("striker", position, group, "track", {
-    speed: 1.25,
-    stateTimer: 0.8 + Math.random() * 0.7,
+    speed: 2.0 + Math.random() * 0.22,
+    stateTimer: 0.55 + Math.random() * 0.75,
     dashDirection: new THREE.Vector2(),
     visuals: { glow, body, line },
-    ownedMaterials: [lineMaterial],
     priority: 2,
+  });
+}
+
+function createLancer(position = randomEdgePosition(1.2)) {
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
+  glow.scale.set(1.2, 1.8, 1);
+  const body = new THREE.Mesh(shared.strikerGeometry, shared.lancerMaterial);
+  body.scale.set(0.72, 1.1, 1);
+  const line = new THREE.Line(shared.telegraphLineGeometry, shared.lancerTelegraphMaterial);
+  line.visible = true;
+  line.scale.set(1, 0.9, 1);
+  const beam = new THREE.Line(shared.telegraphLineGeometry, shared.lancerBeamMaterial);
+  beam.visible = false;
+  beam.scale.set(1, 0.92, 1);
+  group.add(line, beam, glow, body);
+  return registerEnemy("lancer", position, group, "lock", {
+    speed: 0.35 + Math.random() * 0.2,
+    stateTimer: 0.65 + Math.random() * 0.35,
+    beamDirection: new THREE.Vector2(),
+    beamWidth: 0.2,
+    visuals: { glow, body, line, beam },
+    priority: 2,
+  });
+}
+
+function createSwarm(position = randomEdgePosition(0.7), wingSign = 0) {
+  const group = new THREE.Group();
+  const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.swarmGlowMaterial);
+  glow.scale.setScalar(0.84);
+  const body = new THREE.Mesh(shared.enemyGeometry, shared.swarmMaterial);
+  body.scale.setScalar(0.55);
+  const leftWing = new THREE.Mesh(shared.swarmWingGeometry, shared.swarmMaterial);
+  const rightWing = new THREE.Mesh(shared.swarmWingGeometry, shared.swarmMaterial);
+  leftWing.scale.set(0.42, 0.42, 1);
+  rightWing.scale.set(-0.42, 0.42, 1);
+  leftWing.position.set(-0.22, -0.08, -0.02);
+  rightWing.position.set(0.22, -0.08, -0.02);
+  group.add(glow, leftWing, rightWing, body);
+  const ingress = new THREE.Vector2().subVectors(player.position, position).normalize();
+  return registerEnemy("swarm", position, group, "ingress", {
+    speed: 2.8 + Math.random() * 0.7,
+    stateTimer: 0.65 + Math.random() * 0.35,
+    wingSign: wingSign || (Math.random() < 0.5 ? -1 : 1),
+    splitTimer: 0.72,
+    dashDirection: ingress,
+    visuals: { glow, body, leftWing, rightWing },
+    priority: 1,
   });
 }
 
@@ -1012,32 +1105,39 @@ function createMine(position = randomShardPosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
   glow.scale.setScalar(1.65);
   const body = new THREE.Mesh(shared.mineGeometry, shared.mineMaterial);
-  const ringMaterial = shared.dangerRingMaterial.clone();
-  const ring = new THREE.Mesh(shared.mineRingGeometry, ringMaterial);
+  const ring = new THREE.Mesh(shared.mineRingGeometry, shared.dangerRingMaterial);
+  const tick = new THREE.Mesh(shared.mineTickGeometry, shared.warningRingMaterial);
   ring.position.z = -0.05;
-  group.add(glow, ring, body);
+  tick.position.z = -0.04;
+  group.add(glow, tick, ring, body);
   return registerEnemy("mine", position, group, "arming", {
-    stateTimer: 1.35,
-    telegraph: 1.35,
+    stateTimer: 1.1,
+    telegraph: 1.1,
     dangerRadius: 0,
     previousDangerRadius: 0,
     pulseHit: false,
-    visuals: { glow, body, ring },
-    ownedMaterials: [ringMaterial],
+    visuals: { glow, body, ring, tick },
     priority: 2,
   });
 }
 
 function createElite(position = randomEdgePosition(1.1)) {
   const group = new THREE.Group();
+  const shockwave = new THREE.Mesh(shared.eliteShockGeometry, shared.dangerRingMaterial);
+  shockwave.visible = false;
   const outer = new THREE.Mesh(shared.eliteOuterGeometry, shared.bossMaterial);
   const shield = new THREE.Mesh(shared.eliteShieldGeometry, shared.warningRingMaterial);
   const body = new THREE.Mesh(shared.enemyGeometry, shared.eliteMaterial);
   body.scale.setScalar(1.75);
-  group.add(shield, outer, body);
+  group.add(shockwave, shield, outer, body);
   return registerEnemy("elite", position, group, "chase", {
-    speed: 0.82 + Math.random() * 0.2,
-    visuals: { shield, outer, body },
+    speed: 1.4 + Math.random() * 0.4,
+    stateTimer: 1.4 + Math.random() * 0.5,
+    shockTimer: 2.6 + Math.random() * 1.2,
+    shockRadius: 0,
+    shockPreviousRadius: 0,
+    dashCharges: 3,
+    visuals: { shockwave, shield, outer, body },
     priority: 3,
   });
 }
@@ -1055,18 +1155,14 @@ function createBoss() {
   core.scale.set(1.15, 0.72, 1);
   const coreGlow = new THREE.Mesh(shared.bossCoreGlowGeometry, shared.bossCoreGlowMaterial);
   coreGlow.scale.set(1.22, 0.76, 1);
-  const lineMaterial = shared.telegraphMaterial.clone();
-  const line = new THREE.Line(shared.telegraphLineGeometry, lineMaterial);
+  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
   line.visible = false;
   const pulseMaterial = shared.dangerRingMaterial.clone();
   const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, pulseMaterial);
   pulseRing.visible = false;
   const orbitNodes = new THREE.Group();
   for (let i = 0; i < 4; i += 1) {
-    const node = new THREE.Mesh(
-      shared.bossOrbitNodeGeometry,
-      i % 2 ? shared.bossOrbitCyanMaterial : shared.bossOrbitDangerMaterial
-    );
+    const node = new THREE.Mesh(shared.bossOrbitNodeGeometry, i % 2 ? shared.bossOrbitCyanMaterial : shared.bossOrbitDangerMaterial);
     const angle = (i / 4) * TAU;
     node.position.set(Math.cos(angle) * 2.72, Math.sin(angle) * 2.72, 0.04);
     orbitNodes.add(node);
@@ -1084,7 +1180,7 @@ function createBoss() {
     hitReactTimer: 0,
     priority: 4,
     visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing },
-    ownedMaterials: [lineMaterial, pulseMaterial],
+    ownedMaterials: [pulseMaterial],
   });
   if (enemy) {
     state.bossSpawned = true;
@@ -1093,24 +1189,80 @@ function createBoss() {
   return enemy;
 }
 
-function spawnEnemy(type = null, position = null) {
-  if (enemies.length >= MAX_ENEMIES) return null;
+function spawnEnemy(type = null, position = null, overrides = {}) {
+  if (enemies.length >= getEnemyCap()) return null;
   let chosenType = type;
   if (!chosenType) {
-    const roll = Math.random();
-    if (state.stageIndex === 0) chosenType = "chaser";
-    else if (state.stageIndex === 1) chosenType = roll < 0.34 ? "striker" : "chaser";
-    else if (roll < 0.42) chosenType = "chaser";
-    else if (roll < 0.7) chosenType = "striker";
-    else if (roll < 0.9) chosenType = "mine";
-    else chosenType = "elite";
+    const roleCycles = [
+      ["chaser", "chaser", "striker", "swarm", "chaser"],
+      ["striker", "lancer", "swarm", "chaser", "striker"],
+      ["chaser", "striker", "lancer", "mine", "swarm", "elite"],
+    ];
+    const roles = roleCycles[Math.min(2, state.stageIndex)] ?? roleCycles[2];
+    chosenType = roles[state.spawnSequence % roles.length];
+    state.spawnSequence += 1;
   }
   const spawnPosition = position ?? (chosenType === "mine" ? randomShardPosition() : randomEdgePosition());
-  if (chosenType === "striker") return createStriker(spawnPosition);
-  if (chosenType === "mine") return createMine(spawnPosition);
-  if (chosenType === "elite") return createElite(spawnPosition);
+  if (chosenType === "striker") return createStriker(spawnPosition, overrides);
+  if (chosenType === "lancer") return createLancer(spawnPosition, overrides);
+  if (chosenType === "mine") return createMine(spawnPosition, overrides);
+  if (chosenType === "swarm") return createSwarm(spawnPosition, overrides.wingSign);
+  if (chosenType === "elite" || chosenType === "bulwark") return createElite(spawnPosition, overrides);
   if (chosenType === "boss") return createBoss();
-  return createChaser(spawnPosition);
+  return createChaser(spawnPosition, overrides);
+}
+
+function formationActiveCost() {
+  return enemies.reduce((cost, enemy) => cost + (ENEMY_TYPES[enemy.type]?.threatCost ?? 1), 0);
+}
+
+function spawnFormation() {
+  if (state.stageIndex >= 3 || state.bossTriggered) return false;
+  const cap = getEnemyCap();
+  const safeGap = Number.isFinite(state.lastFormationAt) ? state.elapsed - state.lastFormationAt : Infinity;
+  let template = chooseFormation({
+    stageIndex: state.stageIndex,
+    elapsed: state.elapsed,
+    lastFormation: state.lastFormation,
+    cooldownRemaining: 0,
+    activeCost: formationActiveCost(),
+    maxEnemyCap: cap,
+    safeGap,
+    seed: Math.floor(state.elapsed * 10) + state.stats.formationCount * 17,
+  });
+  // Stage 1 has a deliberately small director budget; repeat the last valid
+  // template rather than dropping pressure when the candidate list is empty.
+  if (!template && state.stats.formationCount > 0) {
+    template = chooseFormation({
+      stageIndex: state.stageIndex, elapsed: state.elapsed, lastFormation: null, cooldownRemaining: 0,
+      activeCost: formationActiveCost(), maxEnemyCap: cap, safeGap,
+      seed: Math.floor(state.elapsed * 10) + state.stats.formationCount * 31,
+    });
+  }
+  if (!template) return false;
+  const slots = getFormationSlots(template.name, { width: view.halfWidth * 2, height: view.halfHeight * 2 });
+  const available = Math.max(0, cap - enemies.length);
+  const spawnedRoles = [];
+  for (let i = 0; i < slots.length && spawnedRoles.length < available; i += 1) {
+    const slot = slots[i];
+    const spawnPosition = new THREE.Vector2(slot.x, slot.y);
+    const swarmCount = slot.role === "swarm" ? Math.min(3, available - spawnedRoles.length) : 1;
+    for (let swarmIndex = 0; swarmIndex < swarmCount; swarmIndex += 1) {
+      const offset = slot.role === "swarm"
+        ? new THREE.Vector2((swarmIndex - 1) * 0.52, (swarmIndex % 2 ? 0.34 : -0.2))
+        : new THREE.Vector2();
+      const created = spawnEnemy(slot.role, spawnPosition.clone().add(offset), { formation: template.name, formationIndex: i, wingSign: swarmIndex % 2 ? 1 : -1 });
+      if (created) spawnedRoles.push(created.type);
+    }
+  }
+  if (!spawnedRoles.length) return false;
+  state.lastFormation = template.name;
+  state.lastFormationAt = state.elapsed;
+  state.stats.formationCount += 1;
+  state.stats.formationLog.push({ name: template.name, elapsed: Number(state.elapsed.toFixed(2)), roles: spawnedRoles });
+  if (state.stats.formationLog.length > 24) state.stats.formationLog.shift();
+  toast(`${template.name.toUpperCase()} 编队`, "danger");
+  return true;
 }
 
 function removeShard(index) {
@@ -1124,6 +1276,7 @@ function removeEnemy(index) {
   world.remove(enemy.group);
   enemy.ownedMaterials?.forEach((material) => material.dispose());
   enemies.splice(index, 1);
+  state.stats.activeCleanupCount += 1;
   if (enemy.type === "boss") syncBossProgress(null);
 }
 
@@ -1191,7 +1344,11 @@ function resetState() {
   state.health = state.maxHealth;
   state.energy = 0;
   state.stageIndex = 0;
-  state.enemySpawnTimer = 1.1;
+  state.spawnSequence = 0;
+  state.enemySpawnTimer = 0.72;
+  state.formationTimer = 4.8;
+  state.lastFormation = null;
+  state.lastFormationAt = -Infinity;
   state.shardSpawnTimer = 1.8;
   state.dashCharges = [1, 1];
   state.dashTimer = 0;
@@ -1217,6 +1374,14 @@ function resetState() {
   state.stats.maxCombo = 0;
   state.stats.nearMisses = 0;
   state.stats.breaks = 0;
+  state.stats.enemyPeak = 0;
+  state.stats.formationCount = 0;
+  state.stats.formationLog = [];
+  state.stats.roles = {};
+  state.stats.beamPeak = 0;
+  state.stats.activeHazards = 0;
+  state.stats.chainBreaks = 0;
+  state.stats.activeCleanupCount = 0;
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -1786,7 +1951,35 @@ function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wo
 }
 
 function updateChaser(enemy, dt, toPlayer) {
-  steerEnemy(enemy, toPlayer, dt);
+  enemy.stateTimer -= dt;
+  const flank = new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(enemy.intentIndex % 2 ? 1 : -1);
+  if (enemy.state === "chase") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.4, 0.16);
+    if (enemy.stateTimer <= 0) {
+      enemy.intentIndex = (enemy.intentIndex + 1) % 3;
+      if (enemy.intentIndex === 1) setEnemyState(enemy, "flank", 1.35);
+      else if (enemy.intentIndex === 2) {
+        enemy.dashDirection.copy(toPlayer);
+        setEnemyState(enemy, "chargeTelegraph", 0.52, 0.52);
+      } else setEnemyState(enemy, "chase", 2.0 + Math.random() * 0.8);
+    }
+  } else if (enemy.state === "flank") {
+    steerEnemy(enemy, toPlayer.clone().add(flank.multiplyScalar(0.9)).normalize(), dt, enemy.speed * 1.05, 3.5, 0.05);
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 1.4 + Math.random() * 0.8);
+  } else if (enemy.state === "chargeTelegraph") {
+    enemy.velocity.multiplyScalar(Math.exp(-10 * dt));
+    enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+    const warning = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 30) * 0.1;
+    enemy.visuals.body.scale.setScalar(warning);
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.body.scale.setScalar(1);
+      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(8.8 + state.elapsed * 0.035);
+      setEnemyState(enemy, "charge", 0.36);
+      spawnTrail(true);
+    }
+  } else if (enemy.state === "charge") {
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 2.1 + Math.random() * 0.7);
+  }
   const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
   enemy.visuals.glow.scale.setScalar(1.45 * pulse);
 }
@@ -1794,17 +1987,17 @@ function updateChaser(enemy, dt, toPlayer) {
 function updateStriker(enemy, dt, toPlayer) {
   enemy.stateTimer -= dt;
   if (enemy.state === "track") {
-    steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.4, 0.12);
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.8, 0.14);
     if (enemy.stateTimer <= 0) {
       enemy.dashDirection.copy(toPlayer);
       enemy.visuals.line.visible = true;
-      setEnemyState(enemy, "telegraph", 0.62, 0.62);
+      setEnemyState(enemy, "telegraph", 0.55, 0.55);
     }
   } else if (enemy.state === "telegraph") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
-    enemy.velocity.multiplyScalar(Math.exp(-8 * dt));
+    enemy.velocity.multiplyScalar(Math.exp(-10 * dt));
     enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
-    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.62);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.55);
     else {
       enemy.visuals.line.material.color.set(0xff7ae6);
       enemy.visuals.line.material.opacity = 0.72;
@@ -1814,15 +2007,79 @@ function updateStriker(enemy, dt, toPlayer) {
     if (enemy.stateTimer <= 0) {
       enemy.visuals.line.visible = false;
       enemy.visuals.body.scale.setScalar(1);
-      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(12.5);
-      setEnemyState(enemy, "dash", 0.42);
+      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(18 + Math.min(2, state.elapsed * 0.01));
+      setEnemyState(enemy, "dash", 0.44);
+      spawnTrail(true);
     }
   } else if (enemy.state === "dash") {
-    if (enemy.stateTimer <= 0) setEnemyState(enemy, "recover", 0.72);
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "recover", 0.54);
   } else if (enemy.state === "recover") {
     enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
-    if (enemy.stateTimer <= 0) setEnemyState(enemy, "track", 0.9 + Math.random() * 0.65);
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "track", 0.7 + Math.random() * 0.6);
   }
+}
+
+function updateLancer(enemy, dt, toPlayer) {
+  enemy.stateTimer -= dt;
+  if (enemy.state === "lock") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 1.5, 0);
+    if (enemy.stateTimer <= 0) {
+      enemy.beamDirection.copy(toPlayer);
+      enemy.group.rotation.z = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - Math.PI / 2;
+      enemy.visuals.line.visible = true;
+      setEnemyState(enemy, "telegraph", 0.7, 0.7);
+    }
+  } else if (enemy.state === "telegraph") {
+    enemy.velocity.multiplyScalar(Math.exp(-12 * dt));
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    const progress = 1 - enemy.telegraph / 0.7;
+    enemy.visuals.line.scale.set(0.35 + progress * 0.65, 0.72 + progress * 0.24, 1);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.7);
+    else {
+      enemy.visuals.line.material.color.set(0xff9f43);
+      enemy.visuals.line.material.opacity = 0.55 + progress * 0.3;
+    }
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.line.visible = false;
+      enemy.visuals.beam.visible = true;
+      enemy.visuals.beam.scale.set(0.2, 0.96, 1);
+      enemy.beamWidth = 0.2;
+      setEnemyState(enemy, "active", 0.7);
+    }
+  } else if (enemy.state === "active") {
+    enemy.visuals.beam.visible = true;
+    const progress = 1 - Math.max(0, enemy.stateTimer / 0.7);
+    enemy.beamWidth = 0.2 + progress * 0.5;
+    enemy.visuals.beam.scale.set(enemy.beamWidth, 0.96, 1);
+    enemy.visuals.beam.material.color.set(state.reducedMotion ? 0xff9f43 : 0xff506f);
+    enemy.visuals.beam.material.opacity = state.reducedMotion ? 0.7 : 0.84 + progress * 0.12;
+    state.stats.activeHazards += 1;
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.beam.visible = false;
+      setEnemyState(enemy, "recover", 0.85);
+    }
+  } else if (enemy.state === "recover") {
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "lock", 1.3 + Math.random() * 0.7);
+  }
+}
+
+function updateSwarm(enemy, dt, toPlayer) {
+  enemy.stateTimer -= dt;
+  if (enemy.state === "ingress") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 4.2, 0.08);
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "split", 0.78);
+  } else if (enemy.state === "split") {
+    const side = new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(enemy.wingSign);
+    const target = toPlayer.clone().add(side.multiplyScalar(0.85)).normalize();
+    steerEnemy(enemy, target, dt, enemy.speed * 1.08, 4.4, 0.04);
+    enemy.group.rotation.z += enemy.wingSign * dt * 1.7;
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "pursuit", 1.6 + Math.random() * 1.2);
+  } else if (enemy.state === "pursuit") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed * 1.12, 4.2, 0.12);
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "ingress", 0.6 + Math.random() * 0.6);
+  }
+  const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 12 + enemy.wobble) * 0.12;
+  enemy.visuals.glow.scale.setScalar(0.84 * pulse);
 }
 
 function updateMine(enemy, dt) {
@@ -1830,15 +2087,15 @@ function updateMine(enemy, dt) {
   enemy.group.rotation.z += dt * (enemy.state === "arming" ? 0.8 : 2.5);
   if (enemy.state === "arming") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
-    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.ring.material, enemy.telegraph, 1.35);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.ring.material, enemy.telegraph, 1.1);
     else {
       enemy.visuals.ring.material.color.set(0xff9f43);
-      enemy.visuals.ring.material.opacity = 0.72;
+      enemy.visuals.ring.material.opacity = 0.62;
     }
-    const pulse = state.reducedMotion
-      ? 1.05
-      : 0.9 + (1 - enemy.telegraph / 1.35) * 0.35 + Math.sin(state.elapsed * 22) * 0.05;
-    enemy.visuals.ring.scale.setScalar(pulse);
+    const progress = 1 - enemy.telegraph / 1.1;
+    enemy.visuals.ring.scale.setScalar(0.85 + progress * 0.3);
+    enemy.visuals.tick.scale.setScalar(0.8 + progress * 0.55);
+    enemy.visuals.tick.material.opacity = state.reducedMotion ? 0.55 : 0.32 + progress * 0.44;
     if (enemy.stateTimer <= 0) {
       enemy.previousDangerRadius = 0;
       enemy.dangerRadius = 0;
@@ -1849,16 +2106,61 @@ function updateMine(enemy, dt) {
     enemy.previousDangerRadius = enemy.dangerRadius;
     enemy.dangerRadius = THREE.MathUtils.lerp(0.55, 4.8, progress);
     enemy.visuals.ring.scale.setScalar(enemy.dangerRadius / 0.9);
+    enemy.visuals.tick.scale.setScalar(1.2 + progress * 2.2);
     enemy.visuals.ring.material.color.set(0xff506f);
-    enemy.visuals.ring.material.opacity = 0.8;
+    enemy.visuals.ring.material.opacity = state.reducedMotion ? 0.66 : 0.65 + progress * 0.2;
+    enemy.visuals.tick.material.color.set(progress < 0.5 ? 0xff9f43 : 0xff506f);
+    enemy.visuals.tick.material.opacity = state.reducedMotion ? 0.62 : 0.4 + progress * 0.4;
     const glowScale = state.reducedMotion ? 1.4 : 1.4 + progress * 1.2;
     enemy.visuals.glow.scale.setScalar(glowScale);
+    state.stats.activeHazards += 1;
     if (enemy.stateTimer <= 0) enemy.dead = true;
   }
 }
 
 function updateElite(enemy, dt, toPlayer) {
-  steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.15, 0.08);
+  enemy.stateTimer -= dt;
+  enemy.shockTimer -= dt;
+  if (enemy.state === "chase") {
+    steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.8, 0.08);
+    if (enemy.stateTimer <= 0 && enemy.dashCharges > 0) {
+      enemy.dashDirection = toPlayer.clone();
+      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(7.6);
+      enemy.dashCharges -= 1;
+      setEnemyState(enemy, "dash", 0.42);
+    } else if (enemy.shockTimer <= 0) {
+      enemy.shockPreviousRadius = 0;
+      enemy.shockRadius = 0.3;
+      enemy.visuals.shockwave.visible = true;
+      setEnemyState(enemy, "shockTelegraph", 0.64, 0.64);
+      enemy.shockTimer = 3.9 + Math.random() * 0.35;
+    }
+  } else if (enemy.state === "dash") {
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 1.0 + Math.random() * 0.7);
+  } else if (enemy.state === "shockTelegraph") {
+    enemy.velocity.multiplyScalar(Math.exp(-10 * dt));
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    const progress = 1 - enemy.telegraph / 0.64;
+    enemy.visuals.shockwave.scale.setScalar(0.65 + progress * 0.35);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.shockwave.material, enemy.telegraph, 0.64);
+    else {
+      enemy.visuals.shockwave.material.color.set(0xff9f43);
+      enemy.visuals.shockwave.material.opacity = 0.48 + progress * 0.35;
+    }
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "shockExecute", 0.72);
+  } else if (enemy.state === "shockExecute") {
+    const progress = 1 - Math.max(0, enemy.stateTimer / 0.72);
+    enemy.shockPreviousRadius = enemy.shockRadius;
+    enemy.shockRadius = THREE.MathUtils.lerp(0.6, 6.0, progress);
+    enemy.visuals.shockwave.scale.setScalar(enemy.shockRadius / 0.88);
+    enemy.visuals.shockwave.material.color.set(0xff506f);
+    enemy.visuals.shockwave.material.opacity = state.reducedMotion ? 0.65 : 0.62 + (1 - progress) * 0.2;
+    state.stats.activeHazards += 1;
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.shockwave.visible = false;
+      setEnemyState(enemy, "chase", 1.1 + Math.random() * 0.7);
+    }
+  }
   enemy.visuals.shield.rotation.z += dt * 1.4;
   enemy.visuals.outer.rotation.z -= dt * 0.9;
   const shieldScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 5 + enemy.wobble) * 0.07;
@@ -1886,7 +2188,7 @@ function beginBossExecute(enemy) {
     enemy.dangerRadius = 0.9;
     setEnemyState(enemy, "execute", 1.05);
   } else {
-    const availableSlots = Math.max(0, Math.min(2, MAX_ENEMIES - enemies.length));
+    const availableSlots = Math.max(0, Math.min(2, getEnemyCap() - enemies.length));
     for (let i = 0; i < availableSlots; i += 1) {
       const angle = (i / Math.max(1, availableSlots)) * TAU + enemy.wobble;
       createChaser(new THREE.Vector2(
@@ -1969,9 +2271,23 @@ function updateBoss(enemy, dt) {
 }
 
 function waveReachedPlayer(enemy, distance) {
-  if (enemy.pulseHit || enemy.dangerRadius <= 0) return false;
+  const radius = enemy.dangerRadius ?? enemy.shockRadius ?? 0;
+  const previousRadius = enemy.previousDangerRadius ?? enemy.shockPreviousRadius ?? 0;
+  if (enemy.pulseHit || radius <= 0) return false;
   const band = player.radius + 0.34;
-  return distance + band >= enemy.previousDangerRadius && distance - band <= enemy.dangerRadius;
+  return distance + band >= previousRadius && distance - band <= radius;
+}
+
+function beamHitsPlayer(enemy) {
+  if (enemy.type !== "lancer" || enemy.state !== "active") return false;
+  const origin = enemy.group.position;
+  const direction = enemy.beamDirection;
+  const relativeX = player.position.x - origin.x;
+  const relativeY = player.position.y - origin.y;
+  const along = relativeX * direction.x + relativeY * direction.y;
+  if (along < 0 || along > 18) return false;
+  const distance = Math.abs(relativeX * direction.y - relativeY * direction.x);
+  return distance < player.radius + enemy.beamWidth * 0.42;
 }
 
 function registerNearMiss(enemy, distance, collided = false) {
@@ -2062,6 +2378,7 @@ function damageEnemy(enemy) {
 }
 
 function updateEnemies(dt) {
+  state.stats.activeHazards = 0;
   const initialCount = enemies.length;
   for (let index = initialCount - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
@@ -2070,19 +2387,21 @@ function updateEnemies(dt) {
     const distance = Math.max(toPlayer.length(), 0.001);
     toPlayer.multiplyScalar(1 / distance);
     if (enemy.type === "striker") updateStriker(enemy, dt, toPlayer);
+    else if (enemy.type === "lancer") updateLancer(enemy, dt, toPlayer);
+    else if (enemy.type === "swarm") updateSwarm(enemy, dt, toPlayer);
     else if (enemy.type === "mine") updateMine(enemy, dt);
-    else if (enemy.type === "elite") updateElite(enemy, dt, toPlayer);
+    else if (enemy.type === "elite" || enemy.type === "bulwark") updateElite(enemy, dt, toPlayer);
     else if (enemy.type === "boss") updateBoss(enemy, dt);
     else updateChaser(enemy, dt, toPlayer);
     if (enemy.dead) continue;
-    if (enemy.type !== "mine" && enemy.state !== "enter") {
+    const stationary = ["enter", "telegraph", "active", "shockTelegraph", "shockExecute", "detonate", "chargeTelegraph"].includes(enemy.state);
+    if (enemy.type !== "mine" && !stationary) {
       enemy.group.position.x += enemy.velocity.x * dt;
       enemy.group.position.y += enemy.velocity.y * dt;
-      if (enemy.velocity.lengthSq() > 0.01 && enemy.state !== "telegraph") {
-        enemy.group.rotation.z = Math.atan2(enemy.velocity.y, enemy.velocity.x) - Math.PI / 2;
-      }
+      if (enemy.velocity.lengthSq() > 0.01) enemy.group.rotation.z = Math.atan2(enemy.velocity.y, enemy.velocity.x) - Math.PI / 2;
     }
   }
+  state.stats.beamPeak = Math.max(state.stats.beamPeak, enemies.filter((enemy) => enemy.type === "lancer" && enemy.state === "active").length);
 
   for (let index = enemies.length - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
@@ -2096,11 +2415,12 @@ function updateEnemies(dt) {
     if (!enemy || enemy.dead) continue;
     const distance = Math.max(player.position.distanceTo(enemy.group.position), 0.001);
     const contactRadius = enemy.type === "boss" ? 2.25 : enemy.radius;
-    const bodyContact = enemy.type !== "mine" && enemy.state !== "enter" && distance < player.radius + contactRadius;
-    const waveContact = (enemy.type === "mine" || enemy.type === "boss") && waveReachedPlayer(enemy, distance);
-    registerNearMiss(enemy, distance, bodyContact || waveContact);
+    const bodyContact = !["mine", "lancer"].includes(enemy.type) && enemy.state !== "enter" && distance < player.radius + contactRadius;
+    const waveContact = ["mine", "boss", "elite", "bulwark"].includes(enemy.type) && waveReachedPlayer(enemy, distance);
+    const beamContact = beamHitsPlayer(enemy);
+    registerNearMiss(enemy, distance, bodyContact || waveContact || beamContact);
     if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
-    if (bodyContact || waveContact) {
+    if (bodyContact || waveContact || beamContact) {
       enemy.pulseHit = waveContact || enemy.pulseHit;
       damagePlayer(enemy);
     }
@@ -2120,6 +2440,10 @@ function destroyEnemy(enemy, source) {
   if (source === "dash") {
     awardReward("break");
     state.stats.breaks += 1;
+  }
+  if (enemy.type === "swarm") {
+    state.stats.chainBreaks += 1;
+    spawnParticleBurst(position, 0x64f5ff, 5, 2.4, 0.72);
   }
   if (enemy.type !== "boss") {
     triggerFeedback("medium", {
@@ -2165,16 +2489,27 @@ function damagePlayer(enemy) {
 }
 
 function updateSpawning(dt) {
+  if (state.stageIndex >= 3 || state.bossTriggered) return;
   state.enemySpawnTimer -= dt;
+  state.formationTimer -= dt;
   const healthPercent = (state.health / Math.max(1, state.maxHealth)) * 100;
-  const spawnBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
-  const stage = STAGES[state.stageIndex];
-  const enemyInterval = Math.max(0.38, (1.18 - state.elapsed * 0.009) / stage.spawnRate);
-  if (state.enemySpawnTimer <= 0 && state.stageIndex < 3) {
-    const cappedBudget = Math.min(MAX_ENEMIES, spawnBudget);
-    if (enemies.length < cappedBudget) spawnEnemy();
-    if (enemies.length < cappedBudget && state.stageIndex === 2 && Math.random() < 0.22) spawnEnemy();
-    state.enemySpawnTimer = enemyInterval;
+  const reliefBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
+  const cap = getEnemyCap();
+  const targetPopulation = Math.min(cap, [12, 19, 27][state.stageIndex] ?? 27);
+  const easedTarget = healthPercent <= 34 ? Math.max(8, Math.floor(targetPopulation * 0.74)) : targetPopulation;
+
+  if (state.formationTimer <= 0) {
+    const formed = spawnFormation();
+    state.formationTimer = 5 + Math.random() * 4;
+    if (!formed) state.formationTimer = Math.min(state.formationTimer, 2.1);
+  }
+
+  if (state.enemySpawnTimer <= 0) {
+    const remaining = Math.max(0, Math.min(cap, easedTarget) - enemies.length);
+    const burstLimit = state.stageIndex === 0 ? 1 : state.stageIndex === 1 ? 2 : 3;
+    const burst = Math.min(remaining, burstLimit, Math.max(1, reliefBudget + state.stageIndex));
+    for (let index = 0; index < burst; index += 1) spawnEnemy();
+    state.enemySpawnTimer = getSpawnInterval(state.stageIndex, state.elapsed);
   }
 
   state.shardSpawnTimer -= dt;
@@ -2588,7 +2923,7 @@ function animate() {
     updateTrails(idleSimDt);
   }
   const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / GAME.overdriveEnergy;
-  const intensity = THREE.MathUtils.clamp((enemies.length / MAX_ENEMIES) * 0.7 + energyIntensity * 0.3, 0, 1);
+  const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(wallDt);
   renderer.render(scene, camera);

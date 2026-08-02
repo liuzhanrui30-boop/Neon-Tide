@@ -409,7 +409,7 @@ async function desktopCoreScenario() {
     assert.equal(load.focus, 'primary-button');
     assert.deepEqual(load.size, [1440, 900]);
     assert.ok(load.overflow[0] <= 0 && load.overflow[1] <= 0, `desktop overflow: ${load.overflow}`);
-    assert.equal(load.timer, '00:53');
+    assert.equal(load.timer, '01:40');
     assert.equal(load.label, '首领接入');
 
     await page.startGame();
@@ -572,6 +572,60 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
       assert.ok(rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= width + 0.5 && rect.bottom <= height + 0.5,
         `${name}: ${elementName} outside viewport ${JSON.stringify(rect)}`);
     }
+    page.requireDev('coarse-pointer combat cap probe');
+    const cap = await page.gameEvaluate(`
+      clearWorldEntities();
+      for (let index=0; index<50; index+=1) spawnEnemy('chaser');
+      return {cap:getEnemyCap(),count:$enemies.length,peak:$state.stats.enemyPeak};
+    `);
+    assert.equal(cap.cap, 28, `${name}: coarse enemy cap changed`);
+    assert.ok(cap.count <= cap.cap && cap.peak <= cap.cap, `${name}: coarse cap exceeded ${JSON.stringify(cap)}`);
+  });
+}
+
+
+async function highPressureCombatScenario() {
+  await withPage('high-pressure-combat', {}, async (page) => {
+    page.requireDev('high-pressure combat statistics probe');
+    await page.startGame();
+    const snapshot = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=0;
+      $state.elapsed=0;
+      $state.enemySpawnTimer=0;
+      $state.formationTimer=0;
+      for (let tick=0; tick<30; tick+=1) {
+        $state.elapsed=tick;
+        if (tick > 0 && tick % 6 === 0) $state.formationTimer=0;
+        updateSpawning(0.1);
+      }
+      const firstThirty={formations:$state.stats.formationCount,peak:$state.stats.enemyPeak,roles:{...$state.stats.roles}};
+      $state.stageIndex=1;
+      $state.elapsed=42;
+      $state.formationTimer=0;
+      updateSpawning(0.1);
+      const stageTwo={formations:$state.stats.formationCount,log:[...$state.stats.formationLog]};
+      $state.stageIndex=2;
+      $state.elapsed=80;
+      $state.formationTimer=0;
+      updateSpawning(0.1);
+      const stageThree={formations:$state.stats.formationCount,log:[...$state.stats.formationLog]};
+      const lancer=spawnEnemy('lancer',new THREE.Vector2(-4,0));
+      for (let tick=0; tick<90; tick+=1) updateLancer(lancer,0.016,new THREE.Vector2(1,0));
+      const lancerActive=lancer.state==='active' || lancer.visuals.beam.visible;
+      const roles={...$state.stats.roles};
+      const peak=$state.stats.enemyPeak;
+      clearWorldEntities();
+      return {firstThirty,stageTwo,stageThree,lancerActive,roles,peak,afterCleanup:$state.stats.activeCleanupCount,activeEnemies:$enemies.length};
+    `);
+    assert.ok(snapshot.firstThirty.peak >= 8, `enemy density too low in first 30s: ${snapshot.firstThirty.peak}`);
+    assert.ok(snapshot.firstThirty.formations >= 2, `first 30s formations: ${snapshot.firstThirty.formations}`);
+    assert.ok(Object.keys(snapshot.firstThirty.roles).length >= 3, `first 30s roles: ${JSON.stringify(snapshot.firstThirty.roles)}`);
+    assert.ok(snapshot.stageTwo.formations >= snapshot.firstThirty.formations + 1, 'stage 2 formation did not fire');
+    assert.ok(snapshot.stageThree.formations >= snapshot.stageTwo.formations + 1, 'stage 3 formation did not fire');
+    assert.equal(snapshot.lancerActive, true, 'lancer beam telegraph/active lifecycle did not run');
+    assert.ok(snapshot.roles.Lancer >= 1, `lancer role missing: ${JSON.stringify(snapshot.roles)}`);
+    assert.ok(snapshot.afterCleanup > 0 && snapshot.activeEnemies === 0, 'combat cleanup left orphan enemies');
   });
 }
 
@@ -831,6 +885,7 @@ async function bossTimeoutScenario() {
 
 const scenarios = [
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
+  ['high-pressure combat director', highPressureCombatScenario],
   ['phone coarse layout 390x844', () => coarseLayoutScenario('phone-390x844', 390, 844, 2)],
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
   ['reduced-motion warnings', reducedMotionScenario],
