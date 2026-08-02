@@ -763,6 +763,7 @@ function syncPlayerTransform() {
 }
 
 function createParticlePool(count = MAX_PARTICLES) {
+  if (particlePool.length > 0) return particlePool.length;
   for (let i = 0; i < count; i += 1) {
     const material = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -777,9 +778,11 @@ function createParticlePool(count = MAX_PARTICLES) {
     world.add(mesh);
     particlePool.push({ mesh, life: 0, maxLife: 0, velocity: new THREE.Vector2() });
   }
+  return particlePool.length;
 }
 
 function createTrailPool(count = MAX_TRAIL_NODES) {
+  if (trailPool.length > 0) return trailPool.length;
   const bodyGeometry = createTriangleGeometry(0.58, 0.34, -0.38);
   const wingGeometry = createWingGeometry();
   for (let i = 0; i < count; i += 1) {
@@ -803,6 +806,7 @@ function createTrailPool(count = MAX_TRAIL_NODES) {
     world.add(group);
     trailPool.push({ group, meshes: [body, leftWing, rightWing], life: 0, maxLife: 0 });
   }
+  return trailPool.length;
 }
 
 function spawnTrail(force = false) {

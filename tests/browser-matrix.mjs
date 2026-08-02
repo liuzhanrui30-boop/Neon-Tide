@@ -745,6 +745,9 @@ async function runtimeGuardScenario() {
     await page.startGame();
     const injected = await page.gameEvaluate(`
       const before={setup:runtimeStats.inputSetupCount,refresh:runtimeStats.composerRefreshCount};
+      const pools={particles:particlePool.length,trails:trailPool.length};
+      createParticlePool();
+      createTrailPool();
       setupInput();
       setupInput();
       clearWorldEntities();
@@ -753,9 +756,10 @@ async function runtimeGuardScenario() {
       bad.velocity.y=Infinity;
       $player.position.x=NaN;
       $state.enemySpawnTimer=Infinity;
-      return {before,afterSetup:runtimeStats.inputSetupCount};
+      return {before,pools,afterPools:{particles:particlePool.length,trails:trailPool.length},afterSetup:runtimeStats.inputSetupCount};
     `);
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
+    assert.deepEqual(injected.afterPools, injected.pools, 'reopening pools duplicated geometry/materials');
     await sleep(100);
     const healed = await page.gameEvaluate(`return {
       guards:runtimeStats.finiteGuards,
