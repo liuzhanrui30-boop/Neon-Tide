@@ -629,8 +629,7 @@ async function highPressureCombatScenario() {
       const healthBefore=$state.health;
       updateEnemies(0.016);
       const beamCollision={healthBefore,healthAfter:$state.health,hazards:$state.stats.activeHazards,beamPeak:$state.stats.beamPeak};
-      for (let tick=0; tick<90; tick+=1) updateLancer(lancer,0.016,new THREE.Vector2(1,0));
-      const lancerActive=lancer.state==='active' || lancer.visuals.beam.visible;
+      const lancerActive=lancer.state==='active' && lancer.visuals.beam.visible;
       const roles={...$state.stats.roles};
       const peak=$state.stats.enemyPeak;
       clearWorldEntities();
