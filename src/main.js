@@ -155,6 +155,7 @@ const state = {
   upgradeTriggered: [false, false],
   bossTriggered: false,
   bossSpawned: false,
+  bossDeadline: null,
   muted: false,
   ownedUpgrades: [],
   upgradeOptions: [],
@@ -747,6 +748,7 @@ function resetState() {
   state.upgradeTriggered = [false, false];
   state.bossTriggered = false;
   state.bossSpawned = false;
+  state.bossDeadline = null;
   state.ownedUpgrades = [];
   state.upgradeOptions = [];
   state.modifiers.speed = 1;
@@ -1130,7 +1132,7 @@ function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wo
 
 function updateChaser(enemy, dt, toPlayer) {
   steerEnemy(enemy, toPlayer, dt);
-  const pulse = 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
+  const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
   enemy.visuals.glow.scale.setScalar(1.45 * pulse);
 }
 
@@ -1147,7 +1149,8 @@ function updateStriker(enemy, dt, toPlayer) {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
     enemy.velocity.multiplyScalar(Math.exp(-8 * dt));
     enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
-    enemy.visuals.body.scale.setScalar(1 + Math.sin(state.elapsed * 32) * 0.12);
+    const telegraphScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 32) * 0.12;
+    enemy.visuals.body.scale.setScalar(telegraphScale);
     if (enemy.stateTimer <= 0) {
       enemy.visuals.line.visible = false;
       enemy.visuals.body.scale.setScalar(1);
@@ -1167,7 +1170,9 @@ function updateMine(enemy, dt) {
   enemy.group.rotation.z += dt * (enemy.state === "arming" ? 0.8 : 2.5);
   if (enemy.state === "arming") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
-    const pulse = 0.9 + (1 - enemy.telegraph / 1.35) * 0.35 + Math.sin(state.elapsed * 22) * 0.05;
+    const pulse = state.reducedMotion
+      ? 1.1
+      : 0.9 + (1 - enemy.telegraph / 1.35) * 0.35 + Math.sin(state.elapsed * 22) * 0.05;
     enemy.visuals.ring.scale.setScalar(pulse);
     if (enemy.stateTimer <= 0) {
       enemy.previousDangerRadius = 0;
@@ -1179,7 +1184,8 @@ function updateMine(enemy, dt) {
     enemy.previousDangerRadius = enemy.dangerRadius;
     enemy.dangerRadius = THREE.MathUtils.lerp(0.55, 4.8, progress);
     enemy.visuals.ring.scale.setScalar(enemy.dangerRadius / 0.9);
-    enemy.visuals.glow.scale.setScalar(1.4 + progress * 1.2);
+    const glowScale = state.reducedMotion ? 1.4 : 1.4 + progress * 1.2;
+    enemy.visuals.glow.scale.setScalar(glowScale);
     if (enemy.stateTimer <= 0) enemy.dead = true;
   }
 }
@@ -1188,7 +1194,7 @@ function updateElite(enemy, dt, toPlayer) {
   steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.15, 0.08);
   enemy.visuals.shield.rotation.z += dt * 1.4;
   enemy.visuals.outer.rotation.z -= dt * 0.9;
-  const shieldScale = 1 + Math.sin(state.elapsed * 5 + enemy.wobble) * 0.07;
+  const shieldScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 5 + enemy.wobble) * 0.07;
   enemy.visuals.shield.scale.setScalar(shieldScale);
 }
 
@@ -1244,7 +1250,9 @@ function updateBoss(enemy, dt) {
     if (enemy.attackKind === "charge") {
       enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
     } else {
-      const warningScale = 1 + (1 - enemy.telegraph / BOSS_TELEGRAPH_TIME) * 2.1;
+      const warningScale = state.reducedMotion
+        ? 2.4
+        : 1 + (1 - enemy.telegraph / BOSS_TELEGRAPH_TIME) * 2.1;
       enemy.visuals.pulseRing.scale.setScalar(warningScale);
     }
     if (enemy.stateTimer <= 0) beginBossExecute(enemy);
@@ -1255,7 +1263,8 @@ function updateBoss(enemy, dt) {
       enemy.dangerRadius = THREE.MathUtils.lerp(0.9, Math.max(view.halfWidth, view.halfHeight) + 2, progress);
       enemy.visuals.pulseRing.scale.setScalar(enemy.dangerRadius);
     } else if (enemy.attackKind !== "charge") {
-      enemy.visuals.pulseRing.scale.setScalar(1 + Math.sin(state.elapsed * 18) * 0.18);
+      const summonScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 18) * 0.18;
+      enemy.visuals.pulseRing.scale.setScalar(summonScale);
     }
     if (enemy.stateTimer <= 0) {
       enemy.visuals.pulseRing.visible = false;
@@ -1495,7 +1504,9 @@ function updateHUD(dt) {
   const secondArc = 190 + Math.round(state.dashCharges[1] * 170);
   dom.dashRing.style.background = `conic-gradient(from -90deg, #ff4fd8 0deg ${firstArc}deg, rgba(255,79,216,.14) ${firstArc}deg 170deg, transparent 170deg 190deg, #64f5ff 190deg ${secondArc}deg, rgba(100,245,255,.14) ${secondArc}deg 360deg)`;
   const stage = STAGES[state.stageIndex];
-  const stageEnd = Number.isFinite(stage.end) ? stage.end : GAME.duration;
+  const stageEnd = state.stageIndex === 3 && state.bossDeadline !== null
+    ? state.bossDeadline
+    : Number.isFinite(stage.end) ? stage.end : GAME.duration;
   const stageDuration = Math.max(0.001, stageEnd - stage.start);
   const stageProgress = THREE.MathUtils.clamp(((state.elapsed - stage.start) / stageDuration) * 100, 0, 100);
   dom.stageName.textContent = STAGE_LABELS[state.stageIndex] ?? stage.name;
@@ -1537,6 +1548,8 @@ function beginBossStage() {
   for (let index = enemies.length - 1; index >= 0; index -= 1) {
     if (enemies[index].priority < 4) removeEnemy(index);
   }
+  state.bossDeadline = state.elapsed + 18;
+  state.timeLeft = 18;
   state.enemySpawnTimer = Infinity;
   toast("潮汐守卫已锁定", "danger");
   spawnParticleBurst(new THREE.Vector2(0, view.halfHeight - 0.6), 0xe7ffff, 28, 4.2, 1.25);
@@ -1677,7 +1690,8 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (state.mode === "playing") {
     state.elapsed += dt;
-    state.timeLeft = Math.max(0, GAME.duration - state.elapsed);
+    const runDeadline = state.bossDeadline ?? GAME.duration;
+    state.timeLeft = Math.max(0, runDeadline - state.elapsed);
     state.dashTimer = Math.max(0, state.dashTimer - dt);
     state.hurtInvuln = Math.max(0, state.hurtInvuln - dt);
     input.dashBuffer = Math.max(0, input.dashBuffer - dt);
