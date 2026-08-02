@@ -2,7 +2,7 @@
 
 ## 状态
 
-本轮仅提交验收测试，Boss runtime 尚未实现，故测试应保持红灯，等待 Task 2 修复波次完成后再继续实现。
+已在 Task 2 修复提交 `1862a10` 上完成 Boss runtime：二阶段状态锁存、攻击生命周期和终局清理已接入。
 
 ## 测试变更
 
@@ -12,11 +12,18 @@
   - 观察横扫光束、三角脉冲、两侧蜂群三种二阶段攻击及至少 0.68 秒 telegraph；
   - 终局后确认敌人和 active hazard 清理为 0。
 
-## 红灯验证
+## 验证
 
 - `PATH="$PWD/.runtime/node-v22.14.0-darwin-arm64/bin:$PATH" npm test`：16/16 通过（纯逻辑测试尚未覆盖新 runtime）。
-- `tests/browser-matrix.mjs` 当前在页面初始化阶段超时（Vite/Chrome 页面未出现 canvas），因此无法运行到新增场景；新增断言仍会在 Boss phase2 runtime 缺失时明确失败（缺少 `bossPhase`、`bossAttackLog`、phase2 attack kinds）。
+- `PATH="$PWD/.runtime/node-v22.14.0-darwin-arm64/bin:$PATH" npm test`：16/16 通过。
+- `PATH="$PWD/.runtime/node-v22.14.0-darwin-arm64/bin:$PATH" npm run build`：通过；仅保留 Three.js bundle 体积提示。
+- `tests/browser-matrix.mjs`：当前环境 Chrome/CDP 在页面初始化时未出现 canvas（Vite 页面加载超时），因此无法完成浏览器场景；待可用 WebGL/CDP 环境复跑。
 
 ## 下一步
 
-待 Task 2 fix 合并后，恢复 `src/main.js` 实现 Boss phase2、double pulse、phase1 swarm、攻击生命周期与终局清理，再运行完整 browser matrix、`npm test` 和 `npm run build`。
+实现包含：
+
+- 第一阶段锁定冲撞、双脉冲、蜂群召唤；
+- HP < 50% 一次性进入 phase 2，并在 `state.stats`/Boss 实体可观察；
+- 第二阶段横扫光束、三角脉冲、两侧蜂群夹击，统一 0.68 秒 telegraph；
+- Beam 碰撞、脉冲 hazard 计数，以及胜负/截止时敌人和 hazard 清零。

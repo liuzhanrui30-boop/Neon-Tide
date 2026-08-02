@@ -233,6 +233,9 @@ const state = {
     activeHazards: 0,
     chainBreaks: 0,
     activeCleanupCount: 0,
+    bossPhase: 1,
+    bossAttackLog: [],
+    bossAttackTelegraphs: [],
   },
   cameraLookAhead: new THREE.Vector2(),
   reducedMotion: reducedMotionPreference?.matches ?? false,
@@ -1187,6 +1190,14 @@ function createBoss() {
     telegraph: 0,
     attackIndex: 0,
     attackKind: "charge",
+    phase: 1,
+    phase2Triggered: false,
+    pulseIndex: -1,
+    beamDirection: new THREE.Vector2(0, -1),
+    beamWidth: 0.28,
+    beamStartAngle: 0,
+    beamEndAngle: 0,
+    attackElapsed: 0,
     dashDirection: new THREE.Vector2(),
     dangerRadius: 0,
     previousDangerRadius: 0,
@@ -1425,6 +1436,9 @@ function resetState() {
   state.stats.activeHazards = 0;
   state.stats.chainBreaks = 0;
   state.stats.activeCleanupCount = 0;
+  state.stats.bossPhase = 1;
+  state.stats.bossAttackLog = [];
+  state.stats.bossAttackTelegraphs = [];
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -1655,6 +1669,8 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
   if (state.runFinished || state.mode !== "playing" || !["gameover", "victory"].includes(outcome)) return false;
   state.runFinished = true;
   state.terminalReason = reason;
+  while (enemies.length) removeEnemy(enemies.length - 1);
+  state.stats.activeHazards = 0;
   if (outcome === "victory") state.score += 250;
   updateHighScore();
   transitionTo(outcome);
@@ -2220,36 +2236,100 @@ function updateElite(enemy, dt, toPlayer) {
   enemy.visuals.shield.scale.setScalar(shieldScale);
 }
 
-function beginBossTelegraph(enemy) {
-  enemy.attackKind = ["charge", "pulse", "summon"][enemy.attackIndex % 3];
-  enemy.attackIndex += 1;
+function recordBossAttack(enemy, kind) {
+  const entry = Object.freeze({ kind, phase: enemy.phase, elapsed: Number(state.elapsed.toFixed(2)) });
+  state.stats.bossAttackLog.push(entry);
+  if (state.stats.bossAttackLog.length > 24) state.stats.bossAttackLog.shift();
+  return entry;
+}
+
+function spawnBossSwarm(enemy, flanks = false) {
+  const availableSlots = Math.max(0, Math.min(flanks ? 4 : 3, getEnemyCap() - enemies.length));
+  for (let index = 0; index < availableSlots; index += 1) {
+    const side = index % 2 ? 1 : -1;
+    const position = flanks
+      ? new THREE.Vector2(side * (view.halfWidth - 1.5), 2.7 - Math.floor(index / 2) * 1.25)
+      : new THREE.Vector2(
+        enemy.group.position.x + Math.cos((index / Math.max(1, availableSlots)) * TAU + enemy.wobble) * 2.9,
+        enemy.group.position.y + Math.sin((index / Math.max(1, availableSlots)) * TAU + enemy.wobble) * 1.9
+      );
+    createSwarm(position, side);
+  }
+}
+
+function enterBossPhaseTwo(enemy) {
+  if (!enemy || enemy.phase2Triggered || enemy.hp >= enemy.maxHp * 0.5) return false;
+  enemy.phase = 2;
+  enemy.phase2Triggered = true;
+  enemy.attackIndex = 0;
   enemy.pulseHit = false;
   enemy.previousDangerRadius = 0;
   enemy.dangerRadius = 0;
-  enemy.visuals.line.visible = enemy.attackKind === "charge";
-  enemy.visuals.pulseRing.visible = enemy.attackKind !== "charge";
+  state.stats.bossPhase = 2;
+  recordBossAttack(enemy, "phase2-enter");
+  toast("守卫失稳 · 横扫协议启动", "danger");
+  triggerFeedback("large", {
+    position: new THREE.Vector2(enemy.group.position.x, enemy.group.position.y),
+    color: 0xff7ae6,
+    particles: 20,
+    speed: 3.8,
+    size: 1.12,
+    rippleScale: 2.3,
+    flashColor: "#ff7ae6",
+    flashOpacity: 0.17,
+    text: "PHASE II",
+    tone: "danger",
+  });
+  setEnemyState(enemy, "recover", 0.74);
+  return true;
+}
+
+function beginBossTelegraph(enemy) {
+  const attackPool = enemy.phase === 2
+    ? ["sweepBeam", "trianglePulse", "flankSwarm"]
+    : ["charge", "doublePulse", "summonSwarm"];
+  enemy.attackKind = attackPool[enemy.attackIndex % attackPool.length];
+  enemy.attackIndex += 1;
+  enemy.pulseHit = false;
+  enemy.pulseIndex = -1;
+  enemy.attackElapsed = 0;
+  enemy.previousDangerRadius = 0;
+  enemy.dangerRadius = 0;
+  const lineAttack = enemy.attackKind === "charge" || enemy.attackKind === "sweepBeam";
+  enemy.visuals.line.visible = lineAttack;
+  enemy.visuals.pulseRing.visible = !lineAttack;
   if (enemy.attackKind === "charge") enemy.dashDirection.copy(player.position).sub(enemy.group.position).normalize();
+  if (enemy.attackKind === "sweepBeam") {
+    enemy.beamDirection.copy(player.position).sub(enemy.group.position).normalize();
+    enemy.beamStartAngle = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - 1.12;
+    enemy.beamEndAngle = enemy.beamStartAngle + 2.24;
+  }
+  recordBossAttack(enemy, enemy.attackKind);
+  state.stats.bossAttackTelegraphs.push(BOSS_TELEGRAPH_TIME);
+  if (state.stats.bossAttackTelegraphs.length > 24) state.stats.bossAttackTelegraphs.shift();
   setEnemyState(enemy, "telegraph", BOSS_TELEGRAPH_TIME, BOSS_TELEGRAPH_TIME);
 }
 
 function beginBossExecute(enemy) {
-  enemy.visuals.line.visible = false;
-  if (enemy.attackKind === "charge") {
+  const attack = enemy.attackKind;
+  enemy.visuals.line.visible = attack === "sweepBeam";
+  if (attack === "charge") {
     enemy.velocity.copy(enemy.dashDirection).multiplyScalar(9.5);
     setEnemyState(enemy, "execute", 0.72);
-  } else if (enemy.attackKind === "pulse") {
+  } else if (attack === "doublePulse" || attack === "pulse") {
     enemy.dangerRadius = 0.9;
-    setEnemyState(enemy, "execute", 1.05);
+    enemy.pulseIndex = -1;
+    setEnemyState(enemy, "execute", 1.44);
+  } else if (attack === "trianglePulse") {
+    enemy.dangerRadius = 0.9;
+    enemy.pulseIndex = -1;
+    setEnemyState(enemy, "execute", 1.92);
+  } else if (attack === "sweepBeam") {
+    enemy.beamWidth = 0.3;
+    setEnemyState(enemy, "execute", 1.16);
   } else {
-    const availableSlots = Math.max(0, Math.min(2, getEnemyCap() - enemies.length));
-    for (let i = 0; i < availableSlots; i += 1) {
-      const angle = (i / Math.max(1, availableSlots)) * TAU + enemy.wobble;
-      createChaser(new THREE.Vector2(
-        enemy.group.position.x + Math.cos(angle) * 2.8,
-        enemy.group.position.y + Math.sin(angle) * 2.2
-      ));
-    }
-    setEnemyState(enemy, "execute", 0.56);
+    spawnBossSwarm(enemy, attack === "flankSwarm");
+    setEnemyState(enemy, "execute", 0.64);
   }
 }
 
@@ -2284,8 +2364,12 @@ function updateBoss(enemy, dt) {
   } else if (enemy.state === "telegraph") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
     enemy.velocity.multiplyScalar(Math.exp(-7 * dt));
-    if (enemy.attackKind === "charge") {
-      enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+    if (enemy.attackKind === "charge" || enemy.attackKind === "sweepBeam") {
+      if (enemy.attackKind === "sweepBeam") {
+        enemy.group.rotation.z = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - Math.PI / 2;
+      } else {
+        enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+      }
       if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
       else {
         enemy.visuals.line.material.color.set(0xff7ae6);
@@ -2304,11 +2388,35 @@ function updateBoss(enemy, dt) {
     }
     if (enemy.stateTimer <= 0) beginBossExecute(enemy);
   } else if (enemy.state === "execute") {
-    if (enemy.attackKind === "pulse") {
-      const progress = 1 - Math.max(0, enemy.stateTimer / 1.05);
+    enemy.attackElapsed += dt;
+    if (["doublePulse", "pulse", "trianglePulse"].includes(enemy.attackKind)) {
+      const duration = enemy.attackKind === "trianglePulse" ? 1.92 : 1.44;
+      const pulseCount = enemy.attackKind === "trianglePulse" ? 3 : 2;
+      const progress = 1 - Math.max(0, enemy.stateTimer / duration);
+      const pulseIndex = Math.min(pulseCount - 1, Math.floor(progress * pulseCount));
+      if (pulseIndex !== enemy.pulseIndex) {
+        enemy.pulseIndex = pulseIndex;
+        enemy.pulseHit = false;
+        enemy.previousDangerRadius = 0;
+        enemy.dangerRadius = 0.9;
+      }
+      const segmentProgress = (progress * pulseCount) - pulseIndex;
       enemy.previousDangerRadius = enemy.dangerRadius;
-      enemy.dangerRadius = THREE.MathUtils.lerp(0.9, Math.max(view.halfWidth, view.halfHeight) + 2, progress);
+      enemy.dangerRadius = THREE.MathUtils.lerp(0.9, Math.max(view.halfWidth, view.halfHeight) + 2, segmentProgress);
       enemy.visuals.pulseRing.scale.setScalar(enemy.dangerRadius);
+      if (enemy.attackKind === "trianglePulse") enemy.visuals.pulseRing.rotation.z = pulseIndex * (TAU / 3);
+      state.stats.activeHazards += 1;
+    } else if (enemy.attackKind === "sweepBeam") {
+      const progress = 1 - Math.max(0, enemy.stateTimer / 1.16);
+      const angle = THREE.MathUtils.lerp(enemy.beamStartAngle, enemy.beamEndAngle, progress);
+      enemy.beamDirection.set(Math.cos(angle), Math.sin(angle));
+      enemy.group.rotation.z = angle - Math.PI / 2;
+      enemy.visuals.line.visible = true;
+      enemy.beamWidth = 0.3 + progress * 0.34;
+      enemy.visuals.line.scale.set(enemy.beamWidth, 1, 1);
+      enemy.visuals.line.material.color.set(state.reducedMotion ? 0xff9f43 : 0xff506f);
+      enemy.visuals.line.material.opacity = state.reducedMotion ? 0.72 : 0.84 + progress * 0.12;
+      state.stats.activeHazards += 1;
     } else if (enemy.attackKind !== "charge") {
       const summonScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 18) * 0.18;
       enemy.visuals.pulseRing.scale.setScalar(summonScale);
@@ -2332,7 +2440,9 @@ function waveReachedPlayer(enemy, distance) {
 }
 
 function beamHitsPlayer(enemy) {
-  if (enemy.type !== "lancer" || enemy.state !== "active") return false;
+  const lancerBeam = enemy.type === "lancer" && enemy.state === "active";
+  const bossBeam = enemy.type === "boss" && enemy.state === "execute" && enemy.attackKind === "sweepBeam";
+  if (!lancerBeam && !bossBeam) return false;
   const origin = enemy.group.position;
   const direction = enemy.beamDirection;
   const relativeX = player.position.x - origin.x;
@@ -2407,7 +2517,10 @@ function dashHitsEnemy(enemy, distance) {
 function damageEnemy(enemy) {
   enemy.lastDashId = state.dashSequence;
   enemy.hp -= enemy.type === "boss" ? BOSS_DASH_DAMAGE : 1;
-  if (enemy.type === "boss") syncBossProgress(enemy);
+  if (enemy.type === "boss") {
+    syncBossProgress(enemy);
+    if (enemy.hp > 0) enterBossPhaseTwo(enemy);
+  }
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
   if (enemy.hp <= 0) {
     destroyEnemy(enemy, "dash");
