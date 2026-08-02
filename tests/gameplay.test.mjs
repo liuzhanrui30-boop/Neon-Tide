@@ -6,6 +6,9 @@ import {
   computeRank,
   computeReward,
   computeSpawnBudget,
+  finiteOr,
+  clampFinite,
+  capActiveCount,
   getStage,
   getStageIndex,
   pickUpgradeOptions,
@@ -20,6 +23,17 @@ test('a long wall frame advances authoritative time while simulation remains cap
   assert.equal(frame.simDt, 0.05);
   assert.equal(slowedFrame.wallDt, 2);
   assert.equal(slowedFrame.simDt, 0.025);
+});
+
+test('runtime sanitizers reject NaN and Infinity before they reach gameplay state', () => {
+  assert.equal(finiteOr(Number.NaN, 7), 7);
+  assert.equal(finiteOr(Number.POSITIVE_INFINITY, -2), -2);
+  assert.equal(clampFinite(Number.NaN, 0, 5, 2), 2);
+  assert.equal(clampFinite(Number.POSITIVE_INFINITY, 0, 5, 2), 2);
+  assert.equal(clampFinite(-10, 0, 5), 0);
+  assert.equal(clampFinite(10, 0, 5), 5);
+  assert.equal(capActiveCount(99.9, 36), 36);
+  assert.equal(capActiveCount(Number.NaN, 36), 0);
 });
 
 test('session timing is derived from boss entry and the boss window', () => {

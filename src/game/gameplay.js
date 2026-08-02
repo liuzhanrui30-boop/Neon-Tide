@@ -2,6 +2,27 @@ import { ENEMY_TYPES, GAME, RANK_THRESHOLDS, REWARDS, STAGES, UPGRADES } from '.
 
 export { GAME, STAGES, ENEMY_TYPES, UPGRADES };
 
+/**
+ * Runtime sanitizers shared by the render loop and tests. Browser input or a
+ * long suspended frame must never turn a gameplay scalar into NaN/Infinity.
+ */
+export function finiteOr(value, fallback = 0) {
+  if (Number.isFinite(value)) return value;
+  return Number.isFinite(fallback) ? fallback : 0;
+}
+
+export function clampFinite(value, min, max, fallback = min) {
+  const safeMin = Number.isFinite(min) ? min : 0;
+  const safeMax = Number.isFinite(max) ? Math.max(safeMin, max) : safeMin;
+  const safeFallback = Number.isFinite(fallback) ? Math.min(safeMax, Math.max(safeMin, fallback)) : safeMin;
+  const numeric = finiteOr(value, safeFallback);
+  return Math.min(safeMax, Math.max(safeMin, numeric));
+}
+
+export function capActiveCount(count, cap) {
+  return Math.trunc(clampFinite(count, 0, Math.max(0, Math.trunc(finiteOr(cap, 0))), 0));
+}
+
 export function computeFrameDeltas(rawWallDt, slowMotionScale = 1) {
   const wallDt = Number.isFinite(rawWallDt) ? Math.max(0, rawWallDt) : 0;
   const simulationScale = Math.min(1, Math.max(0, Number(slowMotionScale) || 0));
