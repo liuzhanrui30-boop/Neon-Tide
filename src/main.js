@@ -1215,6 +1215,7 @@ function createBoss() {
     attackElapsed: 0,
     triangleDirection: new THREE.Vector2(0, 1),
     triangleHalfAngle: Math.PI / 6,
+    triangleBaseAngle: 0,
     dashDirection: new THREE.Vector2(),
     dangerRadius: 0,
     previousDangerRadius: 0,
@@ -2334,7 +2335,11 @@ function beginBossTelegraph(enemy) {
     enemy.beamEndAngle = enemy.beamStartAngle + 2.24;
   }
   if (enemy.attackKind === "trianglePulse") {
-    enemy.triangleDirection.set(0, 1).rotateAround(new THREE.Vector2(), enemy.group.rotation.z);
+    enemy.triangleBaseAngle = Math.atan2(
+      player.position.y - enemy.group.position.y,
+      player.position.x - enemy.group.position.x
+    );
+    enemy.triangleDirection.set(Math.cos(enemy.triangleBaseAngle), Math.sin(enemy.triangleBaseAngle));
   }
   recordBossAttack(enemy, enemy.attackKind);
   state.stats.bossAttackTelegraphs.push(BOSS_TELEGRAPH_TIME);
@@ -2441,7 +2446,7 @@ function updateBoss(enemy, dt) {
       const hazardMesh = enemy.attackKind === "trianglePulse" ? enemy.visuals.trianglePulse : enemy.visuals.pulseRing;
       hazardMesh.scale.setScalar(enemy.dangerRadius);
       if (enemy.attackKind === "trianglePulse") {
-        const directionAngle = pulseIndex * (TAU / 3) + enemy.wobble;
+        const directionAngle = enemy.triangleBaseAngle + pulseIndex * (TAU / 3);
         enemy.triangleDirection.set(Math.cos(directionAngle), Math.sin(directionAngle));
         hazardMesh.rotation.z = directionAngle - Math.PI / 2;
       }

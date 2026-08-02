@@ -11,6 +11,13 @@
 - 浏览器场景改为由 Boss `recover → choose → telegraph → execute` 计时推进，观察光束碰撞、三角方向安全区/命中、蜂群生成和终局清理；
 - 增加浏览器 debug 对 0/30/64/100 边界、126s 总时长、100s Boss 接入与暂停冻结的断言。
 
+第二轮 review fix：
+
+- 三角预警在 telegraph 阶段锁定 `triangleBaseAngle`，三次 active 脉冲严格使用该基础方向加 120°，不再发生首脉冲跳向；
+- 浏览器场景使用 `state.elapsed`、`timeLeft`、`updateStage` 与 `updateEnemies` 的受控时间推进，完整走完 enter/recover/choose/telegraph/execute；
+- Phase 2 仅通过四次 `damageEnemy` 的真实 dash damage resolution 从 30 降至 10 触发，不直接写入 Boss HP 或攻击 state；
+- 增加 Boss telegraph 暂停冻结、live beam/triangle health collision、低 FPS wall stall 跨 deadline 后 overlay/敌人/hazard 清理的断言。
+
 ## 测试变更
 
 - 更新 `jumpToBoss` 与胜利场景，使用 0/30/64/100 边界、Boss 窗口 26 秒、总时长 126 秒。

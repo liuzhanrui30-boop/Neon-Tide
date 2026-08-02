@@ -923,37 +923,82 @@ async function bossPhaseTwoScenario() {
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
     const phase = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
-      boss.hp=16;
-      $state.dashSequence+=1;
-      damageEnemy(boss);
-      return {phase:$state.stats.bossPhase,enemyPhase:boss.phase,attacks:[...$state.stats.bossAttackLog]};
+      const advance=(dt)=>{
+        $state.elapsed+=dt;
+        updateStage();
+        $state.timeLeft=Math.max(0,($state.bossDeadline ?? GAME.bossStart)-$state.elapsed);
+        updateEnemies(dt);
+      };
+      $player.position.set(-7,-5);
+      const sawEnter=boss.state==='enter';
+      for(let tick=0;tick<22;tick+=1) advance(0.1);
+      const reachedFirstTelegraph=boss.state==='telegraph';
+      // Four genuine dash-damage resolutions cross the <50% threshold (30→10).
+      for(let hit=0;hit<4;hit+=1){$state.dashSequence+=1;damageEnemy(boss);}
+      for(let tick=0;tick<16 && boss.state!=='telegraph';tick+=1) advance(0.1);
+      return {
+        phase:$state.stats.bossPhase,enemyPhase:boss.phase,sawEnter,reachedFirstTelegraph,
+        phaseTwoTelegraph:boss.state==='telegraph' ? {kind:boss.attackKind,remaining:boss.telegraph} : null,
+        attacks:[...$state.stats.bossAttackLog],hp:boss.hp,
+      };
     `);
     assert.equal(phase.phase, 2, 'boss phase 2 did not latch below 50%');
     assert.equal(phase.enemyPhase, 2, 'boss entity phase did not latch below 50%');
+    assert.equal(phase.sawEnter, true, 'boss did not enter through its normal lifecycle');
+    assert.equal(phase.reachedFirstTelegraph, true, 'boss did not reach phase 1 telegraph through authoritative ticks');
+    assert.deepEqual(phase.phaseTwoTelegraph?.kind, 'sweepBeam', `phase 2 did not reach sweep telegraph: ${JSON.stringify(phase)}`);
+    assert.ok(phase.phaseTwoTelegraph.remaining > 0 && phase.phaseTwoTelegraph.remaining <= 0.68);
+    assert.equal(phase.hp, 10, 'phase transition did not use four dash damage steps');
     assert.ok(phase.attacks.some((attack) => attack.kind === 'phase2-enter'), `phase 2 log missing: ${JSON.stringify(phase.attacks)}`);
+
+    const pausedBoss = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      pauseGame();
+      return {mode:$state.mode,elapsed:$state.elapsed,state:boss.state,timer:boss.stateTimer,hazard:$state.stats.activeHazards};
+    `);
+    await sleep(140);
+    const pausedBossAfter = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      return {mode:$state.mode,elapsed:$state.elapsed,state:boss.state,timer:boss.stateTimer,hazard:$state.stats.activeHazards};
+    `);
+    assert.deepEqual(pausedBossAfter, pausedBoss, 'boss telegraph progressed while paused');
+    await page.gameEvaluate('resumeGame();return $state.mode');
 
     const attacks = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      const advance=(dt)=>{
+        $state.elapsed+=dt;
+        updateStage();
+        $state.timeLeft=Math.max(0,($state.bossDeadline ?? GAME.bossStart)-$state.elapsed);
+        updateEnemies(dt);
+      };
       const seen=[]; let beamProbe=false; let triangleProbe=false; let flankPeak=0;
-      for (let tick=0; tick<360; tick+=1) {
-        updateBoss(boss,0.1);
+      for (let tick=0; tick<360 && $state.mode==='playing'; tick+=1) {
+        if (boss.state==='execute' && boss.attackKind==='sweepBeam' && !beamProbe) {
+          $player.position.copy(boss.group.position).addScaledVector(boss.beamDirection,2.9);
+          $state.hurtInvuln=0;
+          const health=$state.health;
+          advance(0.05);
+          beamProbe=beamHitsPlayer(boss) && $state.health<health && $state.stats.activeHazards>0;
+          continue;
+        }
+        if (boss.state==='execute' && boss.attackKind==='trianglePulse' && !triangleProbe && boss.dangerRadius>4.5) {
+          const probeDistance=Math.min(5,boss.dangerRadius*0.65);
+          const safe=boss.group.position.clone().addScaledVector(boss.triangleDirection,-probeDistance);
+          $player.position.copy(safe); $state.hurtInvuln=0;
+          const safeHealth=$state.health;
+          advance(0.05);
+          const safeHit=$state.health<safeHealth;
+          $player.position.copy(boss.group.position).addScaledVector(boss.triangleDirection,probeDistance); $state.hurtInvuln=0;
+          const dangerHealth=$state.health;
+          advance(0.05);
+          triangleProbe=!safeHit && $state.health<dangerHealth && boss.visuals.trianglePulse.visible && $state.stats.activeHazards>0;
+          continue;
+        }
+        advance(0.1);
         flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
         if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
           seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
-        }
-        if (boss.state==='execute' && boss.attackKind==='sweepBeam' && !beamProbe) {
-          const probe=boss.group.position.clone().addScaledVector(boss.beamDirection,2.4);
-          $player.position.copy(probe);
-          beamProbe=beamHitsPlayer(boss);
-        }
-        if (boss.state==='execute' && boss.attackKind==='trianglePulse' && !triangleProbe) {
-          const safe=$player.position.clone().sub(boss.group.position).normalize().multiplyScalar(-1.8).add(boss.group.position);
-          $player.position.copy(safe);
-          const safeHit=trianglePulseHitsPlayer(boss);
-          const tip=boss.group.position.clone().addScaledVector(boss.triangleDirection,Math.max(1.2,boss.dangerRadius*0.8));
-          $player.position.copy(tip);
-          const directionalHit=trianglePulseHitsPlayer(boss);
-          triangleProbe=!safeHit && directionalHit && boss.visuals.trianglePulse.visible && $state.stats.activeHazards>0;
         }
       }
       return {seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
@@ -968,7 +1013,8 @@ async function bossPhaseTwoScenario() {
     assert.ok(attacks.stats.some((attack) => attack.kind === 'sweepBeam' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'trianglePulse' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'flankSwarm' && attack.phase === 2));
-    await page.gameEvaluate(`finishRun('gameover','bossDeadline');return true`);
+    await page.gameEvaluate('$state.elapsed=$state.bossDeadline-0.05;return $state.elapsed', { stallMs: WALL_STALL_MS });
+    await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('WINDOW CLOSED')`);
     const cleanup = await page.gameEvaluate('return {enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode}');
     assert.deepEqual(cleanup, { enemies: 0, hazards: 0, mode: 'gameover' });
   });
