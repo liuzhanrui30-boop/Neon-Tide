@@ -14,17 +14,27 @@
   <body>
     <main id="game-shell">
       <div id="canvas-root" aria-label="Neon Tide 游戏画面"></div>
-      <div id="vignette"></div>
-      <div id="flash"></div>
+      <div id="vignette" aria-hidden="true"></div>
+      <div id="flash" aria-hidden="true"></div>
 
-      <header id="hud" aria-live="polite">
-        <section class="brand-panel">
+      <header id="hud">
+        <section class="brand-panel" aria-label="Neon Tide">
           <span class="eyebrow">SIGNAL // 07</span>
           <strong>NEON TIDE</strong>
           <span class="subtitle">霓虹潮汐</span>
         </section>
 
-        <section class="hud-cluster">
+        <section class="stage-panel" aria-label="阶段进度">
+          <div class="stage-heading">
+            <span>PHASE</span>
+            <strong id="stage-name">第一幕 · 深潮接入</strong>
+          </div>
+          <div class="stage-track" role="progressbar" aria-label="当前阶段进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <i id="stage-progress"></i>
+          </div>
+        </section>
+
+        <section class="hud-cluster" aria-label="战斗状态">
           <div class="stat-card score-card">
             <span>碎片</span>
             <strong id="score-value">0000</strong>
@@ -37,9 +47,18 @@
             <span>船体</span>
             <div id="health-pips" aria-label="生命值"></div>
           </div>
+          <div class="stat-card dash-card">
+            <span>冲刺</span>
+            <div id="dash-pips" aria-label="冲刺充能">
+              <i></i><i></i>
+            </div>
+          </div>
         </section>
 
-        <button id="pause-button" class="icon-button" type="button" aria-label="暂停游戏">Ⅱ</button>
+        <div class="hud-actions">
+          <button id="mute-button" class="icon-button" type="button" aria-label="静音">♪</button>
+          <button id="pause-button" class="icon-button" type="button" aria-label="暂停游戏">Ⅱ</button>
+        </div>
       </header>
 
       <aside id="mission-panel">
@@ -47,12 +66,27 @@
         <strong>坚持到潮汐退去</strong>
         <div class="energy-track"><i id="energy-fill"></i></div>
         <small><b id="energy-value">0</b>% 护盾充能</small>
+        <span id="overdrive-label">OVERDRIVE // 待机</span>
       </aside>
 
-      <div id="combo" aria-hidden="true">连击 ×<b>2</b></div>
-      <div id="toast" role="status"></div>
+      <aside id="boss-panel" hidden aria-label="首领稳定度">
+        <div class="boss-heading">
+          <span>ANOMALY // 首领信号</span>
+          <strong>深潮主脑</strong>
+        </div>
+        <div class="boss-track" role="progressbar" aria-label="首领稳定度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+          <i id="boss-fill"></i>
+        </div>
+      </aside>
 
-      <section id="overlay" class="visible">
+      <div id="stage-banner" role="status" aria-live="polite" aria-atomic="true" hidden>
+        <span>PHASE SHIFT</span>
+        <strong>第一幕 · 深潮接入</strong>
+      </div>
+      <div id="combo" aria-hidden="true">连击 ×<b>2</b></div>
+      <div id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+      <section id="overlay" class="visible" role="dialog" aria-modal="true" aria-labelledby="overlay-title" aria-describedby="overlay-copy">
         <div class="overlay-card">
           <div class="signal-mark" aria-hidden="true">
             <i></i><i></i><i></i>
@@ -63,11 +97,15 @@
             在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 45 秒，等到潮汐退去。
           </p>
           <div id="result-grid" class="result-grid" hidden>
+            <div class="rank-result"><span>本局评级</span><b id="result-rank">C</b></div>
             <div><span>本局碎片</span><b id="result-score">0</b></div>
             <div><span>最高记录</span><b id="result-high">0</b></div>
+            <div><span>最高连击</span><b id="result-combo">0</b></div>
+            <div><span>险闪次数</span><b id="result-near">0</b></div>
+            <div><span>击破数</span><b id="result-breaks">0</b></div>
           </div>
           <button id="primary-button" class="primary-button" type="button">
-            <span id="primary-label">进入潮汐</span><i>→</i>
+            <span id="primary-label">进入潮汐</span><i aria-hidden="true">→</i>
           </button>
           <div class="control-hint">
             <span><kbd>WASD</kbd> / <kbd>方向键</kbd> 移动</span>
@@ -77,9 +115,37 @@
         </div>
       </section>
 
+      <section id="upgrade-panel" class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="upgrade-title" hidden>
+        <div class="upgrade-card">
+          <p class="kicker">SIGNAL FORK // 选择强化</p>
+          <h2 id="upgrade-title">潮汐分岔</h2>
+          <p class="upgrade-copy">选择一项升级后继续航行</p>
+          <div id="upgrade-options" class="upgrade-options">
+            <button class="upgrade-option" type="button">
+              <span class="upgrade-number" aria-hidden="true">1</span>
+              <span class="upgrade-title">双重脉冲</span>
+              <span class="upgrade-description">追加一格冲刺充能，缩短信号回流时间。</span>
+              <strong class="upgrade-effect">充能 +1</strong>
+            </button>
+            <button class="upgrade-option" type="button">
+              <span class="upgrade-number" aria-hidden="true">2</span>
+              <span class="upgrade-title">过载核心</span>
+              <span class="upgrade-description">提高光核收益，让连击更快进入超载。</span>
+              <strong class="upgrade-effect">收益 +25%</strong>
+            </button>
+            <button class="upgrade-option" type="button">
+              <span class="upgrade-number" aria-hidden="true">3</span>
+              <span class="upgrade-title">相位船体</span>
+              <span class="upgrade-description">扩大险闪窗口，并恢复一格船体。</span>
+              <strong class="upgrade-effect">船体 +1</strong>
+            </button>
+          </div>
+        </div>
+      </section>
+
       <section id="touch-controls" aria-label="触屏控制">
         <div id="joystick" class="joystick"><i id="joystick-knob"></i></div>
-        <button id="dash-button" type="button"><span>冲刺</span><i id="dash-ring"></i></button>
+        <button id="dash-button" type="button"><span>冲刺</span><i id="dash-ring" aria-hidden="true"></i></button>
       </section>
     </main>
     <script type="module" src="/src/main.js"></script>
