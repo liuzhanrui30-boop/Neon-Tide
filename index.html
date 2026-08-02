@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#050816" />
+    <meta name="description" content="Neon Tide - 一个使用 Three.js 制作的霓虹 2D 生存收集游戏。" />
+    <title>Neon Tide · 霓虹潮汐</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath fill='%2364f5ff' d='M32 4 54 52 32 42 10 52z'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=ZCOOL+KuaiLe&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <main id="game-shell">
+      <div id="canvas-root" aria-label="Neon Tide 游戏画面"></div>
+      <div id="vignette"></div>
+      <div id="flash"></div>
+
+      <header id="hud" aria-live="polite">
+        <section class="brand-panel">
+          <span class="eyebrow">SIGNAL // 07</span>
+          <strong>NEON TIDE</strong>
+          <span class="subtitle">霓虹潮汐</span>
+        </section>
+
+        <section class="hud-cluster">
+          <div class="stat-card score-card">
+            <span>碎片</span>
+            <strong id="score-value">0000</strong>
+          </div>
+          <div class="stat-card time-card">
+            <span>潮汐结束</span>
+            <strong id="time-value">00:45</strong>
+          </div>
+          <div class="stat-card health-card">
+            <span>船体</span>
+            <div id="health-pips" aria-label="生命值"></div>
+          </div>
+        </section>
+
+        <button id="pause-button" class="icon-button" type="button" aria-label="暂停游戏">Ⅱ</button>
+      </header>
+
+      <aside id="mission-panel">
+        <span>当前任务</span>
+        <strong>坚持到潮汐退去</strong>
+        <div class="energy-track"><i id="energy-fill"></i></div>
+        <small><b id="energy-value">0</b>% 护盾充能</small>
+      </aside>
+
+      <div id="combo" aria-hidden="true">连击 ×<b>2</b></div>
+      <div id="toast" role="status"></div>
+
+      <section id="overlay" class="visible">
+        <div class="overlay-card">
+          <div class="signal-mark" aria-hidden="true">
+            <i></i><i></i><i></i>
+          </div>
+          <p class="kicker" id="overlay-kicker">ARCADE SURVIVAL // THREE.JS</p>
+          <h1 id="overlay-title">NEON<br /><em>TIDE</em></h1>
+          <p id="overlay-copy">
+            在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 45 秒，等到潮汐退去。
+          </p>
+          <div id="result-grid" class="result-grid" hidden>
+            <div><span>本局碎片</span><b id="result-score">0</b></div>
+            <div><span>最高记录</span><b id="result-high">0</b></div>
+          </div>
+          <button id="primary-button" class="primary-button" type="button">
+            <span id="primary-label">进入潮汐</span><i>→</i>
+          </button>
+          <div class="control-hint">
+            <span><kbd>WASD</kbd> / <kbd>方向键</kbd> 移动</span>
+            <span><kbd>空格</kbd> 脉冲冲刺</span>
+            <span><kbd>P</kbd> 暂停</span>
+          </div>
+        </div>
+      </section>
+
+      <section id="touch-controls" aria-label="触屏控制">
+        <div id="joystick" class="joystick"><i id="joystick-knob"></i></div>
+        <button id="dash-button" type="button"><span>冲刺</span><i id="dash-ring"></i></button>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
