@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { GAME, FORMATION_TEMPLATES, STAGES } from '../src/game/config.js';
+import { ENEMY_TYPES, GAME, FORMATION_TEMPLATES, STAGES } from '../src/game/config.js';
 import {
   chooseFormation,
   getActiveEnemyCap,
@@ -45,6 +45,7 @@ test('formation budget is constrained by active enemy cap', () => {
   assert.equal(getFormationBudget(0, 0, { activeCost: 0, maxEnemyCap: 36 }), 6);
   assert.equal(getFormationBudget(2, 80, { activeCost: 30, maxEnemyCap: 36 }), 6);
   assert.equal(getFormationBudget(2, 80, { activeCost: 36, maxEnemyCap: 36 }), 0);
+  assert.equal(getFormationBudget(2, 80, { activeCost: 0, maxEnemyCap: 0 }), 0);
 });
 
 test('formation chooser is deterministic and rejects cooldown, unsafe gaps, and over-budget plans', () => {
@@ -73,6 +74,17 @@ test('formation chooser is deterministic and rejects cooldown, unsafe gaps, and 
   assert.equal(chooseFormation({ stageIndex: 1, elapsed: 42, cooldownRemaining: 1, activeCost: 0, maxEnemyCap: 36, safeGap: 4, seed: 7 }), null);
   assert.equal(chooseFormation({ stageIndex: 1, elapsed: 42, cooldownRemaining: 0, activeCost: 0, maxEnemyCap: 36, safeGap: 0, seed: 7 }), null);
   assert.equal(chooseFormation({ stageIndex: 1, elapsed: 42, cooldownRemaining: 0, activeCost: 35, maxEnemyCap: 36, safeGap: 4, seed: 7 }), null);
+  assert.equal(chooseFormation({ stageIndex: 1, elapsed: 42, cooldownRemaining: 0, activeCost: 0, maxEnemyCap: 0, safeGap: 4, seed: 7 }), null);
+});
+
+test('formation slot role counts and actual threat cost match the declared template budget', () => {
+  for (const [name, template] of Object.entries(FORMATION_TEMPLATES)) {
+    const slots = getFormationSlots(name, { width: 12, height: 8 });
+    assert.equal(slots.length, template.roles.length);
+    const actualCost = slots.reduce((total, slot) => total + ENEMY_TYPES[slot.role].threatCost, 0);
+    assert.equal(actualCost, template.enemyCost);
+    assert.ok(actualCost <= getFormationBudget(3, 110, { activeCost: 0, maxEnemyCap: 36 }));
+  }
 });
 
 test('formation slots are finite and preserve an opening around the play center', () => {
@@ -81,5 +93,11 @@ test('formation slots are finite and preserve an opening around the play center'
     assert.ok(slots.length > 0);
     assert.ok(slots.every(({ x, y }) => Number.isFinite(x) && Number.isFinite(y)));
     assert.ok(slots.every(({ x, y }) => Math.hypot(x, y) >= FORMATION_TEMPLATES[name].minSafeGap));
+  }
+});
+
+test('formations refuse an unsafe compact viewport rather than closing the safe gap', () => {
+  for (const name of Object.keys(FORMATION_TEMPLATES)) {
+    assert.deepEqual(getFormationSlots(name, { width: 4, height: 4 }), []);
   }
 });

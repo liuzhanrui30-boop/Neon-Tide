@@ -35,7 +35,10 @@ export function getSpawnInterval(stageIndex = 0, elapsed = 0) {
 }
 
 export function getFormationBudget(stageIndex = 0, elapsed = 0, context = {}) {
-  const cap = Math.max(0, Number(context.maxEnemyCap) || getActiveEnemyCap(context));
+  const requestedCap = Number(context.maxEnemyCap);
+  const cap = Number.isFinite(requestedCap)
+    ? Math.max(0, requestedCap)
+    : getActiveEnemyCap(context);
   const activeCost = Math.max(0, Number(context.activeCost) || 0);
   const available = Math.max(0, cap - activeCost);
   const index = clamp(Math.trunc(Number(stageIndex) || 0), 0, STAGES.length - 1);
@@ -87,7 +90,9 @@ export function getFormationSlots(name, viewport = {}) {
     spiral: [{ x: -x, y: y }, { x: x * 0.6, y: y * 0.7 }, { x: x * 0.65, y: -y * 0.2 }, { x: -x * 0.55, y: -y }, { x: x, y: -y }],
     'elite-escort': [{ x: 0, y: y * 1.3 }, { x: -x, y: -y }, { x: x, y: -y }],
   }[name] ?? [];
-  return slots.map((slot, index) => Object.freeze({ ...slot, role: template.roles[index % template.roles.length] }));
+  if (slots.length !== template.roles.length) return [];
+  if (slots.some((slot) => Math.hypot(slot.x, slot.y) < template.minSafeGap)) return [];
+  return slots.map((slot, index) => Object.freeze({ ...slot, role: template.roles[index] }));
 }
 
 export { FORMATION_TEMPLATES };
