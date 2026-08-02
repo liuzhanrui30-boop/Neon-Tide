@@ -831,10 +831,16 @@ function updatePlayer(dt) {
   const bankInput = hasDirection ? THREE.MathUtils.clamp(velocityDirection.x * direction.y - velocityDirection.y * direction.x, -1, 1) : 0;
   const targetBank = state.reducedMotion ? 0 : bankInput * 0.42;
   player.group.rotation.y = THREE.MathUtils.lerp(player.group.rotation.y, targetBank, 1 - Math.exp(-10 * dt));
-  const targetScale = state.dashTimer > 0 ? 1.22 : 1;
-  player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
-  player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
-  player.flame.scale.setScalar(0.75 + Math.min(speed / 5, 1) * 0.7 + Math.sin(state.elapsed * 30) * 0.08);
+  const flameScale = 0.75 + Math.min(speed / 5, 1) * 0.7;
+  if (state.reducedMotion) {
+    player.group.scale.set(1, 1, 1);
+    player.flame.scale.setScalar(flameScale);
+  } else {
+    const targetScale = state.dashTimer > 0 ? 1.22 : 1;
+    player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
+    player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
+    player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
+  }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
   player.shield.visible = state.dashInvulnerable || state.hurtInvuln > 0;
   player.shield.material.opacity = 0.48 + Math.sin(state.elapsed * 24) * 0.2;
@@ -850,7 +856,8 @@ function attemptDash(direction) {
   state.dashTimer = DASH_ACTIVE_WINDOW;
   player.facing.copy(dashDirection);
   player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * state.modifiers.speed);
-  player.group.scale.set(1.25, 0.78, 1);
+  if (state.reducedMotion) player.group.scale.set(1, 1, 1);
+  else player.group.scale.set(1.25, 0.78, 1);
   spawnParticleBurst(player.position, 0x64f5ff, 15, 3.7, 0.85);
   spawnRipple(player.position, 0x64f5ff, 1.2);
   shake(0.08, 0.12);
