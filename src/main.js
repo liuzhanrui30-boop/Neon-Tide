@@ -5,6 +5,7 @@ import {
   ENEMY_TYPES,
   GAME,
   STAGES,
+  UPGRADES,
   computeRank,
   computeReward,
   computeSpawnBudget,
@@ -25,9 +26,17 @@ const DASH_SPEED = 16.2;
 const DASH_ACTIVE_WINDOW = 0.19;
 const DASH_BUFFER_WINDOW = 0.16;
 const DASH_RECOVERY_TIME = 1.45;
+const HURT_INVULNERABILITY = 0.95;
+const UPGRADE_GRACE_PERIOD = 0.8;
 const MAX_MINES = 4;
 const BOSS_DASH_DAMAGE = 5;
 const BOSS_TELEGRAPH_TIME = 0.68;
+const OVERDRIVE_MODIFIERS = Object.freeze({
+  speed: 1.18,
+  score: 1.5,
+  pickupRadius: 1.55,
+  dashRecovery: 1.4,
+});
 const STAGE_LABELS = ["第一幕 · 深潮接入", "第二幕 · 信号涌升", "第三幕 · 交叉流", "终幕 · 事件视界"];
 const MODES = new Set(["menu", "playing", "upgrade", "paused", "gameover", "victory"]);
 const ALLOWED_TRANSITIONS = Object.freeze({
@@ -139,13 +148,15 @@ const state = {
   shardSpawnTimer: 1.8,
   dashCharges: [1, 1],
   dashTimer: 0,
+  dashInvulnTimer: 0,
   dashSequence: 0,
   hurtInvuln: 0,
+  overdriveTimer: 0,
   get playerAttacking() {
     return this.dashTimer > 0;
   },
   get dashInvulnerable() {
-    return this.dashTimer > 0;
+    return this.dashInvulnTimer > 0;
   },
   runFinished: false,
   shakeTime: 0,
@@ -159,13 +170,6 @@ const state = {
   muted: false,
   ownedUpgrades: [],
   upgradeOptions: [],
-  modifiers: {
-    speed: 1,
-    score: 1,
-    pickupRadius: 1,
-    energy: 1,
-    hurtInvuln: 0.95,
-  },
   stats: {
     maxCombo: 0,
     nearMisses: 0,
@@ -739,8 +743,10 @@ function resetState() {
   state.shardSpawnTimer = 1.8;
   state.dashCharges = [1, 1];
   state.dashTimer = 0;
+  state.dashInvulnTimer = 0;
   state.dashSequence = 0;
   state.hurtInvuln = 0;
+  state.overdriveTimer = 0;
   state.runFinished = false;
   state.shakeTime = 0;
   state.shakeStrength = 0;
@@ -751,11 +757,6 @@ function resetState() {
   state.bossDeadline = null;
   state.ownedUpgrades = [];
   state.upgradeOptions = [];
-  state.modifiers.speed = 1;
-  state.modifiers.score = 1;
-  state.modifiers.pickupRadius = 1;
-  state.modifiers.energy = 1;
-  state.modifiers.hurtInvuln = 0.95;
   state.stats.maxCombo = 0;
   state.stats.nearMisses = 0;
   state.stats.breaks = 0;
@@ -936,6 +937,84 @@ function finishRun(outcome) {
   return true;
 }
 
+function getDerivedValues() {
+  const values = {
+    speedMultiplier: 1,
+    scoreMultiplier: 1,
+    pickupRadiusMultiplier: 1,
+    energyMultiplier: 1,
+    dashRecoveryMultiplier: 1,
+    dashInvulnerability: DASH_ACTIVE_WINDOW,
+  };
+  for (const id of state.ownedUpgrades) {
+    const upgrade = UPGRADES.find((candidate) => candidate.id === id);
+    if (!upgrade) continue;
+    if (id === "ion-drive") values.speedMultiplier += upgrade.effect;
+    if (id === "prism-core") values.scoreMultiplier += upgrade.effect;
+    if (id === "echo-shield") values.dashInvulnerability += upgrade.effect;
+    if (id === "magnet-field") values.pickupRadiusMultiplier += upgrade.effect;
+    if (id === "overclock") values.energyMultiplier += upgrade.effect;
+  }
+  if (state.overdriveTimer > 0) {
+    values.speedMultiplier *= OVERDRIVE_MODIFIERS.speed;
+    values.scoreMultiplier *= OVERDRIVE_MODIFIERS.score;
+    values.pickupRadiusMultiplier *= OVERDRIVE_MODIFIERS.pickupRadius;
+    values.dashRecoveryMultiplier *= OVERDRIVE_MODIFIERS.dashRecovery;
+  }
+  return values;
+}
+
+function addEnergy(amount) {
+  if (!Number.isFinite(amount) || amount <= 0) return state.energy;
+  state.energy = Math.min(GAME.overdriveEnergy, state.energy + amount);
+  if (state.energy >= GAME.overdriveEnergy) triggerOverdrive();
+  return state.energy;
+}
+
+function triggerOverdrive() {
+  state.energy = 0;
+  state.overdriveTimer = GAME.overdriveDuration;
+  toast("潮汐超载", "cyan");
+  flash("#64f5ff", 0.2);
+  shake(0.16, 0.22);
+  spawnParticleBurst(player.position, 0x64f5ff, 26, 4.2, 1.2);
+  spawnRipple(player.position, 0x64f5ff, 2);
+  audio.event("overdrive");
+}
+
+function advanceCombo(amount = 1) {
+  state.combo += amount;
+  state.comboTimer = 2.8;
+  state.stats.maxCombo = Math.max(state.stats.maxCombo, state.combo);
+  if (state.combo > 1) {
+    dom.combo.innerHTML = `连击 ×<b>${state.combo}</b>`;
+    dom.combo.classList.add("show");
+  }
+}
+
+function clearCombo() {
+  state.combo = 0;
+  state.comboTimer = 0;
+  dom.combo.classList.remove("show");
+}
+
+function awardReward(kind) {
+  const derived = getDerivedValues();
+  const reward = computeReward(kind, state.combo, 1);
+  state.score += Math.round(reward.score * derived.scoreMultiplier);
+  addEnergy(reward.energy * derived.energyMultiplier);
+  advanceCombo(reward.combo);
+  return reward;
+}
+
+function applyUpgrade(id) {
+  const upgrade = UPGRADES.find((candidate) => candidate.id === id);
+  if (!upgrade || state.ownedUpgrades.includes(id)) return false;
+  state.ownedUpgrades.push(id);
+  if (id === "repair-swarm") state.health = Math.min(MAX_HEALTH, state.health + upgrade.effect);
+  return true;
+}
+
 function beginUpgrade(stageIndex) {
   if (state.mode !== "playing") return;
   state.upgradeOptions = [...pickUpgradeOptions(state.ownedUpgrades, Math.random, 3)];
@@ -965,14 +1044,9 @@ function renderUpgradeOptions(options) {
 function chooseUpgrade(upgradeId) {
   if (state.mode !== "upgrade") return;
   const upgrade = state.upgradeOptions.find((candidate) => candidate.id === upgradeId);
-  if (!upgrade) return;
-  state.ownedUpgrades.push(upgrade.id);
-  if (upgrade.id === "ion-drive") state.modifiers.speed += upgrade.effect;
-  if (upgrade.id === "prism-core") state.modifiers.score += upgrade.effect;
-  if (upgrade.id === "echo-shield") state.modifiers.hurtInvuln += upgrade.effect;
-  if (upgrade.id === "magnet-field") state.modifiers.pickupRadius += upgrade.effect;
-  if (upgrade.id === "overclock") state.modifiers.energy += upgrade.effect;
-  if (upgrade.id === "repair-swarm") state.health = Math.min(MAX_HEALTH, state.health + upgrade.effect);
+  if (!upgrade || !applyUpgrade(upgrade.id)) return;
+  state.upgradeOptions = [];
+  state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
   transitionTo("playing", { upgraded: true });
 }
@@ -984,6 +1058,7 @@ function updateHighScore() {
 
 function updatePlayer(dt) {
   const direction = readMoveDirection();
+  const derived = getDerivedValues();
   const hasDirection = direction.lengthSq() > 0.01;
   if (hasDirection) {
     player.facing.lerp(direction, 1 - Math.exp(-TURN_ACCELERATION * 0.5 * dt)).normalize();
@@ -1006,7 +1081,7 @@ function updatePlayer(dt) {
     } else {
       player.velocity.multiplyScalar(Math.exp(-COAST_DAMPING * dt));
     }
-    player.velocity.clampLength(0, BASE_MAX_SPEED * state.modifiers.speed);
+    player.velocity.clampLength(0, BASE_MAX_SPEED * derived.speedMultiplier);
   }
 
   player.position.addScaledVector(player.velocity, dt);
@@ -1041,6 +1116,7 @@ function updatePlayer(dt) {
     player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
   }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
+  player.glow.material.opacity = state.overdriveTimer > 0 ? 0.36 : 0.18;
   player.shield.visible = state.dashInvulnerable || state.hurtInvuln > 0;
   player.shield.material.opacity = 0.48 + Math.sin(state.elapsed * 24) * 0.2;
   syncPlayerTransform();
@@ -1053,9 +1129,10 @@ function attemptDash(direction) {
   const dashDirection = direction.lengthSq() > 0.01 ? direction.clone().normalize() : player.facing.clone().normalize();
   state.dashCharges[chargeIndex] = 0;
   state.dashTimer = DASH_ACTIVE_WINDOW;
+  state.dashInvulnTimer = getDerivedValues().dashInvulnerability;
   state.dashSequence += 1;
   player.facing.copy(dashDirection);
-  player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * state.modifiers.speed);
+  player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getDerivedValues().speedMultiplier);
   if (state.reducedMotion) player.group.scale.set(1, 1, 1);
   else player.group.scale.set(1.25, 0.78, 1);
   spawnParticleBurst(player.position, 0x64f5ff, 15, 3.7, 0.85);
@@ -1077,6 +1154,7 @@ function readMoveDirection() {
 }
 
 function updateShards(dt) {
+  const pickupRadiusMultiplier = getDerivedValues().pickupRadiusMultiplier;
   for (const shard of shards) {
     shard.gem.rotation.z += dt * 1.8;
     shard.ring.rotation.z -= dt * 0.8;
@@ -1089,7 +1167,7 @@ function updateShards(dt) {
     const shard = shards[i];
     const dx = shard.group.position.x - player.position.x;
     const dy = shard.group.position.y - player.position.y;
-    if (Math.hypot(dx, dy) < (player.radius + 0.3) * state.modifiers.pickupRadius) {
+    if (Math.hypot(dx, dy) < (player.radius + 0.3) * pickupRadiusMultiplier) {
       collectShard(i);
     }
   }
@@ -1099,19 +1177,10 @@ function collectShard(index) {
   const shard = shards[index];
   const position = new THREE.Vector2(shard.group.position.x, shard.group.position.y);
   removeShard(index);
-  const reward = computeReward("pickup", state.combo, state.modifiers.score);
-  state.score += reward.score;
-  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
-  state.combo += 1;
-  state.stats.maxCombo = Math.max(state.stats.maxCombo, state.combo);
-  state.comboTimer = 2.8;
+  awardReward("pickup");
   spawnParticleBurst(position, 0xffd166, 16, 3.5, 0.9);
   spawnRipple(position, 0xffd166, 1.1);
   audio.event("pickup", Math.min(1, state.combo / GAME.comboCap));
-  if (state.combo > 1) {
-    dom.combo.innerHTML = `连击 ×<b>${state.combo}</b>`;
-    dom.combo.classList.add("show");
-  }
 }
 
 function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
@@ -1282,14 +1351,15 @@ function waveReachedPlayer(enemy, distance) {
   return distance + band >= enemy.previousDangerRadius && distance - band <= enemy.dangerRadius;
 }
 
-function registerNearMiss(enemy, distance, toPlayer) {
+function registerNearMiss(enemy) {
   if (enemy.nearMissed || enemy.type === "mine" || enemy.type === "boss") return;
+  const toPlayer = player.position.clone().sub(enemy.group.position);
+  const distance = Math.max(toPlayer.length(), 0.001);
+  toPlayer.multiplyScalar(1 / distance);
   const collisionDistance = player.radius + enemy.radius;
-  if (distance >= collisionDistance + 0.62 || enemy.velocity.dot(toPlayer) <= 0) return;
+  if (distance <= collisionDistance || distance >= collisionDistance + 0.62 || enemy.velocity.dot(toPlayer) <= 0) return;
   enemy.nearMissed = true;
-  const reward = computeReward("nearMiss", state.combo, state.modifiers.score);
-  state.score += reward.score;
-  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
+  awardReward("nearMiss");
   state.stats.nearMisses += 1;
   audio.event("nearMiss");
 }
@@ -1300,13 +1370,12 @@ function dashHitsEnemy(enemy, distance) {
   return distance < player.radius + targetRadius;
 }
 
-function damageEnemy(enemy, index) {
+function damageEnemy(enemy) {
   enemy.lastDashId = state.dashSequence;
   enemy.hp -= enemy.type === "boss" ? BOSS_DASH_DAMAGE : 1;
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
   if (enemy.hp <= 0) {
-    enemy.dead = true;
-    breakEnemy(index, enemy);
+    destroyEnemy(enemy, "dash");
     return;
   }
   const away = position.clone().sub(player.position).normalize();
@@ -1343,16 +1412,14 @@ function updateEnemies(dt) {
     const enemy = enemies[index];
     if (!enemy || enemy.dead) continue;
     const distance = player.position.distanceTo(enemy.group.position);
-    if (dashHitsEnemy(enemy, distance)) damageEnemy(enemy, index);
+    if (dashHitsEnemy(enemy, distance)) damageEnemy(enemy);
   }
 
   for (let index = enemies.length - 1; index >= 0 && state.mode === "playing"; index -= 1) {
     const enemy = enemies[index];
     if (!enemy || enemy.dead) continue;
-    const toPlayer = player.position.clone().sub(enemy.group.position);
-    const distance = Math.max(toPlayer.length(), 0.001);
-    toPlayer.multiplyScalar(1 / distance);
-    registerNearMiss(enemy, distance, toPlayer);
+    const distance = Math.max(player.position.distanceTo(enemy.group.position), 0.001);
+    registerNearMiss(enemy);
     if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
     const contactRadius = enemy.type === "boss" ? 2.25 : enemy.radius;
     const bodyContact = enemy.type !== "mine" && enemy.state !== "enter" && distance < player.radius + contactRadius;
@@ -1368,26 +1435,28 @@ function updateEnemies(dt) {
   }
 }
 
-function breakEnemy(index, enemy = enemies[index]) {
-  if (!enemy) return;
+function destroyEnemy(enemy, source) {
+  if (!enemy || enemy.dead) return false;
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
-  if (enemies[index] === enemy) removeEnemy(index);
-  const reward = computeReward("break", state.combo, state.modifiers.score);
-  state.score += reward.score;
-  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
-  state.stats.breaks += 1;
+  enemy.dead = true;
+  const index = enemies.indexOf(enemy);
+  if (index >= 0) removeEnemy(index);
+  if (source === "dash") {
+    awardReward("break");
+    state.stats.breaks += 1;
+  }
   spawnParticleBurst(position, 0xff4fd8, 20, 4.5, 1.1);
   spawnRipple(position, 0xff4fd8, 1.5);
   audio.event("break");
   if (enemy.type === "boss") finishRun("victory");
+  return true;
 }
 
 function damagePlayer(enemy) {
   state.health -= 1;
   state.energy = Math.max(0, state.energy - 18);
-  state.hurtInvuln = state.modifiers.hurtInvuln;
-  state.combo = 0;
-  state.comboTimer = 0;
+  state.hurtInvuln = HURT_INVULNERABILITY;
+  clearCombo();
   state.score = Math.max(0, state.score - 12);
   player.velocity.multiplyScalar(-0.3);
   const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
@@ -1488,7 +1557,11 @@ function updateHUD(dt) {
   dom.energy.textContent = String(Math.round(state.energy));
   const energyPercent = THREE.MathUtils.clamp((state.energy / GAME.overdriveEnergy) * 100, 0, 100);
   dom.energyFill.style.width = `${energyPercent}%`;
-  dom.overdriveLabel.textContent = energyPercent >= 100 ? "OVERDRIVE // 已充能" : "OVERDRIVE // 待机";
+  const overdriveActive = state.overdriveTimer > 0;
+  dom.overdriveLabel.classList.toggle("active", overdriveActive);
+  dom.overdriveLabel.textContent = overdriveActive
+    ? `OVERDRIVE // ${state.overdriveTimer.toFixed(1)}S`
+    : "OVERDRIVE // 待机";
   dom.healthPips.forEach((pip, index) => pip.classList.toggle("empty", index >= state.health));
   state.dashCharges.forEach((charge, index) => {
     const pip = dom.dashPips[index];
@@ -1693,13 +1766,15 @@ function animate() {
     const runDeadline = state.bossDeadline ?? GAME.duration;
     state.timeLeft = Math.max(0, runDeadline - state.elapsed);
     state.dashTimer = Math.max(0, state.dashTimer - dt);
+    state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - dt);
     state.hurtInvuln = Math.max(0, state.hurtInvuln - dt);
+    state.overdriveTimer = Math.max(0, state.overdriveTimer - dt);
     input.dashBuffer = Math.max(0, input.dashBuffer - dt);
-    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + dt / DASH_RECOVERY_TIME));
+    const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
+    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (dt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     state.comboTimer = Math.max(0, state.comboTimer - dt);
     if (state.comboTimer <= 0 && state.combo > 0) {
-      state.combo = 0;
-      dom.combo.classList.remove("show");
+      clearCombo();
     }
     updateStage();
     if (state.mode === "playing") {
@@ -1715,7 +1790,8 @@ function animate() {
     updateParticles(dt);
     updateRipples(dt);
   }
-  const intensity = THREE.MathUtils.clamp((enemies.length / GAME.maxEnemies) * 0.7 + (state.energy / GAME.overdriveEnergy) * 0.3, 0, 1);
+  const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / GAME.overdriveEnergy;
+  const intensity = THREE.MathUtils.clamp((enemies.length / GAME.maxEnemies) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(dt);
   renderer.render(scene, camera);
