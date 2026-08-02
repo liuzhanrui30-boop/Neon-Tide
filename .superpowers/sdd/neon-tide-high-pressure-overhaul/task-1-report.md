@@ -40,9 +40,22 @@ npm test
 
 （本项目使用 `.runtime/node-v22.14.0-darwin-arm64/bin` 运行时。）
 
-## Commit
+## Review fix wave
 
-见本任务提交的 commit hash。
+根据审查反馈完成并测试以下修复：
+
+- 所有模板的 `roles` 与实际槽位一一对应；`enemyCost` 等于槽位角色的实际 threatCost 总和，并由测试锁定。
+- 紧凑视口若无法满足模板 `minSafeGap`，`getFormationSlots` 返回空数组而不是压缩安全缝。
+- `maxEnemyCap: 0` 现在被视为明确的零预算，不再回退到默认设备上限；chooser 在该条件下返回 `null`。
+
+代码修复 commit：`1228f824e3c622fc4f0e05deddce255bee375191`。
+
+修复后测试：
+
+```text
+node --test tests/director.test.mjs → 8 passed
+npm test → 16 passed, 0 failed
+```
 
 ## 潜在风险 / Concerns
 
