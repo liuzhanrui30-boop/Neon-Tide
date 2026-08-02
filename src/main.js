@@ -1,10 +1,39 @@
 import * as THREE from "three";
 import "./style.css";
+import NeonAudio from "./game/audio.js";
+import {
+  GAME,
+  STAGES,
+  computeRank,
+  computeReward,
+  computeSpawnBudget,
+  getStageIndex,
+  pickUpgradeOptions,
+} from "./game/gameplay.js";
 
 const TAU = Math.PI * 2;
-const GAME_DURATION = 45;
 const WORLD_HEIGHT = 14;
 const STORAGE_KEY = "neon-tide-high-score";
+const MAX_HEALTH = 3;
+const MOVE_ACCELERATION = 17.5;
+const TURN_ACCELERATION = 31;
+const MOVE_DAMPING = 4.4;
+const COAST_DAMPING = 6.2;
+const BASE_MAX_SPEED = 6.15;
+const DASH_SPEED = 16.2;
+const DASH_ACTIVE_WINDOW = 0.19;
+const DASH_BUFFER_WINDOW = 0.16;
+const DASH_RECOVERY_TIME = 1.45;
+const STAGE_LABELS = ["第一幕 · 深潮接入", "第二幕 · 信号涌升", "第三幕 · 交叉流", "终幕 · 事件视界"];
+const MODES = new Set(["menu", "playing", "upgrade", "paused", "gameover", "victory"]);
+const ALLOWED_TRANSITIONS = Object.freeze({
+  menu: new Set(["playing"]),
+  playing: new Set(["upgrade", "paused", "gameover", "victory"]),
+  upgrade: new Set(["playing"]),
+  paused: new Set(["playing"]),
+  gameover: new Set(["playing"]),
+  victory: new Set(["playing"]),
+});
 
 const dom = {
   root: document.querySelector("#canvas-root"),
@@ -22,13 +51,33 @@ const dom = {
   health: document.querySelector("#health-pips"),
   energy: document.querySelector("#energy-value"),
   energyFill: document.querySelector("#energy-fill"),
+  overdriveLabel: document.querySelector("#overdrive-label"),
+  stageName: document.querySelector("#stage-name"),
+  stageProgress: document.querySelector("#stage-progress"),
+  stageTrack: document.querySelector(".stage-track"),
+  stageBanner: document.querySelector("#stage-banner"),
+  stageBannerTitle: document.querySelector("#stage-banner strong"),
+  dashPips: Array.from(document.querySelectorAll("#dash-pips i")),
+  muteButton: document.querySelector("#mute-button"),
   pauseButton: document.querySelector("#pause-button"),
+  hud: document.querySelector("#hud"),
+  missionPanel: document.querySelector("#mission-panel"),
+  bossPanel: document.querySelector("#boss-panel"),
+  bossFill: document.querySelector("#boss-fill"),
   flash: document.querySelector("#flash"),
   toast: document.querySelector("#toast"),
   combo: document.querySelector("#combo"),
+  upgradePanel: document.querySelector("#upgrade-panel"),
+  upgradeOptions: document.querySelector("#upgrade-options"),
+  resultRank: document.querySelector("#result-rank"),
+  resultCombo: document.querySelector("#result-combo"),
+  resultNear: document.querySelector("#result-near"),
+  resultBreaks: document.querySelector("#result-breaks"),
+  touchControls: document.querySelector("#touch-controls"),
   joystick: document.querySelector("#joystick"),
   joystickKnob: document.querySelector("#joystick-knob"),
   dashButton: document.querySelector("#dash-button"),
+  dashRing: document.querySelector("#dash-ring"),
 };
 
 dom.healthPips = Array.from({ length: 3 }, () => {
@@ -74,30 +123,59 @@ const view = {
 const state = {
   mode: "menu",
   elapsed: 0,
-  timeLeft: GAME_DURATION,
+  timeLeft: GAME.duration,
   score: 0,
   highScore: Number.parseInt(localStorage.getItem(STORAGE_KEY) || "0", 10),
-  health: 3,
+  health: MAX_HEALTH,
   energy: 0,
   combo: 0,
   comboTimer: 0,
+  stageIndex: 0,
   enemySpawnTimer: 1.1,
   shardSpawnTimer: 1.8,
-  dashCooldown: 0,
+  dashCharges: [1, 1],
   dashTimer: 0,
-  playerInvuln: 0,
+  hurtInvuln: 0,
+  get playerAttacking() {
+    return this.dashTimer > 0;
+  },
+  get dashInvulnerable() {
+    return this.dashTimer > 0;
+  },
+  runFinished: false,
   shakeTime: 0,
   shakeStrength: 0,
   toastTimer: 0,
+  stageBannerTimer: 0,
+  muted: false,
+  ownedUpgrades: [],
+  upgradeOptions: [],
+  modifiers: {
+    speed: 1,
+    score: 1,
+    pickupRadius: 1,
+    energy: 1,
+    hurtInvuln: 0.95,
+  },
+  stats: {
+    maxCombo: 0,
+    nearMisses: 0,
+    breaks: 0,
+  },
+  cameraLookAhead: new THREE.Vector2(),
   reducedMotion: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false,
 };
 
 const input = {
   keys: new Set(),
-  dashQueued: false,
+  dashBuffer: 0,
   touch: new THREE.Vector2(),
   joystickPointerId: null,
 };
+
+const audio = new NeonAudio();
+let activeDialog = null;
+let restoreFocusTarget = null;
 
 const shards = [];
 const enemies = [];
@@ -400,6 +478,7 @@ function spawnEnemy() {
     speed: 0.92 + state.elapsed * 0.024 + Math.random() * 0.42,
     radius: 0.34,
     wobble: Math.random() * TAU,
+    nearMissed: false,
   };
   enemies.push(enemy);
   return enemy;
@@ -455,63 +534,67 @@ function randomShardPosition() {
 function resetState() {
   clearWorldEntities();
   state.elapsed = 0;
-  state.timeLeft = GAME_DURATION;
+  state.timeLeft = GAME.duration;
   state.score = 0;
-  state.health = 3;
+  state.health = MAX_HEALTH;
   state.energy = 0;
   state.combo = 0;
   state.comboTimer = 0;
+  state.stageIndex = 0;
   state.enemySpawnTimer = 1.1;
   state.shardSpawnTimer = 1.8;
-  state.dashCooldown = 0;
+  state.dashCharges = [1, 1];
   state.dashTimer = 0;
-  state.playerInvuln = 0;
+  state.hurtInvuln = 0;
+  state.runFinished = false;
   state.shakeTime = 0;
   state.shakeStrength = 0;
+  state.stageBannerTimer = 0;
+  state.ownedUpgrades = [];
+  state.upgradeOptions = [];
+  state.modifiers.speed = 1;
+  state.modifiers.score = 1;
+  state.modifiers.pickupRadius = 1;
+  state.modifiers.energy = 1;
+  state.modifiers.hurtInvuln = 0.95;
+  state.stats.maxCombo = 0;
+  state.stats.nearMisses = 0;
+  state.stats.breaks = 0;
+  state.cameraLookAhead.set(0, 0);
+  input.dashBuffer = 0;
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
   player.facing.set(0, 1);
   player.group.scale.set(1, 1, 1);
   player.group.rotation.z = 0;
+  player.group.rotation.y = 0;
   player.shield.visible = false;
   syncPlayerTransform();
   seedShards();
+  audio.setStage(0);
 }
 
 function startGame() {
-  unlockAudio();
+  audio.unlock();
   resetState();
-  state.mode = "playing";
-  dom.overlay.classList.remove("visible");
-  dom.pauseButton.textContent = "Ⅱ";
-  dom.pauseButton.style.visibility = "visible";
+  transitionTo("playing", { newRun: true });
   toast("潮汐已接入", "cyan");
-  tone(240, 0.12, "sine", 0.045, 520);
+  audio.event("start");
 }
 
 function pauseGame() {
   if (state.mode !== "playing") return;
-  state.mode = "paused";
-  showOverlay(
-    "SIGNAL HOLD // PAUSED",
-    "SIGNAL<br /><em>PAUSED</em>",
-    "潮汐暂时冻结。准备好后继续收集光核。",
-    "继续潮汐",
-    false
-  );
-  tone(180, 0.12, "triangle", 0.03, 120);
+  transitionTo("paused");
 }
 
 function resumeGame() {
   if (state.mode !== "paused") return;
-  unlockAudio();
-  state.mode = "playing";
-  dom.overlay.classList.remove("visible");
+  audio.unlock();
+  transitionTo("playing", { resumed: true });
   toast("信号恢复", "cyan");
-  tone(360, 0.1, "triangle", 0.03, 600);
 }
 
-function showOverlay(kicker, title, copy, label, showResult) {
+function showOverlay(kicker, title, copy, label, showResult = false) {
   dom.overlayKicker.textContent = kicker;
   dom.overlayTitle.innerHTML = title;
   dom.overlayCopy.innerHTML = copy;
@@ -520,46 +603,179 @@ function showOverlay(kicker, title, copy, label, showResult) {
   if (showResult) {
     dom.resultScore.textContent = String(state.score);
     dom.resultHigh.textContent = String(state.highScore);
+    dom.resultRank.textContent = computeRank({ score: state.score });
+    dom.resultCombo.textContent = String(state.stats.maxCombo);
+    dom.resultNear.textContent = String(state.stats.nearMisses);
+    dom.resultBreaks.textContent = String(state.stats.breaks);
   }
-  dom.overlay.classList.add("visible");
+  openDialog(dom.overlay, dom.primaryButton);
 }
 
-function gameOver() {
-  if (state.mode !== "playing") return;
-  state.mode = "gameover";
-  updateHighScore();
-  showOverlay(
-    "SIGNAL LOST // HULL BREACH",
-    "SIGNAL<br /><em>LOST</em>",
-    "追猎信号撕裂了你的护盾。再来一次，把潮汐变成你的舞台。",
-    "重新接入",
-    true
-  );
-  dom.pauseButton.style.visibility = "hidden";
-  flash("#ff506f", 0.24);
-  spawnParticleBurst(player.position, 0xff506f, 28, 4.8, 1.4);
-  spawnRipple(player.position, 0xff506f, 2.4);
-  tone(120, 0.34, "sawtooth", 0.04, 45);
+function openDialog(dialog, focusTarget) {
+  if (!activeDialog) restoreFocusTarget = document.activeElement;
+  if (activeDialog && activeDialog !== dialog) {
+    activeDialog.removeAttribute("aria-modal");
+    activeDialog.hidden = true;
+    activeDialog.classList?.remove("visible");
+  }
+  activeDialog = dialog;
+  dialog.hidden = false;
+  dialog.setAttribute("aria-modal", "true");
+  if (dialog === dom.overlay) dialog.classList.add("visible");
+  setBackgroundInert(true);
+  window.requestAnimationFrame(() => focusTarget?.focus({ preventScroll: true }));
 }
 
-function victory() {
-  if (state.mode !== "playing") return;
-  state.mode = "victory";
-  state.score += Math.floor(state.timeLeft * 10) + 250;
+function closeDialogs({ restoreFocus = true } = {}) {
+  if (!activeDialog) return;
+  dom.overlay.classList.remove("visible");
+  dom.overlay.removeAttribute("aria-modal");
+  dom.upgradePanel.hidden = true;
+  dom.upgradePanel.removeAttribute("aria-modal");
+  activeDialog = null;
+  setBackgroundInert(false);
+  if (!restoreFocus) {
+    restoreFocusTarget = null;
+    return;
+  }
+  const candidate = restoreFocusTarget;
+  restoreFocusTarget = null;
+  window.requestAnimationFrame(() => {
+    const target = candidate && candidate !== document.body && candidate.isConnected ? candidate : dom.pauseButton;
+    target?.focus({ preventScroll: true });
+  });
+}
+
+function setBackgroundInert(inert) {
+  [dom.root, dom.hud, dom.missionPanel, dom.bossPanel, dom.touchControls].forEach((element) => {
+    if (element) element.inert = inert;
+  });
+  dom.pauseButton.disabled = inert;
+  dom.muteButton.disabled = inert;
+  dom.dashButton.disabled = inert;
+}
+
+function transitionTo(nextMode, payload = {}) {
+  if (!MODES.has(nextMode) || nextMode === state.mode) return false;
+  const allowed = ALLOWED_TRANSITIONS[state.mode];
+  if (!allowed?.has(nextMode)) return false;
+  const previousMode = state.mode;
+  state.mode = nextMode;
+  if (nextMode !== "playing") {
+    input.keys.clear();
+    input.dashBuffer = 0;
+    resetJoystick();
+    audio.suspendBeat();
+  }
+  renderMode(nextMode, previousMode, payload);
+  return true;
+}
+
+function renderMode(mode, previousMode, payload = {}) {
+  dom.pauseButton.textContent = mode === "paused" ? "▶" : "Ⅱ";
+  dom.pauseButton.style.visibility = ["menu", "gameover", "victory"].includes(mode) ? "hidden" : "visible";
+  if (mode === "playing") {
+    closeDialogs({ restoreFocus: previousMode !== "menu" || payload.newRun });
+    return;
+  }
+  if (mode === "upgrade") {
+    renderUpgradeOptions(payload.options ?? state.upgradeOptions);
+    const firstOption = dom.upgradeOptions.querySelector("button");
+    openDialog(dom.upgradePanel, firstOption);
+    return;
+  }
+  if (mode === "menu") {
+    showOverlay(
+      "ARCADE SURVIVAL // THREE.JS",
+      "NEON<br /><em>TIDE</em>",
+      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${GAME.duration} 秒，等到潮汐退去。`,
+      "进入潮汐"
+    );
+  } else if (mode === "paused") {
+    showOverlay(
+      "SIGNAL HOLD // PAUSED",
+      "SIGNAL<br /><em>PAUSED</em>",
+      "潮汐暂时冻结。准备好后继续收集光核。",
+      "继续潮汐"
+    );
+  } else if (mode === "gameover") {
+    showOverlay(
+      "SIGNAL LOST // HULL BREACH",
+      "SIGNAL<br /><em>LOST</em>",
+      "追猎信号撕裂了你的护盾。再来一次，把潮汐变成你的舞台。",
+      "重新接入",
+      true
+    );
+  } else if (mode === "victory") {
+    showOverlay(
+      "SIGNAL CLEAR // TIDE OUT",
+      "TIDE<br /><em>OUT</em>",
+      "你穿过了整片霓虹潮汐。光核已经记住了你的航线。",
+      "再次出航",
+      true
+    );
+  }
+}
+
+function finishRun(outcome) {
+  if (state.runFinished || state.mode !== "playing" || !["gameover", "victory"].includes(outcome)) return false;
+  state.runFinished = true;
+  if (outcome === "victory") state.score += 250;
   updateHighScore();
-  showOverlay(
-    "SIGNAL CLEAR // TIDE OUT",
-    "TIDE<br /><em>OUT</em>",
-    "你穿过了整片霓虹潮汐。光核已经记住了你的航线。",
-    "再次出航",
-    true
-  );
-  dom.pauseButton.style.visibility = "hidden";
-  flash("#64f5ff", 0.28);
-  spawnParticleBurst(player.position, 0x64f5ff, 36, 3.6, 1.5);
-  spawnRipple(player.position, 0x64f5ff, 3.2);
-  tone(270, 0.14, "sine", 0.04, 540);
-  setTimeout(() => tone(540, 0.22, "sine", 0.035, 820), 130);
+  transitionTo(outcome);
+  if (outcome === "victory") {
+    flash("#64f5ff", 0.28);
+    spawnParticleBurst(player.position, 0x64f5ff, 36, 3.6, 1.5);
+    spawnRipple(player.position, 0x64f5ff, 3.2);
+    audio.event("victory");
+  } else {
+    flash("#ff506f", 0.24);
+    spawnParticleBurst(player.position, 0xff506f, 28, 4.8, 1.4);
+    spawnRipple(player.position, 0xff506f, 2.4);
+    audio.event("defeat");
+  }
+  return true;
+}
+
+function beginUpgrade(stageIndex) {
+  if (state.mode !== "playing") return;
+  state.upgradeOptions = [...pickUpgradeOptions(state.ownedUpgrades, Math.random, 3)];
+  transitionTo("upgrade", { stageIndex, options: state.upgradeOptions });
+}
+
+function renderUpgradeOptions(options) {
+  const effectLabels = {
+    "ion-drive": "极速 +15%",
+    "prism-core": "收益 +20%",
+    "echo-shield": "防护 +0.08 秒",
+    "magnet-field": "拾取范围 +25%",
+    overclock: "充能 +20%",
+    "repair-swarm": "修复船体 +1",
+  };
+  const buttons = options.map((upgrade, index) => {
+    const button = document.createElement("button");
+    button.className = "upgrade-option";
+    button.type = "button";
+    button.dataset.upgradeId = upgrade.id;
+    button.innerHTML = `<span class="upgrade-number" aria-hidden="true">${index + 1}</span><span class="upgrade-title">${upgrade.name}</span><span class="upgrade-description">${upgrade.description}</span><strong class="upgrade-effect">${effectLabels[upgrade.id] ?? "信号强化"}</strong>`;
+    return button;
+  });
+  dom.upgradeOptions.replaceChildren(...buttons);
+}
+
+function chooseUpgrade(upgradeId) {
+  if (state.mode !== "upgrade") return;
+  const upgrade = state.upgradeOptions.find((candidate) => candidate.id === upgradeId);
+  if (!upgrade) return;
+  state.ownedUpgrades.push(upgrade.id);
+  if (upgrade.id === "ion-drive") state.modifiers.speed += upgrade.effect;
+  if (upgrade.id === "prism-core") state.modifiers.score += upgrade.effect;
+  if (upgrade.id === "echo-shield") state.modifiers.hurtInvuln += upgrade.effect;
+  if (upgrade.id === "magnet-field") state.modifiers.pickupRadius += upgrade.effect;
+  if (upgrade.id === "overclock") state.modifiers.energy += upgrade.effect;
+  if (upgrade.id === "repair-swarm") state.health = Math.min(MAX_HEALTH, state.health + upgrade.effect);
+  audio.event("upgrade");
+  transitionTo("playing", { upgraded: true });
 }
 
 function updateHighScore() {
@@ -569,29 +785,29 @@ function updateHighScore() {
 
 function updatePlayer(dt) {
   const direction = readMoveDirection();
-  if (direction.lengthSq() > 0.01) player.facing.lerp(direction, 1 - Math.exp(-16 * dt)).normalize();
-
-  if (input.dashQueued) {
-    input.dashQueued = false;
-    if (state.dashCooldown <= 0) {
-      const dashDirection = direction.lengthSq() > 0.01 ? direction : player.facing;
-      player.velocity.copy(dashDirection).multiplyScalar(15.8);
-      state.dashCooldown = 1.25;
-      state.dashTimer = 0.18;
-      state.playerInvuln = Math.max(state.playerInvuln, 0.34);
-      player.group.scale.set(1.25, 0.78, 1);
-      spawnParticleBurst(player.position, 0x64f5ff, 15, 3.7, 0.85);
-      spawnRipple(player.position, 0x64f5ff, 1.2);
-      shake(0.08, 0.12);
-      tone(390, 0.09, "square", 0.025, 850);
-    }
+  const hasDirection = direction.lengthSq() > 0.01;
+  if (hasDirection) {
+    player.facing.lerp(direction, 1 - Math.exp(-TURN_ACCELERATION * 0.5 * dt)).normalize();
   }
 
+  if (input.dashBuffer > 0 && attemptDash(direction)) input.dashBuffer = 0;
+
   if (state.dashTimer <= 0) {
-    const target = direction.lengthSq() > 0.01 ? direction.multiplyScalar(5.6) : new THREE.Vector2();
-    player.velocity.lerp(target, 1 - Math.exp(-11 * dt));
-  } else {
-    state.dashTimer -= dt;
+    if (hasDirection) {
+      const speed = player.velocity.length();
+      if (speed > 0.05) {
+        const desiredVelocity = direction.clone().multiplyScalar(speed);
+        const steering = desiredVelocity.sub(player.velocity);
+        const maxSteering = TURN_ACCELERATION * dt;
+        if (steering.lengthSq() > maxSteering * maxSteering) steering.setLength(maxSteering);
+        player.velocity.add(steering);
+      }
+      player.velocity.addScaledVector(direction, MOVE_ACCELERATION * dt);
+      player.velocity.multiplyScalar(Math.exp(-MOVE_DAMPING * 0.35 * dt));
+    } else {
+      player.velocity.multiplyScalar(Math.exp(-COAST_DAMPING * dt));
+    }
+    player.velocity.clampLength(0, BASE_MAX_SPEED * state.modifiers.speed);
   }
 
   player.position.addScaledVector(player.velocity, dt);
@@ -611,14 +827,35 @@ function updatePlayer(dt) {
   if (speed > 0.08) {
     player.group.rotation.z = Math.atan2(player.facing.y, player.facing.x) - Math.PI / 2;
   }
+  const velocityDirection = speed > 0.08 ? player.velocity.clone().multiplyScalar(1 / speed) : player.facing;
+  const bankInput = hasDirection ? THREE.MathUtils.clamp(velocityDirection.x * direction.y - velocityDirection.y * direction.x, -1, 1) : 0;
+  const targetBank = state.reducedMotion ? 0 : bankInput * 0.42;
+  player.group.rotation.y = THREE.MathUtils.lerp(player.group.rotation.y, targetBank, 1 - Math.exp(-10 * dt));
   const targetScale = state.dashTimer > 0 ? 1.22 : 1;
   player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
   player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
   player.flame.scale.setScalar(0.75 + Math.min(speed / 5, 1) * 0.7 + Math.sin(state.elapsed * 30) * 0.08);
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
-  player.shield.visible = state.playerInvuln > 0;
+  player.shield.visible = state.dashInvulnerable || state.hurtInvuln > 0;
   player.shield.material.opacity = 0.48 + Math.sin(state.elapsed * 24) * 0.2;
   syncPlayerTransform();
+}
+
+function attemptDash(direction) {
+  if (state.mode !== "playing" || state.playerAttacking) return false;
+  const chargeIndex = state.dashCharges.findIndex((charge) => charge >= 0.999);
+  if (chargeIndex < 0) return false;
+  const dashDirection = direction.lengthSq() > 0.01 ? direction.clone().normalize() : player.facing.clone().normalize();
+  state.dashCharges[chargeIndex] = 0;
+  state.dashTimer = DASH_ACTIVE_WINDOW;
+  player.facing.copy(dashDirection);
+  player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * state.modifiers.speed);
+  player.group.scale.set(1.25, 0.78, 1);
+  spawnParticleBurst(player.position, 0x64f5ff, 15, 3.7, 0.85);
+  spawnRipple(player.position, 0x64f5ff, 1.2);
+  shake(0.08, 0.12);
+  audio.event("dash");
+  return true;
 }
 
 function readMoveDirection() {
@@ -645,7 +882,7 @@ function updateShards(dt) {
     const shard = shards[i];
     const dx = shard.group.position.x - player.position.x;
     const dy = shard.group.position.y - player.position.y;
-    if (Math.hypot(dx, dy) < player.radius + 0.3) {
+    if (Math.hypot(dx, dy) < (player.radius + 0.3) * state.modifiers.pickupRadius) {
       collectShard(i);
     }
   }
@@ -655,13 +892,15 @@ function collectShard(index) {
   const shard = shards[index];
   const position = new THREE.Vector2(shard.group.position.x, shard.group.position.y);
   removeShard(index);
-  state.score += 10 + Math.min(state.combo, 5) * 2;
-  state.energy = Math.min(100, state.energy + 12);
+  const reward = computeReward("pickup", state.combo, state.modifiers.score);
+  state.score += reward.score;
+  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
   state.combo += 1;
+  state.stats.maxCombo = Math.max(state.stats.maxCombo, state.combo);
   state.comboTimer = 2.8;
   spawnParticleBurst(position, 0xffd166, 16, 3.5, 0.9);
   spawnRipple(position, 0xffd166, 1.1);
-  tone(420 + state.combo * 26, 0.08, "sine", 0.028, 720 + state.combo * 40);
+  audio.event("pickup", Math.min(1, state.combo / GAME.comboCap));
   if (state.combo > 1) {
     dom.combo.innerHTML = `连击 ×<b>${state.combo}</b>`;
     dom.combo.classList.add("show");
@@ -669,7 +908,8 @@ function collectShard(index) {
 }
 
 function updateEnemies(dt) {
-  for (const enemy of enemies) {
+  for (let index = enemies.length - 1; index >= 0; index -= 1) {
+    const enemy = enemies[index];
     const toPlayer = new THREE.Vector2(player.position.x - enemy.group.position.x, player.position.y - enemy.group.position.y);
     const distance = Math.max(toPlayer.length(), 0.001);
     toPlayer.multiplyScalar(1 / distance);
@@ -682,17 +922,39 @@ function updateEnemies(dt) {
     enemy.group.rotation.z = Math.atan2(enemy.velocity.y, enemy.velocity.x) - Math.PI / 2;
     enemy.group.children[0].scale.setScalar(1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08);
 
-    if (distance < player.radius + enemy.radius) {
-      if (state.playerInvuln <= 0) damagePlayer(enemy);
+    const collisionDistance = player.radius + enemy.radius;
+    if (distance < collisionDistance) {
+      if (state.playerAttacking) breakEnemy(index);
+      else if (state.hurtInvuln <= 0) damagePlayer(enemy);
       else enemy.velocity.addScaledVector(toPlayer, -2.1);
+    } else if (!enemy.nearMissed && distance < collisionDistance + 0.6 && enemy.velocity.dot(toPlayer) < 0) {
+      enemy.nearMissed = true;
+      const reward = computeReward("nearMiss", state.combo, state.modifiers.score);
+      state.score += reward.score;
+      state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
+      state.stats.nearMisses += 1;
+      audio.event("nearMiss");
     }
   }
+}
+
+function breakEnemy(index) {
+  const enemy = enemies[index];
+  const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+  removeEnemy(index);
+  const reward = computeReward("break", state.combo, state.modifiers.score);
+  state.score += reward.score;
+  state.energy = Math.min(GAME.overdriveEnergy, state.energy + reward.energy * state.modifiers.energy);
+  state.stats.breaks += 1;
+  spawnParticleBurst(position, 0xff4fd8, 20, 4.5, 1.1);
+  spawnRipple(position, 0xff4fd8, 1.5);
+  audio.event("break");
 }
 
 function damagePlayer(enemy) {
   state.health -= 1;
   state.energy = Math.max(0, state.energy - 18);
-  state.playerInvuln = 0.95;
+  state.hurtInvuln = state.modifiers.hurtInvuln;
   state.combo = 0;
   state.comboTimer = 0;
   state.score = Math.max(0, state.score - 12);
@@ -703,16 +965,19 @@ function damagePlayer(enemy) {
   shake(0.2, 0.28);
   flash("#ff506f", 0.13);
   toast("船体受损", "danger");
-  tone(190, 0.16, "sawtooth", 0.035, 80);
-  if (state.health <= 0) gameOver();
+  audio.event("hurt");
+  if (state.health <= 0) finishRun("gameover");
 }
 
 function updateSpawning(dt) {
   state.enemySpawnTimer -= dt;
-  const enemyInterval = Math.max(0.44, 1.18 - state.elapsed * 0.014);
+  const healthPercent = (state.health / MAX_HEALTH) * 100;
+  const spawnBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
+  const stage = STAGES[state.stageIndex];
+  const enemyInterval = Math.max(0.38, (1.18 - state.elapsed * 0.009) / stage.spawnRate);
   if (state.enemySpawnTimer <= 0) {
-    spawnEnemy();
-    if (state.elapsed > 18 && Math.random() < 0.22) spawnEnemy();
+    if (enemies.length < spawnBudget) spawnEnemy();
+    if (enemies.length < spawnBudget && state.elapsed > 38 && Math.random() < 0.22) spawnEnemy();
     state.enemySpawnTimer = enemyInterval;
   }
 
@@ -762,32 +1027,78 @@ function updateVisuals(dt) {
   starsGroup.rotation.z -= dt * 0.0015 * visualSpeed;
   backgroundGroup.position.x = Math.sin(state.elapsed * 0.19) * 0.12;
   backgroundGroup.position.y = Math.cos(state.elapsed * 0.16) * 0.08;
+  const lookAheadTarget = player.position.clone().multiplyScalar(0.035).addScaledVector(player.velocity, 0.11);
+  lookAheadTarget.clampLength(0, state.reducedMotion ? 0.18 : 0.72);
+  state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
+  let shakeX = 0;
+  let shakeY = 0;
   if (state.shakeTime > 0) {
     state.shakeTime -= dt;
     const falloff = Math.max(0, state.shakeTime / 0.3);
-    camera.position.x = (Math.random() - 0.5) * state.shakeStrength * falloff;
-    camera.position.y = (Math.random() - 0.5) * state.shakeStrength * falloff;
-  } else {
-    camera.position.x = 0;
-    camera.position.y = 0;
+    shakeX = (Math.random() - 0.5) * state.shakeStrength * falloff;
+    shakeY = (Math.random() - 0.5) * state.shakeStrength * falloff;
   }
+  camera.position.x = state.cameraLookAhead.x + shakeX;
+  camera.position.y = state.cameraLookAhead.y + shakeY;
   camera.position.z = 20;
+  const cameraBank = state.reducedMotion ? 0 : THREE.MathUtils.clamp(-player.velocity.x * 0.0025, -0.012, 0.012);
+  camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, cameraBank, 1 - Math.exp(-4 * dt));
   updateHUD(dt);
 }
 
 function updateHUD(dt) {
   dom.score.textContent = String(state.score).padStart(4, "0");
-  const seconds = Math.max(0, Math.ceil(state.timeLeft));
-  dom.time.textContent = `00:${String(seconds).padStart(2, "0")}`;
+  const totalSeconds = Math.max(0, Math.ceil(state.timeLeft));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  dom.time.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   dom.time.classList.toggle("warning", state.timeLeft <= 10 && state.mode === "playing");
   dom.energy.textContent = String(Math.round(state.energy));
-  dom.energyFill.style.width = `${state.energy}%`;
+  const energyPercent = THREE.MathUtils.clamp((state.energy / GAME.overdriveEnergy) * 100, 0, 100);
+  dom.energyFill.style.width = `${energyPercent}%`;
+  dom.overdriveLabel.textContent = energyPercent >= 100 ? "OVERDRIVE // 已充能" : "OVERDRIVE // 待机";
   dom.healthPips.forEach((pip, index) => pip.classList.toggle("empty", index >= state.health));
-  dom.dashButton.classList.toggle("cooldown", state.dashCooldown > 0);
+  state.dashCharges.forEach((charge, index) => {
+    const pip = dom.dashPips[index];
+    pip.classList.toggle("spent", charge <= 0.001);
+    pip.style.opacity = String(0.2 + charge * 0.8);
+    pip.style.transform = `skewX(-22deg) scale(${0.78 + charge * 0.22})`;
+  });
+  const readyCharges = state.dashCharges.filter((charge) => charge >= 0.999).length;
+  dom.dashButton.classList.toggle("cooldown", readyCharges === 0);
+  dom.dashButton.setAttribute("aria-label", `冲刺，${readyCharges} 格可用`);
+  dom.dashButton.setAttribute("aria-disabled", String(readyCharges === 0));
+  const firstArc = Math.round(state.dashCharges[0] * 170);
+  const secondArc = 190 + Math.round(state.dashCharges[1] * 170);
+  dom.dashRing.style.background = `conic-gradient(from -90deg, #ff4fd8 0deg ${firstArc}deg, rgba(255,79,216,.14) ${firstArc}deg 170deg, transparent 170deg 190deg, #64f5ff 190deg ${secondArc}deg, rgba(100,245,255,.14) ${secondArc}deg 360deg)`;
+  const stage = STAGES[state.stageIndex];
+  const stageEnd = Number.isFinite(stage.end) ? stage.end : GAME.duration;
+  const stageDuration = Math.max(0.001, stageEnd - stage.start);
+  const stageProgress = THREE.MathUtils.clamp(((state.elapsed - stage.start) / stageDuration) * 100, 0, 100);
+  dom.stageName.textContent = STAGE_LABELS[state.stageIndex] ?? stage.name;
+  dom.stageProgress.style.width = `${stageProgress}%`;
+  dom.stageTrack.setAttribute("aria-valuenow", String(Math.round(stageProgress)));
+  dom.bossPanel.hidden = true;
+  dom.bossFill.style.width = "100%";
   if (state.toastTimer > 0) {
     state.toastTimer -= dt;
     if (state.toastTimer <= 0) dom.toast.classList.remove("show");
   }
+  if (state.stageBannerTimer > 0) {
+    state.stageBannerTimer -= dt;
+    if (state.stageBannerTimer <= 0) dom.stageBanner.classList.remove("show");
+  }
+}
+
+function updateStage() {
+  const nextStageIndex = getStageIndex(state.elapsed);
+  if (nextStageIndex === state.stageIndex) return;
+  state.stageIndex = nextStageIndex;
+  audio.setStage(nextStageIndex);
+  dom.stageBannerTitle.textContent = STAGE_LABELS[nextStageIndex] ?? STAGES[nextStageIndex].name;
+  dom.stageBanner.classList.add("show");
+  state.stageBannerTimer = 1.6;
+  beginUpgrade(nextStageIndex);
 }
 
 function shake(strength, duration) {
@@ -825,14 +1136,19 @@ function updateBounds() {
 }
 
 function requestDash() {
-  if (state.mode === "playing") input.dashQueued = true;
+  if (state.mode === "playing") input.dashBuffer = DASH_BUFFER_WINDOW;
 }
 
 function onKeyDown(event) {
+  audio.unlock();
   const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
   if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key)) event.preventDefault();
   input.keys.add(key);
   if (event.code === "Space") requestDash();
+  if (state.mode === "upgrade" && /^[1-3]$/.test(key)) {
+    const option = state.upgradeOptions[Number(key) - 1];
+    if (option) chooseUpgrade(option.id);
+  }
   if (key === "p" || event.key === "Escape") {
     if (state.mode === "playing") pauseGame();
     else if (state.mode === "paused") resumeGame();
@@ -869,20 +1185,35 @@ function setupInput() {
     if (state.mode === "playing") pauseGame();
   });
   dom.primaryButton.addEventListener("click", () => {
-    unlockAudio();
+    audio.unlock();
     if (state.mode === "menu" || state.mode === "gameover" || state.mode === "victory") startGame();
     else if (state.mode === "paused") resumeGame();
   });
   dom.pauseButton.addEventListener("click", () => {
+    audio.unlock();
     if (state.mode === "playing") pauseGame();
     else if (state.mode === "paused") resumeGame();
   });
+  dom.muteButton.addEventListener("click", () => {
+    audio.unlock();
+    state.muted = !state.muted;
+    audio.setMuted(state.muted);
+    dom.muteButton.setAttribute("aria-pressed", String(state.muted));
+    dom.muteButton.setAttribute("aria-label", state.muted ? "取消静音" : "静音");
+    dom.muteButton.textContent = state.muted ? "×" : "♪";
+  });
+  dom.upgradeOptions.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-upgrade-id]");
+    if (button) chooseUpgrade(button.dataset.upgradeId);
+  });
   dom.dashButton.addEventListener("pointerdown", (event) => {
     event.preventDefault();
+    audio.unlock();
     requestDash();
   });
   dom.joystick.addEventListener("pointerdown", (event) => {
     event.preventDefault();
+    audio.unlock();
     input.joystickPointerId = event.pointerId;
     dom.joystick.setPointerCapture(event.pointerId);
     setJoystickFromEvent(event);
@@ -892,28 +1223,6 @@ function setupInput() {
   });
   dom.joystick.addEventListener("pointerup", resetJoystick);
   dom.joystick.addEventListener("pointercancel", resetJoystick);
-}
-
-let audioContext = null;
-function unlockAudio() {
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) return;
-  if (!audioContext) audioContext = new AudioContextClass();
-  if (audioContext.state === "suspended") audioContext.resume();
-}
-
-function tone(startFrequency, duration, type, volume, endFrequency) {
-  if (!audioContext) return;
-  const oscillator = audioContext.createOscillator();
-  const gain = audioContext.createGain();
-  oscillator.type = type;
-  oscillator.frequency.setValueAtTime(startFrequency, audioContext.currentTime);
-  if (endFrequency) oscillator.frequency.exponentialRampToValueAtTime(endFrequency, audioContext.currentTime + duration);
-  gain.gain.setValueAtTime(volume, audioContext.currentTime);
-  gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
-  oscillator.connect(gain).connect(audioContext.destination);
-  oscillator.start();
-  oscillator.stop(audioContext.currentTime + duration);
 }
 
 function resize() {
@@ -926,26 +1235,32 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
   if (state.mode === "playing") {
     state.elapsed += dt;
-    state.timeLeft = Math.max(0, GAME_DURATION - state.elapsed);
-    state.dashCooldown = Math.max(0, state.dashCooldown - dt);
-    state.playerInvuln = Math.max(0, state.playerInvuln - dt);
+    state.timeLeft = Math.max(0, GAME.duration - state.elapsed);
+    state.dashTimer = Math.max(0, state.dashTimer - dt);
+    state.hurtInvuln = Math.max(0, state.hurtInvuln - dt);
+    input.dashBuffer = Math.max(0, input.dashBuffer - dt);
+    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + dt / DASH_RECOVERY_TIME));
     state.comboTimer = Math.max(0, state.comboTimer - dt);
     if (state.comboTimer <= 0 && state.combo > 0) {
       state.combo = 0;
       dom.combo.classList.remove("show");
     }
-    updatePlayer(dt);
-    updateShards(dt);
-    updateEnemies(dt);
-    updateSpawning(dt);
-    updateParticles(dt);
-    updateRipples(dt);
-    if (state.timeLeft <= 0) victory();
+    updateStage();
+    if (state.mode === "playing") {
+      updatePlayer(dt);
+      updateShards(dt);
+      updateEnemies(dt);
+      if (state.mode === "playing") updateSpawning(dt);
+      updateParticles(dt);
+      updateRipples(dt);
+      if (state.timeLeft <= 0) finishRun("victory");
+    }
   } else {
     updateParticles(dt);
     updateRipples(dt);
-    player.group.rotation.z += dt * 0.15;
   }
+  const intensity = THREE.MathUtils.clamp((enemies.length / GAME.maxEnemies) * 0.7 + (state.energy / GAME.overdriveEnergy) * 0.3, 0, 1);
+  audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(dt);
   renderer.render(scene, camera);
 }
@@ -956,14 +1271,7 @@ createParticlePool();
 setupInput();
 updateBounds();
 resetState();
-dom.pauseButton.style.visibility = "hidden";
-showOverlay(
-  "ARCADE SURVIVAL // THREE.JS",
-  "NEON<br /><em>TIDE</em>",
-  "在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 45 秒，等到潮汐退去。",
-  "进入潮汐",
-  false
-);
+renderMode("menu", null);
 const clock = new THREE.Clock();
 window.addEventListener("resize", resize);
 renderer.setAnimationLoop(animate);
