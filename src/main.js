@@ -359,6 +359,7 @@ const shared = {
   bossInnerGeometry: new THREE.RingGeometry(1.12, 1.24, 48),
   bossHaloGeometry: new THREE.RingGeometry(2.72, 2.77, 72),
   bossPulseGeometry: new THREE.RingGeometry(0.94, 1.02, 52),
+  bossTriangleGeometry: null,
   telegraphLineGeometry: new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(0, 0, 0),
     new THREE.Vector3(0, 18, 0),
@@ -469,9 +470,20 @@ function createWingGeometry() {
   return new THREE.ShapeGeometry(shape);
 }
 
+function createTrianglePulseGeometry() {
+  const shape = new THREE.Shape();
+  const halfAngle = Math.PI / 6;
+  shape.moveTo(0, 0);
+  shape.lineTo(Math.cos(Math.PI / 2 - halfAngle) * 1.02, Math.sin(Math.PI / 2 - halfAngle) * 1.02);
+  shape.lineTo(Math.cos(Math.PI / 2 + halfAngle) * 1.02, Math.sin(Math.PI / 2 + halfAngle) * 1.02);
+  shape.closePath();
+  return new THREE.ShapeGeometry(shape);
+}
+
 shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
 shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
 shared.swarmWingGeometry = createWingGeometry();
+shared.bossTriangleGeometry = createTrianglePulseGeometry();
 
 function createBackground() {
   const backdrop = new THREE.Mesh(
@@ -1177,6 +1189,9 @@ function createBoss() {
   const pulseMaterial = shared.dangerRingMaterial.clone();
   const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, pulseMaterial);
   pulseRing.visible = false;
+  const triangleMaterial = shared.dangerRingMaterial.clone();
+  const trianglePulse = new THREE.Mesh(shared.bossTriangleGeometry, triangleMaterial);
+  trianglePulse.visible = false;
   const orbitNodes = new THREE.Group();
   for (let i = 0; i < 4; i += 1) {
     const node = new THREE.Mesh(shared.bossOrbitNodeGeometry, i % 2 ? shared.bossOrbitCyanMaterial : shared.bossOrbitDangerMaterial);
@@ -1184,7 +1199,7 @@ function createBoss() {
     node.position.set(Math.cos(angle) * 2.72, Math.sin(angle) * 2.72, 0.04);
     orbitNodes.add(node);
   }
-  group.add(line, pulseRing, haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core);
+  group.add(line, pulseRing, trianglePulse, haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core);
   const enemy = registerEnemy("boss", new THREE.Vector2(0, view.halfHeight + 4.8), group, "enter", {
     stateTimer: 1.5,
     telegraph: 0,
@@ -1198,14 +1213,16 @@ function createBoss() {
     beamStartAngle: 0,
     beamEndAngle: 0,
     attackElapsed: 0,
+    triangleDirection: new THREE.Vector2(0, 1),
+    triangleHalfAngle: Math.PI / 6,
     dashDirection: new THREE.Vector2(),
     dangerRadius: 0,
     previousDangerRadius: 0,
     pulseHit: false,
     hitReactTimer: 0,
     priority: 4,
-    visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing },
-    ownedMaterials: [pulseMaterial],
+    visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing, trianglePulse },
+    ownedMaterials: [pulseMaterial, triangleMaterial],
   });
   if (enemy) {
     state.bossSpawned = true;
@@ -2243,6 +2260,16 @@ function recordBossAttack(enemy, kind) {
   return entry;
 }
 
+function clearBossAttackVisuals(enemy) {
+  enemy.visuals.line.visible = false;
+  enemy.visuals.pulseRing.visible = false;
+  enemy.visuals.trianglePulse.visible = false;
+  enemy.visuals.line.scale.set(1, 1, 1);
+  enemy.dangerRadius = 0;
+  enemy.previousDangerRadius = 0;
+  enemy.pulseHit = false;
+}
+
 function spawnBossSwarm(enemy, flanks = false) {
   const availableSlots = Math.max(0, Math.min(flanks ? 4 : 3, getEnemyCap() - enemies.length));
   for (let index = 0; index < availableSlots; index += 1) {
@@ -2263,6 +2290,7 @@ function enterBossPhaseTwo(enemy) {
   enemy.phase2Triggered = true;
   enemy.attackIndex = 0;
   enemy.pulseHit = false;
+  clearBossAttackVisuals(enemy);
   enemy.previousDangerRadius = 0;
   enemy.dangerRadius = 0;
   state.stats.bossPhase = 2;
@@ -2297,12 +2325,16 @@ function beginBossTelegraph(enemy) {
   enemy.dangerRadius = 0;
   const lineAttack = enemy.attackKind === "charge" || enemy.attackKind === "sweepBeam";
   enemy.visuals.line.visible = lineAttack;
-  enemy.visuals.pulseRing.visible = !lineAttack;
+  enemy.visuals.pulseRing.visible = !lineAttack && enemy.attackKind !== "trianglePulse";
+  enemy.visuals.trianglePulse.visible = enemy.attackKind === "trianglePulse";
   if (enemy.attackKind === "charge") enemy.dashDirection.copy(player.position).sub(enemy.group.position).normalize();
   if (enemy.attackKind === "sweepBeam") {
     enemy.beamDirection.copy(player.position).sub(enemy.group.position).normalize();
     enemy.beamStartAngle = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - 1.12;
     enemy.beamEndAngle = enemy.beamStartAngle + 2.24;
+  }
+  if (enemy.attackKind === "trianglePulse") {
+    enemy.triangleDirection.set(0, 1).rotateAround(new THREE.Vector2(), enemy.group.rotation.z);
   }
   recordBossAttack(enemy, enemy.attackKind);
   state.stats.bossAttackTelegraphs.push(BOSS_TELEGRAPH_TIME);
@@ -2323,6 +2355,7 @@ function beginBossExecute(enemy) {
   } else if (attack === "trianglePulse") {
     enemy.dangerRadius = 0.9;
     enemy.pulseIndex = -1;
+    enemy.visuals.trianglePulse.visible = true;
     setEnemyState(enemy, "execute", 1.92);
   } else if (attack === "sweepBeam") {
     enemy.beamWidth = 0.3;
@@ -2379,11 +2412,13 @@ function updateBoss(enemy, dt) {
       const warningScale = state.reducedMotion
         ? 1.85
         : 1 + (1 - enemy.telegraph / BOSS_TELEGRAPH_TIME) * 2.1;
-      enemy.visuals.pulseRing.scale.setScalar(warningScale);
-      if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.pulseRing.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
+      const warningMesh = enemy.attackKind === "trianglePulse" ? enemy.visuals.trianglePulse : enemy.visuals.pulseRing;
+      warningMesh.scale.setScalar(warningScale);
+      if (enemy.attackKind === "trianglePulse") warningMesh.rotation.z = Math.atan2(enemy.triangleDirection.y, enemy.triangleDirection.x) - Math.PI / 2;
+      if (state.reducedMotion) applyDiscreteWarning(warningMesh.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
       else {
-        enemy.visuals.pulseRing.material.color.set(0xff9f43);
-        enemy.visuals.pulseRing.material.opacity = 0.72;
+        warningMesh.material.color.set(0xff9f43);
+        warningMesh.material.opacity = 0.72;
       }
     }
     if (enemy.stateTimer <= 0) beginBossExecute(enemy);
@@ -2403,8 +2438,13 @@ function updateBoss(enemy, dt) {
       const segmentProgress = (progress * pulseCount) - pulseIndex;
       enemy.previousDangerRadius = enemy.dangerRadius;
       enemy.dangerRadius = THREE.MathUtils.lerp(0.9, Math.max(view.halfWidth, view.halfHeight) + 2, segmentProgress);
-      enemy.visuals.pulseRing.scale.setScalar(enemy.dangerRadius);
-      if (enemy.attackKind === "trianglePulse") enemy.visuals.pulseRing.rotation.z = pulseIndex * (TAU / 3);
+      const hazardMesh = enemy.attackKind === "trianglePulse" ? enemy.visuals.trianglePulse : enemy.visuals.pulseRing;
+      hazardMesh.scale.setScalar(enemy.dangerRadius);
+      if (enemy.attackKind === "trianglePulse") {
+        const directionAngle = pulseIndex * (TAU / 3) + enemy.wobble;
+        enemy.triangleDirection.set(Math.cos(directionAngle), Math.sin(directionAngle));
+        hazardMesh.rotation.z = directionAngle - Math.PI / 2;
+      }
       state.stats.activeHazards += 1;
     } else if (enemy.attackKind === "sweepBeam") {
       const progress = 1 - Math.max(0, enemy.stateTimer / 1.16);
@@ -2422,7 +2462,7 @@ function updateBoss(enemy, dt) {
       enemy.visuals.pulseRing.scale.setScalar(summonScale);
     }
     if (enemy.stateTimer <= 0) {
-      enemy.visuals.pulseRing.visible = false;
+      clearBossAttackVisuals(enemy);
       setEnemyState(enemy, "recover", 0.82);
     }
   } else if (enemy.state === "recover") {
@@ -2451,6 +2491,17 @@ function beamHitsPlayer(enemy) {
   if (along < 0 || along > 18) return false;
   const distance = Math.abs(relativeX * direction.y - relativeY * direction.x);
   return distance < player.radius + enemy.beamWidth * 0.42;
+}
+
+function trianglePulseHitsPlayer(enemy) {
+  if (enemy.type !== "boss" || enemy.state !== "execute" || enemy.attackKind !== "trianglePulse" || enemy.pulseHit) return false;
+  const relative = player.position.clone().sub(enemy.group.position);
+  const distance = relative.length();
+  const radius = enemy.dangerRadius ?? 0;
+  if (radius <= 0 || distance > radius + player.radius) return false;
+  relative.normalize();
+  const dot = THREE.MathUtils.clamp(relative.dot(enemy.triangleDirection), -1, 1);
+  return Math.acos(dot) <= enemy.triangleHalfAngle && relative.dot(enemy.triangleDirection) > 0;
 }
 
 function registerNearMiss(enemy, distance, collided = false) {
@@ -2582,12 +2633,14 @@ function updateEnemies(dt) {
     const distance = Math.max(player.position.distanceTo(enemy.group.position), 0.001);
     const contactRadius = enemy.type === "boss" ? 2.25 : enemy.radius;
     const bodyContact = !["mine", "lancer"].includes(enemy.type) && enemy.state !== "enter" && distance < player.radius + contactRadius;
-    const waveContact = ["mine", "boss", "elite", "bulwark"].includes(enemy.type) && waveReachedPlayer(enemy, distance);
+    const waveContact = ["mine", "boss", "elite", "bulwark"].includes(enemy.type)
+      && enemy.attackKind !== "trianglePulse" && waveReachedPlayer(enemy, distance);
+    const triangleContact = trianglePulseHitsPlayer(enemy);
     const beamContact = beamHitsPlayer(enemy);
-    registerNearMiss(enemy, distance, bodyContact || waveContact || beamContact);
+    registerNearMiss(enemy, distance, bodyContact || waveContact || triangleContact || beamContact);
     if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
-    if (bodyContact || waveContact || beamContact) {
-      enemy.pulseHit = waveContact || enemy.pulseHit;
+    if (bodyContact || waveContact || triangleContact || beamContact) {
+      enemy.pulseHit = waveContact || triangleContact || enemy.pulseHit;
       damagePlayer(enemy);
     }
   }

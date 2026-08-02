@@ -906,6 +906,18 @@ async function bossTimeoutScenario() {
 async function bossPhaseTwoScenario() {
   await withPage('boss-phase-two', {}, async (page) => {
     await page.startGame();
+    const timing = await page.gameEvaluate(`return {
+      boundaries:[0,30,64,100].map((seconds)=>({seconds,stage:getStageIndex(seconds)})),
+      duration:GAME.duration,bossStart:GAME.bossStart,bossWindow:GAME.bossWindow,
+    }`);
+    assert.deepEqual(timing.boundaries.map((entry) => entry.stage), [0,1,2,3]);
+    assert.deepEqual({ duration:timing.duration,bossStart:timing.bossStart,bossWindow:timing.bossWindow }, { duration:126,bossStart:100,bossWindow:26 });
+    const paused = await page.gameEvaluate(`const before=$state.elapsed;pauseGame();return {before,mode:$state.mode}`);
+    await sleep(140);
+    const pausedAfter = await page.gameEvaluate('return {elapsed:$state.elapsed,mode:$state.mode}');
+    assert.equal(pausedAfter.mode, 'paused');
+    assert.ok(Math.abs(pausedAfter.elapsed - paused.before) < 0.03, `pause advanced elapsed ${paused.before} -> ${pausedAfter.elapsed}`);
+    await page.gameEvaluate('resumeGame();return $state.mode');
     const boss = await jumpToBoss(page);
     assert.equal(boss.deadline, 126);
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
@@ -922,19 +934,37 @@ async function bossPhaseTwoScenario() {
 
     const attacks = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
-      boss.state='choose'; boss.stateTimer=0; boss.attackIndex=0;
-      const seen=[];
-      for (let attack=0; attack<3; attack+=1) {
-        boss.state='choose'; boss.stateTimer=0;
-        updateBoss(boss,0);
-        seen.push({kind:boss.attackKind,telegraph:boss.telegraph});
-        updateBoss(boss,0.68);
-        updateBoss(boss,0.2);
+      const seen=[]; let beamProbe=false; let triangleProbe=false; let flankPeak=0;
+      for (let tick=0; tick<360; tick+=1) {
+        updateBoss(boss,0.1);
+        flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
+        if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
+          seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
+        }
+        if (boss.state==='execute' && boss.attackKind==='sweepBeam' && !beamProbe) {
+          const probe=boss.group.position.clone().addScaledVector(boss.beamDirection,2.4);
+          $player.position.copy(probe);
+          beamProbe=beamHitsPlayer(boss);
+        }
+        if (boss.state==='execute' && boss.attackKind==='trianglePulse' && !triangleProbe) {
+          const safe=$player.position.clone().sub(boss.group.position).normalize().multiplyScalar(-1.8).add(boss.group.position);
+          $player.position.copy(safe);
+          const safeHit=trianglePulseHitsPlayer(boss);
+          const tip=boss.group.position.clone().addScaledVector(boss.triangleDirection,Math.max(1.2,boss.dangerRadius*0.8));
+          $player.position.copy(tip);
+          const directionalHit=trianglePulseHitsPlayer(boss);
+          triangleProbe=!safeHit && directionalHit && boss.visuals.trianglePulse.visible && $state.stats.activeHazards>0;
+        }
       }
-      return {seen,stats:[...$state.stats.bossAttackLog],hazards:$state.stats.activeHazards};
+      return {seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
     `);
     assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'trianglePulse', 'flankSwarm']);
     assert.ok(attacks.seen.every((attack) => attack.telegraph >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.seen)}`);
+    assert.ok(attacks.seen.find((attack) => attack.kind === 'sweepBeam')?.line, 'sweep beam telegraph was not visible');
+    assert.ok(attacks.seen.find((attack) => attack.kind === 'trianglePulse')?.triangle, 'triangle telegraph was not visible');
+    assert.ok(attacks.beamProbe, 'sweep beam active collision did not register');
+    assert.ok(attacks.triangleProbe, 'triangle pulse directional collision/hazard did not register');
+    assert.ok(attacks.flankPeak >= 2, `flank swarm did not spawn: ${attacks.flankPeak}`);
     assert.ok(attacks.stats.some((attack) => attack.kind === 'sweepBeam' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'trianglePulse' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'flankSwarm' && attack.phase === 2));
