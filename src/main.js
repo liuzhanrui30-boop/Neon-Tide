@@ -21,6 +21,7 @@ import {
   getSpawnInterval,
   getStageIndex,
 } from "./game/director.js";
+import { createPostProcessing, selectRenderQuality } from "./game/render-quality.js";
 
 const TAU = Math.PI * 2;
 const WORLD_HEIGHT = 14;
@@ -64,6 +65,8 @@ const FEEDBACK_TIERS = Object.freeze({
 });
 const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
+const PLAYER_CORE_IDLE_COLOR = new THREE.Color(0xe7ffff);
+const PLAYER_CORE_HIT_COLOR = new THREE.Color(0xffffff);
 const OVERDRIVE_MODIFIERS = Object.freeze({
   speed: 1.18,
   score: 1.5,
@@ -102,6 +105,7 @@ const dom = {
   stageName: document.querySelector("#stage-name"),
   stageProgress: document.querySelector("#stage-progress"),
   stageTrack: document.querySelector(".stage-track"),
+  formationLabel: document.querySelector("#formation-label"),
   stageBanner: document.querySelector("#stage-banner"),
   stageBannerTitle: document.querySelector("#stage-banner strong"),
   dashPips: Array.from(document.querySelectorAll("#dash-pips i")),
@@ -144,12 +148,14 @@ camera.position.set(0, 0, 20);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+let renderQuality = null;
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.domElement.tabIndex = -1;
 renderer.domElement.setAttribute("aria-label", "Neon Tide 游戏画布");
 dom.root.appendChild(renderer.domElement);
+let postProcessing = null;
 
 const world = new THREE.Group();
 scene.add(world);
@@ -172,6 +178,14 @@ const view = {
 };
 
 const reducedMotionPreference = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? null;
+renderQuality = selectRenderQuality({
+  coarsePointer: window.matchMedia?.("(pointer: coarse)").matches ?? false,
+  reducedMotion: reducedMotionPreference?.matches ?? false,
+  viewportWidth: window.innerWidth,
+  devicePixelRatio: window.devicePixelRatio || 1,
+});
+renderer.setPixelRatio(renderQuality.pixelRatio);
+document.documentElement.dataset.renderQuality = renderQuality.tier;
 
 const state = {
   mode: "menu",
@@ -275,6 +289,7 @@ const scenery = {
   grid: null,
   glow: null,
   boundary: null,
+  fogGlows: [],
   decorMaterials: [],
 };
 
@@ -304,6 +319,8 @@ const player = {
   shield: null,
   core: null,
   coreGlow: null,
+  flameSegments: [],
+  hitReactTimer: 0,
   wings: [],
   trailTimer: 0,
   position: new THREE.Vector2(0, -1.2),
@@ -350,6 +367,9 @@ const shared = {
   bossOrbitNodeGeometry: new THREE.CircleGeometry(0.11, 12),
   mineRingGeometry: new THREE.RingGeometry(0.86, 0.94, 40),
   mineTickGeometry: new THREE.RingGeometry(1.12, 1.16, 32),
+  lancerDiamondGeometry: new THREE.PlaneGeometry(0.62, 0.62),
+  lancerReticleGeometry: new THREE.RingGeometry(0.3, 0.335, 4),
+  strikerStabilizerGeometry: new THREE.PlaneGeometry(0.52, 0.055),
   eliteOuterGeometry: new THREE.RingGeometry(0.76, 0.83, 32),
   eliteShockGeometry: new THREE.RingGeometry(0.72, 0.88, 40),
   swarmWingGeometry: null,
@@ -526,7 +546,20 @@ function createBackground() {
   backgroundGroup.add(glow);
   scenery.glow = glow;
 
-  for (let layer = 0; layer < 2; layer += 1) {
+  for (const [x, y, radius, color, opacity] of [
+    [-6.6, 3.5, 5.8, 0x173b78, 0.105],
+    [6.8, -3.1, 4.9, 0x702653, 0.085],
+  ]) {
+    const fogGlow = new THREE.Mesh(
+      new THREE.CircleGeometry(radius, 48),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending }),
+    );
+    fogGlow.position.set(x, y, -3.72);
+    backgroundGroup.add(fogGlow);
+    scenery.fogGlows.push(fogGlow);
+  }
+
+  for (let layer = 0; layer < 3; layer += 1) {
     for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
       const points = [];
       const phase = lineIndex * 0.83 + layer * 1.7;
@@ -536,15 +569,15 @@ function createBackground() {
         points.push(new THREE.Vector3(x, y, 0));
       }
       const material = new THREE.LineBasicMaterial({
-        color: layer === 0 ? 0x36e0ff : 0x6677ff,
+        color: layer === 0 ? 0x36e0ff : layer === 1 ? 0x6677ff : 0xff4fd8,
         transparent: true,
-        opacity: layer === 0 ? 0.075 : 0.12,
+        opacity: layer === 0 ? 0.075 : layer === 1 ? 0.12 : 0.065,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
       });
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material);
       line.position.set((lineIndex - 2) * 6.8, -5.2 + lineIndex * 2.55 + layer * 0.7, -3.45 + layer * 0.08);
-      line.rotation.z = layer === 0 ? -0.08 : 0.11;
+      line.rotation.z = layer === 0 ? -0.08 : layer === 1 ? 0.11 : -0.16;
       backgroundGroup.add(line);
       flowLines.push({ line, material, layer, phase, baseX: line.position.x, baseY: line.position.y });
     }
@@ -644,6 +677,20 @@ function createPlayer() {
   );
   flame.position.set(0, -0.43, 0.04);
 
+  const flameSegments = [
+    { width: 0.1, length: 0.28, color: 0xfff4b3, x: 0, z: 0.08 },
+    { width: 0.16, length: 0.42, color: 0xffd166, x: 0, z: 0.06 },
+    { width: 0.23, length: 0.58, color: 0xff7a45, x: 0, z: 0.04 },
+  ].map(({ width, length, color, x, z }, index) => {
+    const segment = new THREE.Mesh(
+      createTriangleGeometry(0.02, width, -length),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.72 - index * 0.12, depthWrite: false, blending: THREE.AdditiveBlending }),
+    );
+    segment.position.set(x, -0.45, z);
+    segment.rotation.z = Math.PI;
+    return segment;
+  });
+
   const shield = new THREE.Mesh(
     new THREE.RingGeometry(0.57, 0.595, 36),
     new THREE.MeshBasicMaterial({
@@ -681,7 +728,7 @@ function createPlayer() {
   );
   core.position.set(0, 0.03, 0.07);
 
-  group.add(glow, flame, leftWing, rightWing, body, outline, coreGlow, core, shield);
+  group.add(glow, flameSegments[2], flameSegments[1], flameSegments[0], flame, leftWing, rightWing, body, outline, coreGlow, core, shield);
   world.add(group);
 
   player.group = group;
@@ -691,6 +738,7 @@ function createPlayer() {
   player.shield = shield;
   player.core = core;
   player.coreGlow = coreGlow;
+  player.flameSegments = flameSegments;
   player.wings = [leftWing, rightWing];
   player.position.set(0, -1.2);
   syncPlayerTransform();
@@ -818,6 +866,7 @@ function triggerSlowMotion(scale, duration) {
 
 function applyReducedMotionPreference(matches) {
   state.reducedMotion = Boolean(matches);
+  refreshRenderQuality();
   if (!state.reducedMotion) return;
   state.trauma = 0;
   state.slowMotionScale = 1;
@@ -838,6 +887,30 @@ function applyReducedMotionPreference(matches) {
     particle.mesh.visible = false;
     particle.mesh.material.opacity = 0;
   }
+}
+
+function refreshRenderQuality() {
+  const nextQuality = selectRenderQuality({
+    coarsePointer: window.matchMedia?.("(pointer: coarse)").matches ?? false,
+    reducedMotion: state.reducedMotion,
+    viewportWidth: window.innerWidth,
+    devicePixelRatio: window.devicePixelRatio || 1,
+  });
+  const changed = renderQuality?.tier !== nextQuality.tier || renderQuality?.pixelRatio !== nextQuality.pixelRatio;
+  renderQuality = nextQuality;
+  renderer.setPixelRatio(renderQuality.pixelRatio);
+  document.documentElement.dataset.renderQuality = renderQuality.tier;
+  if (!changed && postProcessing) return renderQuality;
+  postProcessing?.dispose();
+  postProcessing = createPostProcessing({
+    renderer,
+    scene,
+    camera,
+    quality: renderQuality,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
+  return renderQuality;
 }
 
 function getWarningStep(remaining, duration, stepCount = 4) {
@@ -1038,6 +1111,12 @@ function createChaser(position = randomEdgePosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.chaserGlowMaterial);
   glow.scale.setScalar(1.45);
   const body = new THREE.Mesh(shared.enemyGeometry, shared.chaserMaterial);
+  const leftFin = new THREE.Mesh(shared.swarmWingGeometry, shared.chaserMaterial);
+  const rightFin = new THREE.Mesh(shared.swarmWingGeometry, shared.chaserMaterial);
+  leftFin.scale.set(-0.52, 0.52, 1);
+  rightFin.scale.set(0.52, 0.52, 1);
+  leftFin.position.set(-0.22, -0.16, -0.02);
+  rightFin.position.set(0.22, -0.16, -0.02);
   const eye = new THREE.Mesh(shared.bossCoreGeometry, shared.bossMaterial);
   eye.scale.setScalar(0.095);
   eye.position.set(0, 0.1, 0.06);
@@ -1050,7 +1129,7 @@ function createChaser(position = randomEdgePosition()) {
     chargeArc.add(segment);
   }
   chargeArc.visible = false;
-  group.add(chargeArc, glow, body, eye);
+  group.add(chargeArc, glow, leftFin, rightFin, body, eye);
   const intentTimer = 1.8 + Math.random() * 1.4;
   return registerEnemy("chaser", position, group, "chase", {
     speed: 2.0 + state.elapsed * 0.014 + Math.random() * 0.24,
@@ -1058,7 +1137,7 @@ function createChaser(position = randomEdgePosition()) {
     intentTimer,
     intentIndex: Math.floor(Math.random() * 3),
     dashDirection: new THREE.Vector2(),
-    visuals: { glow, body, chargeArc },
+    visuals: { glow, body, leftFin, rightFin, chargeArc },
   });
 }
 
@@ -1067,15 +1146,18 @@ function createStriker(position = randomEdgePosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.strikerGlowMaterial);
   glow.scale.set(1.25, 1.8, 1);
   const body = new THREE.Mesh(shared.strikerGeometry, shared.strikerMaterial);
+  const stabilizer = new THREE.Mesh(shared.strikerStabilizerGeometry, shared.strikerMaterial);
+  stabilizer.position.set(0, -0.2, -0.02);
+  stabilizer.rotation.z = Math.PI / 4;
   const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
   line.position.z = -0.08;
   line.visible = false;
-  group.add(line, glow, body);
+  group.add(line, glow, stabilizer, body);
   return registerEnemy("striker", position, group, "track", {
     speed: 2.0 + Math.random() * 0.22,
     stateTimer: 0.55 + Math.random() * 0.75,
     dashDirection: new THREE.Vector2(),
-    visuals: { glow, body, line },
+    visuals: { glow, body, stabilizer, line },
     priority: 2,
   });
 }
@@ -1084,21 +1166,27 @@ function createLancer(position = randomEdgePosition(1.2)) {
   const group = new THREE.Group();
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
   glow.scale.set(1.2, 1.8, 1);
-  const body = new THREE.Mesh(shared.strikerGeometry, shared.lancerMaterial);
-  body.scale.set(0.72, 1.1, 1);
+  const body = new THREE.Mesh(shared.lancerDiamondGeometry, shared.lancerMaterial);
+  body.rotation.z = Math.PI / 4;
+  body.scale.set(0.86, 1.2, 1);
+  const spear = new THREE.Mesh(shared.strikerGeometry, shared.lancerMaterial);
+  spear.scale.set(0.28, 0.58, 1);
+  spear.position.y = -0.4;
+  const reticle = new THREE.Mesh(shared.lancerReticleGeometry, shared.warningRingMaterial);
+  reticle.position.z = 0.03;
   const line = new THREE.Line(shared.telegraphLineGeometry, shared.lancerTelegraphMaterial);
   line.visible = true;
   line.scale.set(1, 0.9, 1);
   const beam = new THREE.Line(shared.telegraphLineGeometry, shared.lancerBeamMaterial);
   beam.visible = false;
   beam.scale.set(1, 0.92, 1);
-  group.add(line, beam, glow, body);
+  group.add(line, beam, glow, reticle, spear, body);
   return registerEnemy("lancer", position, group, "lock", {
     speed: 0.35 + Math.random() * 0.2,
     stateTimer: 0.65 + Math.random() * 0.35,
     beamDirection: new THREE.Vector2(),
     beamWidth: 0.2,
-    visuals: { glow, body, line, beam },
+    visuals: { glow, body, spear, reticle, line, beam },
     priority: 2,
   });
 }
@@ -1441,6 +1529,7 @@ function resetState() {
   state.bossStart = null;
   state.bossDeadline = null;
   state.terminalReason = null;
+  player.hitReactTimer = 0;
   state.ownedUpgrades = [];
   state.upgradeOptions = [];
   state.stats.maxCombo = 0;
@@ -1858,6 +1947,7 @@ function updateHighScore() {
 }
 
 function updatePlayer(dt) {
+  player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
   const derived = getDerivedValues();
   const hasDirection = direction.lengthSq() > 0.01;
@@ -1907,6 +1997,7 @@ function updatePlayer(dt) {
   const targetBank = state.reducedMotion ? 0 : bankInput * 0.42;
   player.group.rotation.y = THREE.MathUtils.lerp(player.group.rotation.y, targetBank, 1 - Math.exp(-10 * dt));
   const flameScale = 0.75 + Math.min(speed / 5, 1) * 0.7;
+  const hitStrength = THREE.MathUtils.clamp(player.hitReactTimer / 0.18, 0, 1);
   if (state.reducedMotion) {
     player.group.scale.set(1, 1, 1);
     player.flame.scale.setScalar(1);
@@ -1922,8 +2013,15 @@ function updatePlayer(dt) {
     player.coreGlow.scale.setScalar(corePulse * (state.overdriveTimer > 0 ? 1.42 : 1.12));
   }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
+  player.flameSegments.forEach((segment, index) => {
+    const lengthScale = (0.72 + Math.min(speed / 5, 1) * 0.62) * (1 + (state.dashTimer > 0 ? 0.7 : 0));
+    segment.scale.set(1, lengthScale * (1 - index * 0.08), 1);
+    segment.material.opacity = (0.48 - index * 0.08) + Math.min(speed / 5, 1) * 0.32;
+  });
+  player.core.material.color.lerpColors(PLAYER_CORE_IDLE_COLOR, PLAYER_CORE_HIT_COLOR, hitStrength);
+  player.coreGlow.material.color.lerpColors(paletteState.primary, PLAYER_CORE_HIT_COLOR, hitStrength * 0.8);
+  player.coreGlow.material.opacity = (state.overdriveTimer > 0 ? 0.42 : 0.22) + hitStrength * 0.52;
   player.glow.material.opacity = state.overdriveTimer > 0 ? 0.36 : 0.18;
-  player.coreGlow.material.opacity = state.overdriveTimer > 0 ? 0.42 : 0.22;
   player.wings.forEach((wing, index) => {
     wing.material.color.copy(index === 0 ? paletteState.secondary : paletteState.primary);
   });
@@ -2108,6 +2206,8 @@ function updateStriker(enemy, dt, toPlayer) {
 
 function updateLancer(enemy, dt, toPlayer) {
   enemy.stateTimer -= dt;
+  enemy.visuals.reticle.rotation.z += state.reducedMotion ? 0 : dt * 1.7;
+  enemy.visuals.reticle.scale.setScalar(state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 5 + enemy.wobble) * 0.08);
   if (enemy.state === "lock") {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 1.5, 0);
     if (enemy.stateTimer <= 0) {
@@ -2692,6 +2792,7 @@ function damagePlayer(enemy) {
   enemy.nearMissResolved = true;
   syncHealthPips();
   state.hurtInvuln = HURT_INVULNERABILITY;
+  player.hitReactTimer = 0.18;
   clearCombo();
   player.velocity.multiplyScalar(-0.3);
   const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
@@ -2828,13 +2929,18 @@ function updateVisuals(dt) {
   decorGroup.scale.setScalar(decorPulse);
   backgroundGroup.position.x = state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.19) * 0.12;
   backgroundGroup.position.y = state.reducedMotion ? 0 : Math.cos(state.elapsed * 0.16) * 0.08;
+  scenery.fogGlows.forEach((fogGlow, index) => {
+    fogGlow.material.opacity = state.reducedMotion
+      ? (index === 0 ? 0.105 : 0.085)
+      : (index === 0 ? 0.095 : 0.075) + Math.sin(state.elapsed * (0.26 + index * 0.08) + index) * 0.018;
+  });
   for (const flow of flowLines) {
-    const speed = flow.layer === 0 ? 0.72 : -0.46;
+    const speed = flow.layer === 0 ? 0.72 : flow.layer === 1 ? -0.46 : 0.29;
     flow.line.position.x = state.reducedMotion
       ? flow.baseX
-      : flow.baseX + Math.sin(state.elapsed * speed + flow.phase) * (flow.layer === 0 ? 2.2 : 3.1);
+      : flow.baseX + Math.sin(state.elapsed * speed + flow.phase) * (flow.layer === 0 ? 2.2 : flow.layer === 1 ? 3.1 : 1.45);
     flow.line.position.y = flow.baseY + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.34 + flow.phase) * 0.22);
-    flow.material.opacity = (flow.layer === 0 ? 0.065 : 0.105)
+    flow.material.opacity = (flow.layer === 0 ? 0.065 : flow.layer === 1 ? 0.105 : 0.055)
       + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.8 + flow.phase) * 0.018);
   }
   if (scenery.boundary) {
@@ -2905,6 +3011,11 @@ function updateHUD(dt) {
   dom.stageName.textContent = STAGE_LABELS[state.stageIndex] ?? stage.name;
   dom.stageProgress.style.width = `${stageProgress}%`;
   dom.stageTrack.setAttribute("aria-valuenow", String(Math.round(stageProgress)));
+  const formationVisible = state.lastFormation && state.elapsed - state.lastFormationAt < 2.6;
+  dom.formationLabel.textContent = formationVisible
+    ? `FORMATION // ${state.lastFormation.toUpperCase()}`
+    : `SECTOR // ${String(state.stageIndex + 1).padStart(2, "0")} / 04`;
+  dom.formationLabel.classList.toggle("active", Boolean(formationVisible));
   const boss = enemies.find((enemy) => enemy.type === "boss" && !enemy.dead);
   syncBossProgress(boss ?? null);
   if (state.toastTimer > 0) {
@@ -3102,7 +3213,8 @@ function setupInput() {
 
 function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  refreshRenderQuality();
+  postProcessing?.resize(window.innerWidth, window.innerHeight, renderQuality.pixelRatio);
   updateBounds();
 }
 
@@ -3150,7 +3262,7 @@ function animate() {
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(wallDt);
-  renderer.render(scene, camera);
+  postProcessing?.render();
 }
 
 createBackground();
@@ -3159,6 +3271,7 @@ createParticlePool();
 createTrailPool();
 setupInput();
 updateBounds();
+refreshRenderQuality();
 resetState();
 renderMode("menu", null);
 const clock = new THREE.Clock();
