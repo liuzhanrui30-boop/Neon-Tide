@@ -27,12 +27,12 @@ test('session timing is derived from boss entry and the boss window', () => {
   assert.equal(GAME.duration, GAME.bossStart + GAME.bossWindow);
 });
 
-test('stage boundaries begin each phase exactly at 0, 18, 38, and 53 seconds', () => {
+test('stage boundaries begin each phase exactly at 0, 30, 64, and 100 seconds', () => {
   assert.equal(getStageIndex(0), 0);
-  assert.equal(getStageIndex(18), 1);
-  assert.equal(getStageIndex(38), 2);
-  assert.equal(getStageIndex(53), 3);
-  assert.equal(getStage(53), STAGES[3]);
+  assert.equal(getStageIndex(30), 1);
+  assert.equal(getStageIndex(64), 2);
+  assert.equal(getStageIndex(100), 3);
+  assert.equal(getStage(100), STAGES[3]);
 });
 
 test('spawn budget provides relief when player health is low', () => {
@@ -40,7 +40,7 @@ test('spawn budget provides relief when player health is low', () => {
   const hurt = computeSpawnBudget(42, 20, 4_000);
 
   assert.ok(hurt < healthy);
-  assert.ok(healthy <= 24);
+  assert.ok(healthy <= 36);
   assert.ok(hurt >= 1);
 });
 

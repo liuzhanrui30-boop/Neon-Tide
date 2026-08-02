@@ -6,8 +6,19 @@ const freeze = (value) => {
   return value;
 };
 
-const STAGE_BOUNDARIES = [0, 18, 38, 53];
-const BOSS_WINDOW = 18;
+const STAGE_BOUNDARIES = [0, 30, 64, 100];
+const BOSS_WINDOW = 26;
+
+export const COMBAT = freeze({
+  desktopEnemyCap: 36,
+  coarsePointerEnemyCap: 28,
+  particleCap: 300,
+  trailNodeCap: 48,
+  spawnIntervals: [0.72, 0.55, 0.42],
+  spawnIntervalFloor: 0.3,
+  formationCooldown: { min: 5, max: 9 },
+  formationTelegraph: { min: 0.45, max: 0.85 },
+});
 
 export const GAME = freeze({
   version: '2.0.0',
@@ -15,27 +26,42 @@ export const GAME = freeze({
   bossWindow: BOSS_WINDOW,
   duration: STAGE_BOUNDARIES.at(-1) + BOSS_WINDOW,
   stageBoundaries: STAGE_BOUNDARIES,
-  maxEnemies: 24,
-  maxParticles: 220,
-  maxTrailNodes: 36,
+  maxEnemies: COMBAT.desktopEnemyCap,
+  desktopEnemyCap: COMBAT.desktopEnemyCap,
+  coarsePointerEnemyCap: COMBAT.coarsePointerEnemyCap,
+  maxParticles: COMBAT.particleCap,
+  maxTrailNodes: COMBAT.trailNodeCap,
+  spawnIntervalFloor: COMBAT.spawnIntervalFloor,
   comboCap: 8,
   overdriveEnergy: 100,
   overdriveDuration: 5,
 });
 
 export const STAGES = freeze([
-  { index: 0, id: 'drift', name: 'Neon Drift', start: 0, end: 18, spawnRate: 1.0, palette: '#36e0ff' },
-  { index: 1, id: 'surge', name: 'Signal Surge', start: 18, end: 38, spawnRate: 1.35, palette: '#a56bff' },
-  { index: 2, id: 'crosscurrent', name: 'Crosscurrent', start: 38, end: 53, spawnRate: 1.7, palette: '#ff4fba' },
-  { index: 3, id: 'event-horizon', name: 'Event Horizon', start: 53, end: Infinity, spawnRate: 2.1, palette: '#ff9f43' },
+  { index: 0, id: 'drift', name: 'Neon Drift', start: 0, end: 30, spawnRate: 1.0, palette: '#36e0ff' },
+  { index: 1, id: 'surge', name: 'Signal Surge', start: 30, end: 64, spawnRate: 1.35, palette: '#a56bff' },
+  { index: 2, id: 'crosscurrent', name: 'Crosscurrent', start: 64, end: 100, spawnRate: 1.7, palette: '#ff4fba' },
+  { index: 3, id: 'event-horizon', name: 'Event Horizon', start: 100, end: Infinity, spawnRate: 2.1, palette: '#ff9f43' },
 ]);
 
 export const ENEMY_TYPES = freeze({
-  chaser: { id: 'chaser', radius: 0.75, hp: 1, score: 100, energy: 8 },
-  striker: { id: 'striker', radius: 0.9, hp: 1, score: 150, energy: 10 },
-  mine: { id: 'mine', radius: 0.65, hp: 1, score: 125, energy: 9 },
-  elite: { id: 'elite', radius: 1.15, hp: 3, score: 350, energy: 20 },
-  boss: { id: 'boss', radius: 3.5, hp: 30, score: 2500, energy: 35 },
+  hunter: { id: 'hunter', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100, energy: 8 },
+  chaser: { id: 'chaser', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100, energy: 8 },
+  striker: { id: 'striker', role: 'Striker', radius: 0.9, hp: 1, damage: 1, speed: 2.8, threatCost: 2, telegraph: 0.55, score: 150, energy: 10 },
+  lancer: { id: 'lancer', role: 'Lancer', radius: 0.85, hp: 2, damage: 2, speed: 1.6, threatCost: 3, telegraph: 0.7, score: 220, energy: 12 },
+  swarm: { id: 'swarm', role: 'Swarm', radius: 0.42, hp: 1, damage: 1, speed: 3.2, threatCost: 1, telegraph: 0.45, score: 80, energy: 6 },
+  mine: { id: 'mine', role: 'Mine', radius: 0.65, hp: 1, damage: 2, speed: 0, threatCost: 2, telegraph: 1.1, score: 125, energy: 9 },
+  bulwark: { id: 'bulwark', role: 'Bulwark', radius: 1.15, hp: 4, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 400, energy: 22 },
+  elite: { id: 'elite', role: 'Bulwark', radius: 1.15, hp: 4, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 350, energy: 20 },
+  boss: { id: 'boss', role: 'Boss', radius: 3.5, hp: 30, damage: 3, speed: 1.2, threatCost: 8, telegraph: 0.68, score: 2500, energy: 35 },
+});
+
+export const FORMATION_TEMPLATES = freeze({
+  pincer: { name: 'pincer', enemyCost: 6, minSafeGap: 2.4, cooldown: 5, palette: '#ff4fba', roles: ['hunter', 'striker', 'hunter'] },
+  crossfire: { name: 'crossfire', enemyCost: 7, minSafeGap: 2.6, cooldown: 6, palette: '#a56bff', roles: ['striker', 'lancer', 'striker'] },
+  'mine-wall': { name: 'mine-wall', enemyCost: 8, minSafeGap: 2.8, cooldown: 7, palette: '#ff9f43', roles: ['mine', 'mine', 'mine', 'mine'] },
+  spiral: { name: 'spiral', enemyCost: 9, minSafeGap: 2.5, cooldown: 6, palette: '#36e0ff', roles: ['swarm', 'hunter', 'swarm', 'hunter'] },
+  'elite-escort': { name: 'elite-escort', enemyCost: 10, minSafeGap: 3.2, cooldown: 9, palette: '#ff4fba', roles: ['elite', 'striker', 'striker'] },
 });
 
 export const UPGRADES = freeze([
