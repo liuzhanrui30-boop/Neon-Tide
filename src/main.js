@@ -92,6 +92,7 @@ const dom = {
   pauseButton: document.querySelector("#pause-button"),
   hud: document.querySelector("#hud"),
   missionPanel: document.querySelector("#mission-panel"),
+  missionObjective: document.querySelector("#mission-objective"),
   bossPanel: document.querySelector("#boss-panel"),
   bossFill: document.querySelector("#boss-fill"),
   flash: document.querySelector("#flash"),
@@ -1121,6 +1122,7 @@ function resetState() {
   state.stats.maxCombo = 0;
   state.stats.nearMisses = 0;
   state.stats.breaks = 0;
+  dom.missionObjective.textContent = `坚持 ${STAGES[3].start} 秒，定位深潮主脑`;
   state.cameraLookAhead.set(0, 0);
   input.dashBuffer = 0;
   player.position.set(0, -1.2);
@@ -1251,7 +1253,7 @@ function renderMode(mode, previousMode, payload = {}) {
     showOverlay(
       "ARCADE SURVIVAL // THREE.JS",
       "NEON<br /><em>TIDE</em>",
-      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${GAME.duration} 秒，等到潮汐退去。`,
+      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${STAGES[3].start} 秒定位深潮主脑，并在 18 秒内将其摧毁。`,
       "进入潮汐"
     );
   } else if (mode === "paused") {
@@ -1265,7 +1267,7 @@ function renderMode(mode, previousMode, payload = {}) {
     showOverlay(
       "SIGNAL LOST // HULL BREACH",
       "SIGNAL<br /><em>LOST</em>",
-      "追猎信号撕裂了你的护盾。再来一次，把潮汐变成你的舞台。",
+      "船体已经失效，未能完成终幕目标：定位并摧毁深潮主脑。",
       "重新接入",
       true
     );
@@ -1273,7 +1275,7 @@ function renderMode(mode, previousMode, payload = {}) {
     showOverlay(
       "SIGNAL CLEAR // TIDE OUT",
       "TIDE<br /><em>OUT</em>",
-      "你穿过了整片霓虹潮汐。光核已经记住了你的航线。",
+      "终幕目标完成：深潮主脑已被摧毁，霓虹潮汐正在退去。",
       "再次出航",
       true
     );
@@ -2145,6 +2147,7 @@ function beginBossStage() {
   state.bossDeadline = state.elapsed + 18;
   state.timeLeft = 18;
   state.enemySpawnTimer = Infinity;
+  dom.missionObjective.textContent = "在 18 秒内摧毁深潮主脑";
   toast("潮汐守卫已锁定", "danger");
   const entrancePosition = new THREE.Vector2(0, view.halfHeight - 0.6);
   triggerFeedback("large", {
