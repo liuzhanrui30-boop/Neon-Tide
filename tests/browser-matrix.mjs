@@ -829,6 +829,8 @@ async function replayCleanupScenario() {
 
 async function jumpToBoss(page) {
   page.requireDev('boss terminal probe');
+  // This only shortens the stage prelude. Boss attacks still progress through
+  // the normal state machine in each scenario below.
   const bossState = await page.gameEvaluate(`
     clearWorldEntities();
     $state.upgradeTriggered=[true,true];
@@ -924,22 +926,44 @@ async function bossPhaseTwoScenario() {
     const phase = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
       const advance=(dt)=>{
+        if($state.mode!=='playing') return;
         $state.elapsed+=dt;
+        $state.dashTimer=Math.max(0,$state.dashTimer-dt);
+        $state.dashInvulnTimer=Math.max(0,$state.dashInvulnTimer-dt);
+        $state.hurtInvuln=Math.max(0,$state.hurtInvuln-dt);
+        input.dashBuffer=Math.max(0,input.dashBuffer-dt);
+        $state.dashCharges=$state.dashCharges.map((charge)=>Math.min(1,charge+dt/DASH_RECOVERY_TIME));
         updateStage();
         $state.timeLeft=Math.max(0,($state.bossDeadline ?? GAME.bossStart)-$state.elapsed);
+        if($state.timeLeft<=0){finishRun('gameover','bossDeadline');return;}
+        updatePlayer(dt);
+        updateShards(dt);
         updateEnemies(dt);
       };
-      $player.position.set(-7,-5);
+      const safePoint=new THREE.Vector2(7,-5);
+      $player.position.copy(safePoint);
       const sawEnter=boss.state==='enter';
-      for(let tick=0;tick<22;tick+=1) advance(0.1);
+      for(let tick=0;tick<45;tick+=1) advance(0.05);
       const reachedFirstTelegraph=boss.state==='telegraph';
-      // Four genuine dash-damage resolutions cross the <50% threshold (30→10).
-      for(let hit=0;hit<4;hit+=1){$state.dashSequence+=1;damageEnemy(boss);}
-      for(let tick=0;tick<16 && boss.state!=='telegraph';tick+=1) advance(0.1);
+      // Four player dashes against the core cross the <50% threshold (30→10).
+      let dashHits=0;
+      for(let hit=0;hit<4 && $state.mode==='playing';hit+=1){
+        while(!$state.dashCharges.some((charge)=>charge>=0.999) && $state.mode==='playing') advance(0.05);
+        $player.position.copy(boss.group.position);
+        $player.velocity.set(0,0);
+        $player.facing.set(0,1);
+        requestDash();
+        advance(0.01);
+        if(boss.lastDashId===$state.dashSequence) dashHits+=1;
+        $player.position.copy(safePoint);
+        $player.velocity.set(0,0);
+        while($state.dashTimer>0 && $state.mode==='playing') advance(0.05);
+      }
+      for(let tick=0;tick<32 && boss.state!=='telegraph' && $state.mode==='playing';tick+=1) advance(0.05);
       return {
         phase:$state.stats.bossPhase,enemyPhase:boss.phase,sawEnter,reachedFirstTelegraph,
         phaseTwoTelegraph:boss.state==='telegraph' ? {kind:boss.attackKind,remaining:boss.telegraph} : null,
-        attacks:[...$state.stats.bossAttackLog],hp:boss.hp,
+        attacks:[...$state.stats.bossAttackLog],hp:boss.hp,dashHits,
       };
     `);
     assert.equal(phase.phase, 2, 'boss phase 2 did not latch below 50%');
@@ -949,6 +973,7 @@ async function bossPhaseTwoScenario() {
     assert.deepEqual(phase.phaseTwoTelegraph?.kind, 'sweepBeam', `phase 2 did not reach sweep telegraph: ${JSON.stringify(phase)}`);
     assert.ok(phase.phaseTwoTelegraph.remaining > 0 && phase.phaseTwoTelegraph.remaining <= 0.68);
     assert.equal(phase.hp, 10, 'phase transition did not use four dash damage steps');
+    assert.equal(phase.dashHits, 4, `dash core contacts: ${phase.dashHits}`);
     assert.ok(phase.attacks.some((attack) => attack.kind === 'phase2-enter'), `phase 2 log missing: ${JSON.stringify(phase.attacks)}`);
 
     const pausedBoss = await page.gameEvaluate(`
@@ -967,13 +992,23 @@ async function bossPhaseTwoScenario() {
     const attacks = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
       const advance=(dt)=>{
+        if($state.mode!=='playing') return;
         $state.elapsed+=dt;
+        $state.dashTimer=Math.max(0,$state.dashTimer-dt);
+        $state.dashInvulnTimer=Math.max(0,$state.dashInvulnTimer-dt);
+        $state.hurtInvuln=Math.max(0,$state.hurtInvuln-dt);
         updateStage();
         $state.timeLeft=Math.max(0,($state.bossDeadline ?? GAME.bossStart)-$state.elapsed);
+        if($state.timeLeft<=0){finishRun('gameover','bossDeadline');return;}
+        updatePlayer(dt);
+        updateShards(dt);
         updateEnemies(dt);
       };
       const seen=[]; let beamProbe=false; let triangleProbe=false; let flankPeak=0;
       for (let tick=0; tick<360 && $state.mode==='playing'; tick+=1) {
+        if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
+          seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
+        }
         if (boss.state==='execute' && boss.attackKind==='sweepBeam' && !beamProbe) {
           $player.position.copy(boss.group.position).addScaledVector(boss.beamDirection,2.9);
           $state.hurtInvuln=0;
@@ -997,9 +1032,6 @@ async function bossPhaseTwoScenario() {
         }
         advance(0.1);
         flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
-        if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
-          seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
-        }
       }
       return {seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
     `);

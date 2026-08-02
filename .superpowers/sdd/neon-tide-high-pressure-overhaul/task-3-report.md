@@ -18,6 +18,13 @@
 - Phase 2 仅通过四次 `damageEnemy` 的真实 dash damage resolution 从 30 降至 10 触发，不直接写入 Boss HP 或攻击 state；
 - 增加 Boss telegraph 暂停冻结、live beam/triangle health collision、低 FPS wall stall 跨 deadline 后 overlay/敌人/hazard 清理的断言。
 
+第三轮确定性与真实性修复：
+
+- phase2 browser loop 在推进前记录 telegraph，避免读取倒计时后的 0.58s 等短值；
+- `advance` 现在同步推进 dash/无敌/受伤计时、`updatePlayer`、`updateShards`、`updateEnemies` 与 deadline finish 检查；
+- 通过玩家把位置放到 Boss 核心、调用 `requestDash()` 并跑真实 update loop 累计四次 Dash 命中，触发 Phase 2，不再直接调用 `damageEnemy` 或覆盖攻击 state；
+- `jumpToBoss` 明确仅缩短阶段前置，Boss 状态机仍由真实计时推进。
+
 ## 测试变更
 
 - 更新 `jumpToBoss` 与胜利场景，使用 0/30/64/100 边界、Boss 窗口 26 秒、总时长 126 秒。
