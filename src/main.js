@@ -295,6 +295,8 @@ const shared = {
   strikerGeometry: null,
   mineGeometry: new THREE.CircleGeometry(0.48, 6),
   bossCoreGeometry: new THREE.CircleGeometry(0.82, 28),
+  bossCoreGlowGeometry: new THREE.CircleGeometry(1.14, 36),
+  bossOrbitNodeGeometry: new THREE.CircleGeometry(0.11, 12),
   mineRingGeometry: new THREE.RingGeometry(0.86, 0.94, 40),
   eliteOuterGeometry: new THREE.RingGeometry(0.76, 0.83, 32),
   eliteShieldGeometry: new THREE.RingGeometry(0.94, 1.0, 36),
@@ -313,6 +315,23 @@ const shared = {
   eliteMaterial: new THREE.MeshBasicMaterial({ color: 0xffedf4 }),
   bossMaterial: new THREE.MeshBasicMaterial({ color: 0xe7ffff }),
   coreMaterial: new THREE.MeshBasicMaterial({ color: 0xff506f }),
+  bossHaloMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff7ae6,
+    transparent: true,
+    opacity: 0.34,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  bossCoreGlowMaterial: new THREE.MeshBasicMaterial({
+    color: 0xff506f,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }),
+  bossOrbitCyanMaterial: new THREE.MeshBasicMaterial({ color: 0x64f5ff }),
+  bossOrbitDangerMaterial: new THREE.MeshBasicMaterial({ color: 0xff506f }),
   warningRingMaterial: new THREE.MeshBasicMaterial({
     color: 0xff7ae6,
     transparent: true,
@@ -956,20 +975,12 @@ function createBoss() {
   const outerRing = new THREE.Mesh(shared.bossOuterGeometry, shared.bossMaterial);
   const middleRing = new THREE.Mesh(shared.bossMiddleGeometry, shared.warningRingMaterial);
   const innerRing = new THREE.Mesh(shared.bossInnerGeometry, shared.dangerRingMaterial);
-  const haloRing = new THREE.Mesh(shared.bossHaloGeometry, shared.warningRingMaterial.clone());
-  haloRing.material.opacity = 0.34;
-  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial.clone());
+  shared.coreMaterial.color.copy(BOSS_CORE_IDLE_COLOR);
+  shared.bossCoreGlowMaterial.opacity = 0.18;
+  const haloRing = new THREE.Mesh(shared.bossHaloGeometry, shared.bossHaloMaterial);
+  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial);
   core.scale.set(1.15, 0.72, 1);
-  const coreGlow = new THREE.Mesh(
-    new THREE.CircleGeometry(1.14, 36),
-    new THREE.MeshBasicMaterial({
-      color: 0xff506f,
-      transparent: true,
-      opacity: 0.18,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-  );
+  const coreGlow = new THREE.Mesh(shared.bossCoreGlowGeometry, shared.bossCoreGlowMaterial);
   coreGlow.scale.set(1.22, 0.76, 1);
   const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
   line.visible = false;
@@ -978,8 +989,8 @@ function createBoss() {
   const orbitNodes = new THREE.Group();
   for (let i = 0; i < 4; i += 1) {
     const node = new THREE.Mesh(
-      new THREE.CircleGeometry(0.11, 12),
-      new THREE.MeshBasicMaterial({ color: i % 2 ? 0x64f5ff : 0xff506f })
+      shared.bossOrbitNodeGeometry,
+      i % 2 ? shared.bossOrbitCyanMaterial : shared.bossOrbitDangerMaterial
     );
     const angle = (i / 4) * TAU;
     node.position.set(Math.cos(angle) * 2.72, Math.sin(angle) * 2.72, 0.04);
@@ -2285,7 +2296,7 @@ function animate() {
     if (state.slowMotionTimer <= 0) state.slowMotionScale = 1;
   }
   if (state.mode === "playing") {
-    state.elapsed += dt;
+    state.elapsed += realDt;
     const runDeadline = state.bossDeadline ?? GAME.duration;
     state.timeLeft = Math.max(0, runDeadline - state.elapsed);
     state.dashTimer = Math.max(0, state.dashTimer - dt);
@@ -2300,6 +2311,7 @@ function animate() {
       clearCombo();
     }
     updateStage();
+    if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover");
     if (state.mode === "playing") {
       updatePlayer(dt);
       updateShards(dt);
@@ -2308,7 +2320,6 @@ function animate() {
       updateParticles(dt);
       updateRipples(dt);
       updateTrails(dt);
-      if (state.timeLeft <= 0) finishRun("gameover");
     }
   } else {
     updateParticles(realDt);
