@@ -23,10 +23,10 @@
 
 ## 验证
 
-- `npm test`：21/21 通过。
+- 最终分支 `npm test`：25/25 通过。
 - `node --check src/main.js`：通过。
 - `npm run build`：通过；仅保留既有 bundle size warning。
-- Browser matrix：Chrome 146，12/12 通过，覆盖 desktop/coarse/reduced-motion、画质切换、运行时异常恢复、Boss 二阶段与全终局清理。
+- Browser matrix：Chrome 146，13/13 通过，覆盖 desktop/coarse/reduced-motion、光束宽度、画质切换、运行时异常恢复、Boss 二阶段与全终局清理。
 
 ## 关注项
 

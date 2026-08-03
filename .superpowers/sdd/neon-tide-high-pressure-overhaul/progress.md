@@ -23,3 +23,5 @@ Task 5: fix round 1/5 (runtime orphan, particle transform, absolute pool cap and
 Task 5: fix round 2/5 (missing material retirement, quality lifecycle baseline and near-miss allocation addressed by f70f260)
 Task 5: complete (commits e7e7535,977e843,bb62113,29ed8d8,f70f260; scoped review clean; Chrome 146 browser matrix 12/12)
 Task 6: release verification in progress (version 2.1.0, release docs and browser matrix complete; packaging pending)
+Final branch review: request changes (5 Important, 3 Minor; no Critical).
+Final fix round 1/5: combat readability/spec/resource findings addressed by 25a36f9; unit 25/25 and Chrome 146 browser matrix 13/13; packaging/re-review pending.
