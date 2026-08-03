@@ -11,8 +11,10 @@ import {
   computeReward,
   computeSpawnBudget,
   capActiveCount,
+  beamHitsCircle,
   clampFinite,
   finiteOr,
+  getMineDetonationFrame,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
 import { FORMATION_TEMPLATES } from "./game/config.js";
@@ -401,6 +403,7 @@ const shared = {
   bossHaloGeometry: new THREE.RingGeometry(2.72, 2.77, 72),
   bossPulseGeometry: new THREE.RingGeometry(0.94, 1.02, 52),
   bossTriangleGeometry: null,
+  beamGeometry: new THREE.PlaneGeometry(1, 18).translate(0, 9, 0),
   telegraphLineGeometry: new THREE.BufferGeometry().setFromPoints([
     new THREE.Vector3(0, 0, 0),
     new THREE.Vector3(0, 18, 0),
@@ -1224,12 +1227,14 @@ function createLancer(position = randomEdgePosition(1.2)) {
   spear.position.y = -0.4;
   const reticle = new THREE.Mesh(shared.lancerReticleGeometry, shared.warningRingMaterial);
   reticle.position.z = 0.03;
-  const line = new THREE.Line(shared.telegraphLineGeometry, shared.lancerTelegraphMaterial);
+  const lineMaterial = shared.lancerTelegraphMaterial.clone();
+  const beamMaterial = shared.lancerBeamMaterial.clone();
+  const line = new THREE.Mesh(shared.beamGeometry, lineMaterial);
   line.visible = true;
-  line.scale.set(1, 0.9, 1);
-  const beam = new THREE.Line(shared.telegraphLineGeometry, shared.lancerBeamMaterial);
+  line.scale.set(0.06, 1, 1);
+  const beam = new THREE.Mesh(shared.beamGeometry, beamMaterial);
   beam.visible = false;
-  beam.scale.set(1, 0.92, 1);
+  beam.scale.set(0.2, 1, 1);
   group.add(line, beam, glow, reticle, spear, body);
   return registerEnemy("lancer", position, group, "lock", {
     speed: 0.35 + Math.random() * 0.2,
@@ -1237,6 +1242,7 @@ function createLancer(position = randomEdgePosition(1.2)) {
     beamDirection: new THREE.Vector2(),
     beamWidth: 0.2,
     visuals: { glow, body, spear, reticle, line, beam },
+    ownedMaterials: [lineMaterial, beamMaterial],
     priority: 2,
   });
 }
@@ -1272,8 +1278,10 @@ function createMine(position = randomShardPosition()) {
   const glow = new THREE.Mesh(shared.enemyGlowGeometry, shared.mineGlowMaterial);
   glow.scale.setScalar(1.65);
   const body = new THREE.Mesh(shared.mineGeometry, shared.mineMaterial);
-  const ring = new THREE.Mesh(shared.mineRingGeometry, shared.dangerRingMaterial);
-  const tick = new THREE.Mesh(shared.mineTickGeometry, shared.warningRingMaterial);
+  const ringMaterial = shared.dangerRingMaterial.clone();
+  const tickMaterial = shared.warningRingMaterial.clone();
+  const ring = new THREE.Mesh(shared.mineRingGeometry, ringMaterial);
+  const tick = new THREE.Mesh(shared.mineTickGeometry, tickMaterial);
   ring.position.z = -0.05;
   tick.position.z = -0.04;
   group.add(glow, tick, ring, body);
@@ -1282,29 +1290,34 @@ function createMine(position = randomShardPosition()) {
     telegraph: 1.1,
     dangerRadius: 0,
     previousDangerRadius: 0,
+    detonationStage: -1,
     pulseHit: false,
     visuals: { glow, body, ring, tick },
+    ownedMaterials: [ringMaterial, tickMaterial],
     priority: 2,
   });
 }
 
-function createElite(position = randomEdgePosition(1.1)) {
+function createElite(position = randomEdgePosition(1.1), type = "elite") {
   const group = new THREE.Group();
-  const shockwave = new THREE.Mesh(shared.eliteShockGeometry, shared.dangerRingMaterial);
+  const shockMaterial = shared.dangerRingMaterial.clone();
+  const shockwave = new THREE.Mesh(shared.eliteShockGeometry, shockMaterial);
   shockwave.visible = false;
   const outer = new THREE.Mesh(shared.eliteOuterGeometry, shared.bossMaterial);
   const shield = new THREE.Mesh(shared.eliteShieldGeometry, shared.warningRingMaterial);
   const body = new THREE.Mesh(shared.enemyGeometry, shared.eliteMaterial);
   body.scale.setScalar(1.75);
   group.add(shockwave, shield, outer, body);
-  return registerEnemy("elite", position, group, "chase", {
+  return registerEnemy(type, position, group, "chase", {
     speed: 1.4 + Math.random() * 0.4,
     stateTimer: 1.4 + Math.random() * 0.5,
     shockTimer: 2.6 + Math.random() * 1.2,
     shockRadius: 0,
     shockPreviousRadius: 0,
+    pulseHit: false,
     dashCharges: 3,
     visuals: { shockwave, shield, outer, body },
+    ownedMaterials: [shockMaterial],
     priority: 3,
   });
 }
@@ -1315,15 +1328,19 @@ function createBoss() {
   const outerRing = new THREE.Mesh(shared.bossOuterGeometry, shared.bossMaterial);
   const middleRing = new THREE.Mesh(shared.bossMiddleGeometry, shared.warningRingMaterial);
   const innerRing = new THREE.Mesh(shared.bossInnerGeometry, shared.dangerRingMaterial);
-  shared.coreMaterial.color.copy(BOSS_CORE_IDLE_COLOR);
-  shared.bossCoreGlowMaterial.opacity = 0.18;
+  const coreMaterial = shared.coreMaterial.clone();
+  coreMaterial.color.copy(BOSS_CORE_IDLE_COLOR);
+  const coreGlowMaterial = shared.bossCoreGlowMaterial.clone();
+  coreGlowMaterial.opacity = 0.18;
   const haloRing = new THREE.Mesh(shared.bossHaloGeometry, shared.bossHaloMaterial);
-  const core = new THREE.Mesh(shared.bossCoreGeometry, shared.coreMaterial);
+  const core = new THREE.Mesh(shared.bossCoreGeometry, coreMaterial);
   core.scale.set(1.15, 0.72, 1);
-  const coreGlow = new THREE.Mesh(shared.bossCoreGlowGeometry, shared.bossCoreGlowMaterial);
+  const coreGlow = new THREE.Mesh(shared.bossCoreGlowGeometry, coreGlowMaterial);
   coreGlow.scale.set(1.22, 0.76, 1);
-  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+  const lineMaterial = shared.telegraphMaterial.clone();
+  const line = new THREE.Mesh(shared.beamGeometry, lineMaterial);
   line.visible = false;
+  line.scale.set(0.08, 1, 1);
   const pulseMaterial = shared.dangerRingMaterial.clone();
   const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, pulseMaterial);
   pulseRing.visible = false;
@@ -1361,7 +1378,7 @@ function createBoss() {
     hitReactTimer: 0,
     priority: 4,
     visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing, trianglePulse },
-    ownedMaterials: [pulseMaterial, triangleMaterial],
+    ownedMaterials: [lineMaterial, pulseMaterial, triangleMaterial, coreMaterial, coreGlowMaterial],
   });
   if (enemy) {
     state.bossSpawned = true;
@@ -1388,7 +1405,7 @@ function spawnEnemy(type = null, position = null, overrides = {}) {
   if (chosenType === "lancer") return createLancer(spawnPosition, overrides);
   if (chosenType === "mine") return createMine(spawnPosition, overrides);
   if (chosenType === "swarm") return createSwarm(spawnPosition, overrides.wingSign);
-  if (chosenType === "elite" || chosenType === "bulwark") return createElite(spawnPosition, overrides);
+  if (chosenType === "elite" || chosenType === "bulwark") return createElite(spawnPosition, chosenType);
   if (chosenType === "boss") return createBoss();
   return createChaser(spawnPosition, overrides);
 }
@@ -1437,24 +1454,17 @@ function spawnFormation() {
   for (let i = 0; i < slots.length && remainingCapacity > 0; i += 1) {
     const slot = slots[i];
     const unitCost = ENEMY_TYPES[slot.role]?.threatCost ?? 1;
-    const expansion = slot.role === "swarm" ? 3 : 1;
-    const maxExpansion = Math.min(expansion, remainingCapacity, Math.floor(remainingBudget / unitCost));
-    if (maxExpansion <= 0) continue;
-    for (let swarmIndex = 0; swarmIndex < maxExpansion; swarmIndex += 1) {
-      const offset = slot.role === "swarm"
-        ? new THREE.Vector2((swarmIndex - 1) * 0.52, (swarmIndex % 2 ? 0.34 : -0.2))
-        : new THREE.Vector2();
-      const created = spawnEnemy(slot.role, new THREE.Vector2(slot.x, slot.y).add(offset), {
-        formation: template.name,
-        formationIndex: i,
-        wingSign: swarmIndex % 2 ? 1 : -1,
-      });
-      if (!created) break;
-      spawnedRoles.push(created.type);
-      remainingCapacity -= 1;
-      remainingBudget -= unitCost;
-      actualThreatCost += unitCost;
-    }
+    if (remainingBudget < unitCost) continue;
+    const created = spawnEnemy(slot.role, new THREE.Vector2(slot.x, slot.y), {
+      formation: template.name,
+      formationIndex: i,
+      wingSign: i % 2 ? 1 : -1,
+    });
+    if (!created) continue;
+    spawnedRoles.push(created.type);
+    remainingCapacity -= 1;
+    remainingBudget -= unitCost;
+    actualThreatCost += unitCost;
   }
   if (!spawnedRoles.length) return false;
   state.lastFormation = template.name;
@@ -2249,7 +2259,6 @@ function updateStriker(enemy, dt, toPlayer) {
       enemy.visuals.body.scale.setScalar(1);
       enemy.velocity.copy(enemy.dashDirection).multiplyScalar(18 + Math.min(2, state.elapsed * 0.01));
       setEnemyState(enemy, "dash", 0.44);
-      spawnTrail(true);
     }
   } else if (enemy.state === "dash") {
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "recover", 0.54);
@@ -2275,7 +2284,7 @@ function updateLancer(enemy, dt, toPlayer) {
     enemy.velocity.multiplyScalar(Math.exp(-12 * dt));
     enemy.telegraph = Math.max(0, enemy.stateTimer);
     const progress = 1 - enemy.telegraph / 0.7;
-    enemy.visuals.line.scale.set(0.35 + progress * 0.65, 0.72 + progress * 0.24, 1);
+    enemy.visuals.line.scale.set(0.06 + progress * 0.1, 1, 1);
     if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.7);
     else {
       enemy.visuals.line.material.color.set(0xff9f43);
@@ -2284,7 +2293,7 @@ function updateLancer(enemy, dt, toPlayer) {
     if (enemy.stateTimer <= 0) {
       enemy.visuals.line.visible = false;
       enemy.visuals.beam.visible = true;
-      enemy.visuals.beam.scale.set(0.2, 0.96, 1);
+      enemy.visuals.beam.scale.set(0.2, 1, 1);
       enemy.beamWidth = 0.2;
       setEnemyState(enemy, "active", 0.7);
     }
@@ -2292,7 +2301,7 @@ function updateLancer(enemy, dt, toPlayer) {
     enemy.visuals.beam.visible = true;
     const progress = 1 - Math.max(0, enemy.stateTimer / 0.7);
     enemy.beamWidth = 0.2 + progress * 0.5;
-    enemy.visuals.beam.scale.set(enemy.beamWidth, 0.96, 1);
+    enemy.visuals.beam.scale.set(enemy.beamWidth, 1, 1);
     enemy.visuals.beam.material.color.set(state.reducedMotion ? 0xff9f43 : 0xff506f);
     enemy.visuals.beam.material.opacity = state.reducedMotion ? 0.7 : 0.84 + progress * 0.12;
     state.stats.activeHazards += 1;
@@ -2342,19 +2351,24 @@ function updateMine(enemy, dt) {
     if (enemy.stateTimer <= 0) {
       enemy.previousDangerRadius = 0;
       enemy.dangerRadius = 0;
+      enemy.detonationStage = -1;
       setEnemyState(enemy, "detonate", 0.78);
     }
   } else if (enemy.state === "detonate") {
-    const progress = 1 - Math.max(0, enemy.stateTimer / 0.78);
+    const frame = getMineDetonationFrame(enemy.stateTimer, state.reducedMotion);
     enemy.previousDangerRadius = enemy.dangerRadius;
-    enemy.dangerRadius = THREE.MathUtils.lerp(0.55, 4.8, progress);
+    if (frame.stage !== enemy.detonationStage) {
+      enemy.detonationStage = frame.stage;
+      enemy.pulseHit = false;
+    }
+    enemy.dangerRadius = frame.radius;
     enemy.visuals.ring.scale.setScalar(enemy.dangerRadius / 0.9);
-    enemy.visuals.tick.scale.setScalar(1.2 + progress * 2.2);
-    enemy.visuals.ring.material.color.set(0xff506f);
-    enemy.visuals.ring.material.opacity = state.reducedMotion ? 0.66 : 0.65 + progress * 0.2;
-    enemy.visuals.tick.material.color.set(progress < 0.5 ? 0xff9f43 : 0xff506f);
-    enemy.visuals.tick.material.opacity = state.reducedMotion ? 0.62 : 0.4 + progress * 0.4;
-    const glowScale = state.reducedMotion ? 1.4 : 1.4 + progress * 1.2;
+    enemy.visuals.tick.scale.setScalar(1.4 + frame.stage * 0.85 + frame.stageProgress * 0.35);
+    enemy.visuals.ring.material.color.set([0xff9f43, 0xff6f61, 0xff506f][frame.stage]);
+    enemy.visuals.ring.material.opacity = state.reducedMotion ? 0.72 : 0.64 + frame.stageProgress * 0.2;
+    enemy.visuals.tick.material.color.set([0xffd166, 0xff9f43, 0xff506f][frame.stage]);
+    enemy.visuals.tick.material.opacity = state.reducedMotion ? 0.68 : 0.46 + frame.stageProgress * 0.32;
+    const glowScale = state.reducedMotion ? 1.55 + frame.stage * 0.38 : 1.45 + frame.stage * 0.42 + frame.stageProgress * 0.28;
     enemy.visuals.glow.scale.setScalar(glowScale);
     state.stats.activeHazards += 1;
     if (enemy.stateTimer <= 0) enemy.dead = true;
@@ -2374,6 +2388,7 @@ function updateElite(enemy, dt, toPlayer) {
     } else if (enemy.shockTimer <= 0) {
       enemy.shockPreviousRadius = 0;
       enemy.shockRadius = 0.3;
+      enemy.pulseHit = false;
       enemy.visuals.shockwave.visible = true;
       setEnemyState(enemy, "shockTelegraph", 0.64, 0.64);
       enemy.shockTimer = 3.9 + Math.random() * 0.35;
@@ -2421,7 +2436,7 @@ function clearBossAttackVisuals(enemy) {
   enemy.visuals.line.visible = false;
   enemy.visuals.pulseRing.visible = false;
   enemy.visuals.trianglePulse.visible = false;
-  enemy.visuals.line.scale.set(1, 1, 1);
+  enemy.visuals.line.scale.set(0.08, 1, 1);
   enemy.dangerRadius = 0;
   enemy.previousDangerRadius = 0;
   enemy.pulseHit = false;
@@ -2569,6 +2584,8 @@ function updateBoss(enemy, dt) {
         enemy.visuals.line.material.color.set(0xff7ae6);
         enemy.visuals.line.material.opacity = 0.72;
       }
+      const lineProgress = 1 - enemy.telegraph / BOSS_TELEGRAPH_TIME;
+      enemy.visuals.line.scale.set(enemy.attackKind === "sweepBeam" ? 0.08 + lineProgress * 0.12 : 0.08, 1, 1);
     } else {
       const warningScale = state.reducedMotion
         ? 1.85
@@ -2644,14 +2661,18 @@ function beamHitsPlayer(enemy) {
   const lancerBeam = enemy.type === "lancer" && enemy.state === "active";
   const bossBeam = enemy.type === "boss" && enemy.state === "execute" && enemy.attackKind === "sweepBeam";
   if (!lancerBeam && !bossBeam) return false;
-  const origin = enemy.group.position;
-  const direction = enemy.beamDirection;
-  const relativeX = player.position.x - origin.x;
-  const relativeY = player.position.y - origin.y;
-  const along = relativeX * direction.x + relativeY * direction.y;
-  if (along < 0 || along > 18) return false;
-  const distance = Math.abs(relativeX * direction.y - relativeY * direction.x);
-  return distance < player.radius + enemy.beamWidth * 0.42;
+  return beamHitsCircle({
+    originX: enemy.group.position.x,
+    originY: enemy.group.position.y,
+    directionX: enemy.beamDirection.x,
+    directionY: enemy.beamDirection.y,
+    width: enemy.beamWidth,
+    length: 18,
+  }, {
+    x: player.position.x,
+    y: player.position.y,
+    radius: player.radius,
+  });
 }
 
 function trianglePulseHitsPlayer(enemy) {
@@ -2970,6 +2991,33 @@ function updateRipples(dt) {
   }
 }
 
+function retireTrailAt(index, { discard = false } = {}) {
+  const trail = trails[index];
+  if (!trail) {
+    trails.splice(index, 1);
+    return;
+  }
+  if (trail.group?.isObject3D) {
+    trail.group.visible = false;
+    trail.group.position.set(0, 0, 2.65);
+    trail.group.rotation.set(0, 0, 0);
+    trail.group.scale.set(1, 1, 1);
+  }
+  trail.life = 0;
+  trail.maxLife = 0;
+  if (Array.isArray(trail.meshes)) {
+    trail.meshes.forEach((mesh) => {
+      if (mesh?.material?.isMaterial) mesh.material.opacity = 0;
+    });
+  }
+  trails.splice(index, 1);
+  if (!discard) return;
+  const poolIndex = trailPool.indexOf(trail);
+  if (poolIndex >= 0) trailPool.splice(poolIndex, 1);
+  if (trail.group?.isObject3D) world.remove(trail.group);
+  trail.meshes?.forEach((mesh) => mesh?.material?.dispose?.());
+}
+
 function sanitizeRuntimeState() {
   let corrected = false;
   const finite = (value, fallback) => {
@@ -3077,9 +3125,40 @@ function sanitizeRuntimeState() {
     if (particle?.mesh) particle.mesh.visible = false;
     corrected = true;
   }
+  for (let index = trails.length - 1; index >= 0; index -= 1) {
+    const trail = trails[index];
+    const group = trail?.group;
+    const meshes = trail?.meshes;
+    const structurallyValid = Boolean(trail && group?.isObject3D && Array.isArray(meshes) && meshes.length > 0
+      && meshes.every((mesh) => mesh?.isMesh && mesh.material?.isMaterial));
+    if (!structurallyValid) {
+      retireTrailAt(index, { discard: true });
+      corrected = true;
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
+    const transformValues = [
+      group.position.x, group.position.y, group.position.z,
+      group.rotation.x, group.rotation.y, group.rotation.z,
+      group.scale.x, group.scale.y, group.scale.z,
+    ];
+    const validRuntime = Number.isFinite(trail.life) && Number.isFinite(trail.maxLife)
+      && trail.maxLife > 0 && transformValues.every(Number.isFinite)
+      && meshes.every((mesh) => Number.isFinite(mesh.material.opacity));
+    if (!validRuntime) {
+      retireTrailAt(index);
+      corrected = true;
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
+    meshes.forEach((mesh) => {
+      const opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
+      if (opacity !== mesh.material.opacity) corrected = true;
+      mesh.material.opacity = opacity;
+    });
+  }
   while (trails.length > MAX_TRAIL_NODES) {
-    const trail = trails.pop();
-    if (trail?.group) trail.group.visible = false;
+    retireTrailAt(trails.length - 1);
     corrected = true;
   }
   state.stats.activeHazards = Math.max(0, finite(state.stats.activeHazards, 0));

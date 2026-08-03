@@ -51,15 +51,15 @@ export const ENEMY_TYPES = freeze({
   lancer: { id: 'lancer', role: 'Lancer', radius: 0.85, hp: 2, damage: 2, speed: 1.6, threatCost: 3, telegraph: 0.7, score: 220, energy: 12 },
   swarm: { id: 'swarm', role: 'Swarm', radius: 0.42, hp: 1, damage: 1, speed: 3.2, threatCost: 1, telegraph: 0.45, score: 80, energy: 6 },
   mine: { id: 'mine', role: 'Mine', radius: 0.65, hp: 1, damage: 2, speed: 0, threatCost: 2, telegraph: 1.1, score: 125, energy: 9 },
-  bulwark: { id: 'bulwark', role: 'Bulwark', radius: 1.15, hp: 4, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 400, energy: 22 },
-  elite: { id: 'elite', role: 'Bulwark', radius: 1.15, hp: 4, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 350, energy: 20 },
+  bulwark: { id: 'bulwark', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 400, energy: 22 },
+  elite: { id: 'elite', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 350, energy: 20 },
   boss: { id: 'boss', role: 'Boss', radius: 3.5, hp: 30, damage: 3, speed: 1.2, threatCost: 8, telegraph: 0.68, score: 2500, energy: 35 },
 });
 
 export const FORMATION_TEMPLATES = freeze({
-  pincer: { name: 'pincer', enemyCost: 6, minSafeGap: 2.4, cooldown: 5, palette: '#ff4fba', roles: ['hunter', 'striker', 'striker', 'hunter'] },
+  pincer: { name: 'pincer', enemyCost: 9, minSafeGap: 2.4, cooldown: 5, palette: '#ff4fba', roles: ['hunter', 'striker', 'lancer', 'striker', 'hunter'] },
   crossfire: { name: 'crossfire', enemyCost: 10, minSafeGap: 2.6, cooldown: 6, palette: '#a56bff', roles: ['striker', 'lancer', 'lancer', 'striker'] },
-  'mine-wall': { name: 'mine-wall', enemyCost: 10, minSafeGap: 2.8, cooldown: 7, palette: '#ff9f43', roles: ['mine', 'mine', 'mine', 'mine', 'mine'] },
+  'mine-wall': { name: 'mine-wall', enemyCost: 12, minSafeGap: 2.8, cooldown: 7, palette: '#ff9f43', roles: ['mine', 'mine', 'mine', 'mine', 'mine', 'swarm', 'swarm'] },
   spiral: { name: 'spiral', enemyCost: 5, minSafeGap: 2.5, cooldown: 6, palette: '#36e0ff', roles: ['swarm', 'hunter', 'swarm', 'hunter', 'swarm'] },
   'elite-escort': { name: 'elite-escort', enemyCost: 8, minSafeGap: 3.2, cooldown: 9, palette: '#ff4fba', roles: ['elite', 'striker', 'striker'] },
 });

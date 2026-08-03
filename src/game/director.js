@@ -43,7 +43,7 @@ export function getFormationBudget(stageIndex = 0, elapsed = 0, context = {}) {
   const available = Math.max(0, cap - activeCost);
   const index = clamp(Math.trunc(Number(stageIndex) || 0), 0, STAGES.length - 1);
   const progress = getStageProgress(elapsed);
-  const target = 6 + index * 2 + Math.floor(progress * 2);
+  const target = [9, 10, 12, 12][index] + Math.floor(progress * 2);
   return Math.min(available, target);
 }
 
@@ -84,9 +84,17 @@ export function getFormationSlots(name, viewport = {}) {
   const x = width * 0.34;
   const y = height * 0.34;
   const slots = {
-    pincer: [{ x: -x, y: y }, { x: -x, y: -y }, { x: x, y: y }, { x: x, y: -y }],
+    pincer: [{ x: -x, y: y }, { x: -x, y: -y }, { x: 0, y: y * 1.15 }, { x: x, y: -y }, { x: x, y: y }],
     crossfire: [{ x: -x, y: 0 }, { x: x, y: 0 }, { x: 0, y: y }, { x: 0, y: -y }],
-    'mine-wall': [{ x: -x, y: y }, { x: -x * 0.38, y: y }, { x: x * 0.38, y: y }, { x: x, y: y }, { x: 0, y: -y * 1.25 }],
+    'mine-wall': [
+      { x: -x, y: y },
+      { x: -x * 0.38, y: y },
+      { x: x * 0.38, y: y },
+      { x: x, y: y },
+      { x: 0, y: -y * 1.25 },
+      { x: -x, y: -y * 0.82 },
+      { x: x, y: -y * 0.82 },
+    ],
     spiral: [{ x: -x, y: y }, { x: x * 0.6, y: y * 0.7 }, { x: x * 0.65, y: -y * 0.2 }, { x: -x * 0.55, y: -y }, { x: x, y: -y }],
     'elite-escort': [{ x: 0, y: y * 1.3 }, { x: -x, y: -y }, { x: x, y: -y }],
   }[name] ?? [];

@@ -651,6 +651,67 @@ async function highPressureCombatScenario() {
   });
 }
 
+async function reviewedCombatContractsScenario() {
+  await withPage('reviewed-combat-contracts', {}, async (page) => {
+    page.requireDev('beam, material ownership, armor, mine pulse, and enemy trail contracts');
+    await page.startGame();
+    const contracts = await page.gameEvaluate(`
+      clearWorldEntities();
+      const mine=createMine(new THREE.Vector2(-2,0));
+      const lancer=createLancer(new THREE.Vector2(0,0));
+      const elite=createElite(new THREE.Vector2(2,0));
+      $state.bossSpawned=false;
+      const boss=createBoss();
+      const materials={
+        mine:mine.visuals.ring.material!==shared.dangerRingMaterial && mine.visuals.tick.material!==shared.warningRingMaterial,
+        lancer:lancer.visuals.line.material!==shared.lancerTelegraphMaterial && lancer.visuals.beam.material!==shared.lancerBeamMaterial,
+        elite:elite.visuals.shockwave.material!==shared.dangerRingMaterial,
+        boss:boss.visuals.line.material!==shared.telegraphMaterial && boss.visuals.core.material!==shared.coreMaterial && boss.visuals.coreGlow.material!==shared.bossCoreGlowMaterial,
+      };
+      lancer.state='active';
+      lancer.stateTimer=0.35;
+      lancer.beamDirection.set(1,0);
+      updateLancer(lancer,0);
+      boss.state='execute';
+      boss.attackKind='sweepBeam';
+      boss.stateTimer=0.58;
+      updateBoss(boss,0);
+      const beams={
+        lancer:{mesh:lancer.visuals.beam.isMesh,width:lancer.beamWidth,scale:lancer.visuals.beam.scale.x},
+        boss:{mesh:boss.visuals.line.isMesh,width:boss.beamWidth,scale:boss.visuals.line.scale.x},
+      };
+      elite.state='chase';
+      elite.stateTimer=1;
+      elite.shockTimer=-0.01;
+      elite.pulseHit=true;
+      updateElite(elite,0,new THREE.Vector2(1,0));
+      const eliteContract={hp:elite.hp,state:elite.state,pulseHit:elite.pulseHit};
+      const mineStages=[];
+      mine.state='detonate';
+      for(const remaining of [0.77,0.51,0.25]){
+        mine.stateTimer=remaining;
+        updateMine(mine,0);
+        mineStages.push({stage:mine.detonationStage,radius:mine.dangerRadius});
+      }
+      const trailCount=trails.length;
+      const striker=createStriker(new THREE.Vector2(0,-2));
+      striker.state='telegraph';
+      striker.stateTimer=0;
+      striker.dashDirection.set(1,0);
+      updateStriker(striker,0);
+      const strikerTrailDelta=trails.length-trailCount;
+      return {materials,beams,eliteContract,mineStages,strikerTrailDelta};
+    `);
+    assert.deepEqual(contracts.materials, { mine:true, lancer:true, elite:true, boss:true });
+    assert.deepEqual(contracts.beams.lancer, { mesh:true, width:contracts.beams.lancer.width, scale:contracts.beams.lancer.width });
+    assert.deepEqual(contracts.beams.boss, { mesh:true, width:contracts.beams.boss.width, scale:contracts.beams.boss.width });
+    assert.deepEqual(contracts.eliteContract, { hp:3, state:'shockTelegraph', pulseHit:false });
+    assert.deepEqual(contracts.mineStages.map(({ stage }) => stage), [0,1,2]);
+    assert.ok(contracts.mineStages[0].radius < contracts.mineStages[1].radius && contracts.mineStages[1].radius < contracts.mineStages[2].radius);
+    assert.equal(contracts.strikerTrailDelta, 0);
+  });
+}
+
 async function reducedMotionScenario() {
   await withPage('reduced-motion', { reducedMotion: true }, async (page) => {
     page.requireDev('reduced-motion warning probe');
@@ -777,6 +838,15 @@ async function runtimeGuardScenario() {
       missingMaterial.life=0.2;
       missingMaterial.maxLife=0.4;
       particles.push(missingMaterial);
+      const badTrail=trailPool[0];
+      badTrail.group.visible=true;
+      badTrail.life=NaN;
+      badTrail.maxLife=Infinity;
+      badTrail.group.position.x=Infinity;
+      badTrail.group.scale.y=NaN;
+      badTrail.group.rotation.z=Infinity;
+      badTrail.meshes[0].material.opacity=NaN;
+      trails.push(badTrail);
       return {before,pools,afterPools:{particles:particlePool.length,trails:trailPool.length},afterSetup:runtimeStats.inputSetupCount};
     `);
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
@@ -791,6 +861,13 @@ async function runtimeGuardScenario() {
       spawnSentinel:Number.isFinite($state.enemySpawnTimer)?'finite':String($state.enemySpawnTimer),
       particles:particles.length,
       trails:trails.length,
+      retiredTrail:trailPool[0] ? {
+        visible:trailPool[0].group.visible,
+        life:trailPool[0].life,
+        maxLife:trailPool[0].maxLife,
+        transform:[trailPool[0].group.position.x,trailPool[0].group.scale.y,trailPool[0].group.rotation.z],
+        opacity:trailPool[0].meshes[0].material.opacity,
+      } : null,
     }`);
     assert.ok(healed.guards > 0, `finite guard did not run: ${JSON.stringify(healed)}`);
     assert.ok(healed.orphans > 0 && healed.cleanup > 0, `orphan entity was not cleaned: ${JSON.stringify(healed)}`);
@@ -799,6 +876,7 @@ async function runtimeGuardScenario() {
     assert.equal(healed.spawnSentinel, 'Infinity');
     assert.ok(healed.particles <= 300 && healed.trails <= 48);
     assert.ok(healed.particles === 0, `malformed particle remained active: ${JSON.stringify(healed)}`);
+    assert.deepEqual(healed.retiredTrail, { visible:false, life:0, maxLife:0, transform:[0,1,0], opacity:0 });
     const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};runtimeHooks.applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
     assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
@@ -1191,6 +1269,7 @@ async function bossPhaseTwoScenario() {
 const scenarios = [
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],
+  ['reviewed combat contracts', reviewedCombatContractsScenario],
   ['phone coarse layout 390x844', () => coarseLayoutScenario('phone-390x844', 390, 844, 2)],
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
   ['reduced-motion warnings', reducedMotionScenario],

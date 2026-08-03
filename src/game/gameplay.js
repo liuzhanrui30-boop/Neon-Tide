@@ -23,6 +23,41 @@ export function capActiveCount(count, cap) {
   return Math.trunc(clampFinite(count, 0, Math.max(0, Math.trunc(finiteOr(cap, 0))), 0));
 }
 
+export function beamHitsCircle(beam = {}, circle = {}) {
+  const originX = finiteOr(beam.originX, 0);
+  const originY = finiteOr(beam.originY, 0);
+  const directionX = finiteOr(beam.directionX, 0);
+  const directionY = finiteOr(beam.directionY, 0);
+  const directionLength = Math.hypot(directionX, directionY);
+  if (directionLength <= 0) return false;
+  const normalizedX = directionX / directionLength;
+  const normalizedY = directionY / directionLength;
+  const relativeX = finiteOr(circle.x, 0) - originX;
+  const relativeY = finiteOr(circle.y, 0) - originY;
+  const along = relativeX * normalizedX + relativeY * normalizedY;
+  const length = Math.max(0, finiteOr(beam.length, 18));
+  if (along < 0 || along > length) return false;
+  const perpendicularDistance = Math.abs(relativeX * normalizedY - relativeY * normalizedX);
+  const halfWidth = Math.max(0, finiteOr(beam.width, 0)) * 0.5;
+  const radius = Math.max(0, finiteOr(circle.radius, 0));
+  return perpendicularDistance < halfWidth + radius;
+}
+
+export function getMineDetonationFrame(timeRemaining, reducedMotion = false) {
+  const duration = 0.78;
+  const progress = Math.min(1, Math.max(0, 1 - finiteOr(timeRemaining, duration) / duration));
+  const scaled = Math.min(2.999999, progress * 3);
+  const stage = Math.min(2, Math.floor(scaled));
+  const stageProgress = scaled - stage;
+  const radii = [1.7, 3.25, 4.8];
+  const fromRadius = stage === 0 ? 0.55 : radii[stage - 1];
+  const easedProgress = 1 - ((1 - stageProgress) ** 3);
+  const radius = reducedMotion
+    ? radii[stage]
+    : fromRadius + (radii[stage] - fromRadius) * easedProgress;
+  return Object.freeze({ stage, stageProgress, radius });
+}
+
 export function computeFrameDeltas(rawWallDt, slowMotionScale = 1) {
   const wallDt = Number.isFinite(rawWallDt) ? Math.max(0, rawWallDt) : 0;
   const simulationScale = Math.min(1, Math.max(0, Number(slowMotionScale) || 0));

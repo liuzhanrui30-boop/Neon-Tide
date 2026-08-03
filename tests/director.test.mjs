@@ -42,7 +42,7 @@ test('spawn intervals tighten by stage but never cross the floor', () => {
 });
 
 test('formation budget is constrained by active enemy cap', () => {
-  assert.equal(getFormationBudget(0, 0, { activeCost: 0, maxEnemyCap: 36 }), 6);
+  assert.equal(getFormationBudget(0, 0, { activeCost: 0, maxEnemyCap: 36 }), 9);
   assert.equal(getFormationBudget(2, 80, { activeCost: 30, maxEnemyCap: 36 }), 6);
   assert.equal(getFormationBudget(2, 80, { activeCost: 36, maxEnemyCap: 36 }), 0);
   assert.equal(getFormationBudget(2, 80, { activeCost: 0, maxEnemyCap: 0 }), 0);
@@ -85,6 +85,28 @@ test('formation slot role counts and actual threat cost match the declared templ
     assert.equal(actualCost, template.enemyCost);
     assert.ok(actualCost <= getFormationBudget(3, 110, { activeCost: 0, maxEnemyCap: 36 }));
   }
+});
+
+test('pincer adds a protected midline lancer while mine-wall adds two swarm flank slots', () => {
+  const pincer = getFormationSlots('pincer', { width: 12, height: 8 });
+  const mineWall = getFormationSlots('mine-wall', { width: 12, height: 8 });
+
+  assert.equal(pincer.length, 5);
+  assert.equal(pincer.filter(({ role }) => role === 'lancer').length, 1);
+  assert.equal(pincer.find(({ role }) => role === 'lancer').x, 0);
+  assert.equal(FORMATION_TEMPLATES.pincer.enemyCost, 9);
+
+  const swarmFlanks = mineWall.filter(({ role }) => role === 'swarm');
+  assert.equal(mineWall.length, 7);
+  assert.equal(swarmFlanks.length, 2);
+  assert.ok(swarmFlanks.some(({ x }) => x < 0));
+  assert.ok(swarmFlanks.some(({ x }) => x > 0));
+  assert.equal(FORMATION_TEMPLATES['mine-wall'].enemyCost, 12);
+});
+
+test('elite and bulwark armor require exactly three ordinary dash hits', () => {
+  assert.equal(ENEMY_TYPES.elite.hp, 3);
+  assert.equal(ENEMY_TYPES.bulwark.hp, 3);
 });
 
 test('formation slots are finite and preserve an opening around the play center', () => {

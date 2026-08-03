@@ -14,6 +14,7 @@ import {
   pickUpgradeOptions,
 } from '../src/game/gameplay.js';
 import { GAME, STAGES, UPGRADES } from '../src/game/config.js';
+import * as gameplay from '../src/game/gameplay.js';
 
 test('a long wall frame advances authoritative time while simulation remains capped', () => {
   const frame = computeFrameDeltas(2, 1);
@@ -88,4 +89,25 @@ test('rank thresholds produce S, A, B, and C', () => {
   assert.equal(computeRank({ score: 6_000 }), 'A');
   assert.equal(computeRank({ score: 3_500 }), 'B');
   assert.equal(computeRank({ score: 3_499 }), 'C');
+});
+
+test('beam collision uses the same full width rendered by the beam mesh', () => {
+  assert.equal(typeof gameplay.beamHitsCircle, 'function');
+  const beam = { originX: 0, originY: 0, directionX: 1, directionY: 0, width: 2, length: 18 };
+
+  assert.equal(gameplay.beamHitsCircle(beam, { x: 5, y: 1.39, radius: 0.4 }), true);
+  assert.equal(gameplay.beamHitsCircle(beam, { x: 5, y: 1.41, radius: 0.4 }), false);
+  assert.equal(gameplay.beamHitsCircle(beam, { x: -0.1, y: 0, radius: 0.4 }), false);
+  assert.equal(gameplay.beamHitsCircle(beam, { x: 18.1, y: 0, radius: 0.4 }), false);
+});
+
+test('mine detonation advances through three monotonic expansion stages with discrete reduced-motion radii', () => {
+  assert.equal(typeof gameplay.getMineDetonationFrame, 'function');
+  const animated = [0.77, 0.51, 0.25].map((timeRemaining) => gameplay.getMineDetonationFrame(timeRemaining, false));
+  const reduced = [0.77, 0.51, 0.25].map((timeRemaining) => gameplay.getMineDetonationFrame(timeRemaining, true));
+
+  assert.deepEqual(animated.map(({ stage }) => stage), [0, 1, 2]);
+  assert.ok(animated[0].radius < animated[1].radius && animated[1].radius < animated[2].radius);
+  assert.deepEqual(reduced.map(({ stage }) => stage), [0, 1, 2]);
+  assert.deepEqual(reduced.map(({ radius }) => radius), [1.7, 3.25, 4.8]);
 });
