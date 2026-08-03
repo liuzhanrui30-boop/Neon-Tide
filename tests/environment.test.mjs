@@ -26,3 +26,7 @@ test('disabled and non-finite environment intervals never produce NaN', () => {
     assert.equal(getEnvironmentDelay('void-cathedral', seed), Infinity);
   }
 });
+
+test('data-city exits its active environment phase at the exact decimal boundary', () => {
+  assert.equal(getEnvironmentFrame('data-city', 4.1).phase, 'cooldown');
+});

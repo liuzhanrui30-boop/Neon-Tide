@@ -4,6 +4,7 @@ const freeze = (value) => Object.freeze(value);
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const ACTIVE_DURATION = 3.2;
+const PHASE_EPSILON = 1e-9;
 
 export const ENVIRONMENT_RULES = freeze({
   activeDuration: ACTIVE_DURATION,
@@ -26,9 +27,9 @@ export const getEnvironmentFrame = (realmId, eventElapsed = 0) => {
   const { environment } = realm;
   if (environment.type === 'none') return freeze({ realmId: realm.id, type: 'none', phase: 'disabled', elapsed: 0, telegraph: 0, activeDuration: 0 });
   const elapsed = Math.max(0, finite(eventElapsed));
-  const phase = elapsed < environment.telegraph
+  const phase = elapsed < environment.telegraph - PHASE_EPSILON
     ? 'telegraph'
-    : elapsed < environment.telegraph + ACTIVE_DURATION ? 'active' : 'cooldown';
+    : elapsed < environment.telegraph + ACTIVE_DURATION - PHASE_EPSILON ? 'active' : 'cooldown';
   return freeze({
     realmId: realm.id,
     type: environment.type,
