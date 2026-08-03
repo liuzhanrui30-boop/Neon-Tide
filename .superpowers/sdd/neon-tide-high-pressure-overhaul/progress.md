@@ -25,3 +25,7 @@ Task 5: complete (commits e7e7535,977e843,bb62113,29ed8d8,f70f260; scoped review
 Task 6: release verification in progress (version 2.1.0, release docs and browser matrix complete; packaging pending)
 Final branch review: request changes (5 Important, 3 Minor; no Critical).
 Final fix round 1/5: combat readability/spec/resource findings addressed by 25a36f9; unit 25/25 and Chrome 146 browser matrix 13/13; packaging/re-review pending.
+Final re-review: request changes (stage eligibility regression; no Critical).
+Final fix round 2/5: formation `minStage` gates and Stage 1 role eligibility addressed by e9b2cec; unit 26/26 and Chrome 146 browser matrix 13/13.
+Task 6: complete (build pass; package Neon-Tide-v2.1.0.zip; SHA-256 35c60cc9111206792c579acff05bc9e86ab21297f047103fd8ac310c876ad196).
+Final branch review: PASS after fix round 2; no remaining Critical or Important findings.
