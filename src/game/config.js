@@ -21,7 +21,7 @@ export const COMBAT = freeze({
 });
 
 export const GAME = freeze({
-  version: '2.0.0',
+  version: '2.1.0',
   bossStart: STAGE_BOUNDARIES.at(-1),
   bossWindow: BOSS_WINDOW,
   duration: STAGE_BOUNDARIES.at(-1) + BOSS_WINDOW,

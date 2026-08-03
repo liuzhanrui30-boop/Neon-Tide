@@ -17,16 +17,18 @@
 1. 重复调用 `setupInput()` 不复制监听器；
 2. 注入 NaN/Infinity 后有限值恢复、孤儿敌人清理、spawn 的 Infinity sentinel 保留；
 3. 粒子/拖尾仍不超过 300/48；
-4. resize 不重复创建 Composer。
+4. 损坏材质、Transform、速度和生命期的粒子会安全退役；
+5. desktop → reduced-motion → desktop 正确 dispose/recreate，resize 不重复创建 Composer；
+6. 首次请求超量池时仍被截断至粒子 300、拖尾 48。
 
 ## 验证
 
 - `npm test`：21/21 通过。
 - `node --check src/main.js`：通过。
-- `npm run build`：通过；仅保留既有 bundle size warning（612.80 kB，gzip 160.31 kB）。
-- Browser matrix：本环境未启动 Chrome CDP（9333）与 Vite 4173，已记录为待运行项；scenario 已加入测试矩阵，建议在发布前执行 desktop/coarse/reduced-motion/low-FPS/full cleanup。
+- `npm run build`：通过；仅保留既有 bundle size warning。
+- Browser matrix：Chrome 146，12/12 通过，覆盖 desktop/coarse/reduced-motion、画质切换、运行时异常恢复、Boss 二阶段与全终局清理。
 
 ## 关注项
 
 - Composer 桌面路径仍是可选高质量分支；移动、窄屏、reduced-motion 不分配 post-processing render targets。
-- 现有包版本保持 `2.0.0`，本任务未改版本号。
+- 发布任务已将包版本提升为 `2.1.0`。

@@ -3453,6 +3453,19 @@ function animate() {
   postProcessing?.render();
 }
 
+if (import.meta.env.DEV) {
+  Object.defineProperty(globalThis, "__NEON_TIDE_RUNTIME_HOOKS__", {
+    configurable: true,
+    value: Object.freeze({
+      createParticlePool,
+      createTrailPool,
+      setupInput,
+      applyReducedMotionPreference,
+      resize,
+    }),
+  });
+}
+
 createBackground();
 createPlayer();
 createParticlePool();

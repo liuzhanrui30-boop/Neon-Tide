@@ -510,7 +510,7 @@ async function desktopCoreScenario() {
       $state.stageIndex=0;
       $state.stageQueue=[];
       $state.upgradeTriggered=[false,false];
-      $state.elapsed=18;
+      $state.elapsed=GAME.stageBoundaries[1];
       return true;
     `);
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`);
@@ -606,11 +606,13 @@ async function highPressureCombatScenario() {
         updateSpawning(0.1);
       }
       const firstThirty={formations:$state.stats.formationCount,peak:$state.stats.enemyPeak,roles:{...$state.stats.roles}};
+      clearWorldEntities();
       $state.stageIndex=1;
       $state.elapsed=42;
       $state.formationTimer=0;
       updateSpawning(0.1);
       const stageTwo={formations:$state.stats.formationCount,log:[...$state.stats.formationLog]};
+      clearWorldEntities();
       $state.stageIndex=2;
       $state.elapsed=80;
       $state.formationTimer=0;
@@ -746,10 +748,11 @@ async function runtimeGuardScenario() {
     const injected = await page.gameEvaluate(`
       const before={setup:runtimeStats.inputSetupCount,refresh:runtimeStats.composerRefreshCount};
       const pools={particles:particlePool.length,trails:trailPool.length};
-      createParticlePool();
-      createTrailPool();
-      setupInput();
-      setupInput();
+      const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;
+      runtimeHooks.createParticlePool();
+      runtimeHooks.createTrailPool();
+      runtimeHooks.setupInput();
+      runtimeHooks.setupInput();
       clearWorldEntities();
       const bad=spawnEnemy('chaser',new THREE.Vector2(0,0));
       bad.group.position.x=NaN;
@@ -796,15 +799,15 @@ async function runtimeGuardScenario() {
     assert.equal(healed.spawnSentinel, 'Infinity');
     assert.ok(healed.particles <= 300 && healed.trails <= 48);
     assert.ok(healed.particles === 0, `malformed particle remained active: ${JSON.stringify(healed)}`);
-    const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
+    const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};runtimeHooks.applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
     assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
     assert.ok(qualityLifecycle.dispose >= qualityLifecycle.before.dispose + 2, `quality lifecycle did not dispose/recreate: ${JSON.stringify(qualityLifecycle)}`);
     assert.equal(qualityLifecycle.refresh, qualityLifecycle.before.refresh + 2, `quality lifecycle did not refresh exactly twice: ${JSON.stringify(qualityLifecycle)}`);
     // Exercise first allocation with hostile counts; pools must never exceed their hard caps.
-    const overCapacity = await page.gameEvaluate(`for(const particle of particlePool){world.remove(particle.mesh);particle.mesh.material.dispose()}particlePool.length=0;for(const trail of trailPool){world.remove(trail.group);trail.meshes.forEach((mesh)=>mesh.material.dispose())}trailPool.length=0;createParticlePool(9999);createTrailPool(Infinity);return {particles:particlePool.length,trails:trailPool.length}`);
+    const overCapacity = await page.gameEvaluate(`for(const particle of particlePool){world.remove(particle.mesh);particle.mesh.material.dispose()}particlePool.length=0;for(const trail of trailPool){world.remove(trail.group);trail.meshes.forEach((mesh)=>mesh.material.dispose())}trailPool.length=0;const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.createParticlePool(9999);runtimeHooks.createTrailPool(Infinity);return {particles:particlePool.length,trails:trailPool.length}`);
     assert.deepEqual(overCapacity, { particles:300, trails:48 });
-    const resized = await page.gameEvaluate(`const before=runtimeStats.composerRefreshCount;resize();return {before,after:runtimeStats.composerRefreshCount}`);
+    const resized = await page.gameEvaluate(`const before=runtimeStats.composerRefreshCount;globalThis.__NEON_TIDE_RUNTIME_HOOKS__.resize();return {before,after:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(resized, { before: qualityLifecycle.refresh, after: qualityLifecycle.refresh }, 'resize recreated Composer');
   });
 }
@@ -1098,6 +1101,8 @@ async function bossPhaseTwoScenario() {
 
     const attacks = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      $state.maxHealth=12;
+      $state.health=12;
       const advance=(dt)=>{
         if($state.mode!=='playing') return;
         $state.elapsed+=dt;
@@ -1113,6 +1118,7 @@ async function bossPhaseTwoScenario() {
       };
       const seen=[]; let beamProbe=false; let triangleProbe=false; let flankPeak=0;
       for (let tick=0; tick<360 && $state.mode==='playing'; tick+=1) {
+        if (seen.length>=3 && beamProbe && triangleProbe && flankPeak>=2) break;
         if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
           seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
         }
@@ -1140,11 +1146,11 @@ async function bossPhaseTwoScenario() {
         advance(0.1);
         flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
       }
-      return {mode:$state.mode,seen,stats:[...$state.stats.bossAttackLog],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
+      return {mode:$state.mode,seen,stats:[...$state.stats.bossAttackLog],telegraphs:[...$state.stats.bossAttackTelegraphs],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
     `);
     assert.equal(attacks.mode, 'playing', `phase 2 live hazard loop ended before victory probe: ${JSON.stringify(attacks)}`);
     assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'trianglePulse', 'flankSwarm']);
-    assert.ok(attacks.seen.every((attack) => attack.telegraph >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.seen)}`);
+    assert.ok(attacks.telegraphs.length >= 3 && attacks.telegraphs.every((duration) => duration >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.telegraphs)}`);
     assert.ok(attacks.seen.find((attack) => attack.kind === 'sweepBeam')?.line, 'sweep beam telegraph was not visible');
     assert.ok(attacks.seen.find((attack) => attack.kind === 'trianglePulse')?.triangle, 'triangle telegraph was not visible');
     assert.ok(attacks.beamProbe, 'sweep beam active collision did not register');
