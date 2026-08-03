@@ -49,6 +49,12 @@ const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
 const MAX_FLOATING_TEXTS = 24;
+const enemyScratch = {
+  toPlayer: new THREE.Vector2(),
+  steering: new THREE.Vector2(),
+  perpendicular: new THREE.Vector2(),
+  target: new THREE.Vector2(),
+};
 
 function getEnemyCap() {
   return getActiveEnemyCap({
@@ -764,7 +770,8 @@ function syncPlayerTransform() {
 
 function createParticlePool(count = MAX_PARTICLES) {
   if (particlePool.length > 0) return particlePool.length;
-  for (let i = 0; i < count; i += 1) {
+  const requestedCount = count === Infinity ? MAX_PARTICLES : capActiveCount(count, MAX_PARTICLES);
+  for (let i = 0; i < requestedCount; i += 1) {
     const material = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
@@ -785,7 +792,8 @@ function createTrailPool(count = MAX_TRAIL_NODES) {
   if (trailPool.length > 0) return trailPool.length;
   const bodyGeometry = createTriangleGeometry(0.58, 0.34, -0.38);
   const wingGeometry = createWingGeometry();
-  for (let i = 0; i < count; i += 1) {
+  const requestedCount = count === Infinity ? MAX_TRAIL_NODES : capActiveCount(count, MAX_TRAIL_NODES);
+  for (let i = 0; i < requestedCount; i += 1) {
     const group = new THREE.Group();
     const makeMaterial = () => new THREE.MeshBasicMaterial({
       color: 0x64f5ff,
@@ -830,18 +838,22 @@ function spawnTrail(force = false) {
 }
 
 function spawnParticleBurst(position, color, count = 12, speed = 3.2, size = 1) {
-  if (!position || particles.length >= MAX_PARTICLES) return 0;
+  if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)
+    || !Number.isFinite(speed) || !Number.isFinite(size)) return 0;
+  if (particles.length >= MAX_PARTICLES) return 0;
   const requested = capActiveCount(count, MAX_PARTICLES - particles.length);
+  const safeSpeed = Math.max(0, speed);
+  const safeSize = Math.max(0.01, size);
   let spawned = 0;
   for (let i = 0; i < requested; i += 1) {
     const particle = particlePool.find((candidate) => !candidate.mesh.visible);
     if (!particle) break;
     const angle = Math.random() * TAU;
-    const force = speed * (0.38 + Math.random() * 0.8);
+    const force = safeSpeed * (0.38 + Math.random() * 0.8);
     particle.life = particle.maxLife = 0.28 + Math.random() * 0.42;
     particle.velocity.set(Math.cos(angle) * force, Math.sin(angle) * force);
     particle.mesh.position.set(position.x, position.y, 4.2);
-    particle.mesh.scale.setScalar(size * (0.65 + Math.random() * 0.95));
+    particle.mesh.scale.setScalar(safeSize * (0.65 + Math.random() * 0.95));
     particle.mesh.material.color.set(color);
     particle.mesh.material.opacity = 0.9;
     particle.mesh.visible = true;
@@ -1468,13 +1480,15 @@ function removeShard(index) {
 
 function removeEnemy(index) {
   const enemy = enemies[index];
-  world.remove(enemy.group);
-  enemy.ownedMaterials?.forEach((material) => material.dispose());
   enemies.splice(index, 1);
+  if (!enemy) return false;
+  if (enemy.group?.isObject3D) world.remove(enemy.group);
+  enemy.ownedMaterials?.forEach((material) => material?.dispose?.());
   state.stats.activeCleanupCount += 1;
   enemy.visuals?.chargeArc?.children.forEach((segment) => { segment.visible = false; });
   enemy.visuals?.chargeArc && (enemy.visuals.chargeArc.visible = false);
   if (enemy.type === "boss") syncBossProgress(null);
+  return true;
 }
 
 function clearWorldEntities() {
@@ -2153,18 +2167,17 @@ function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
 }
 
 function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wobbleStrength = 0.2) {
-  const steering = toPlayer.clone().multiplyScalar(speed);
+  const steering = enemyScratch.steering.copy(toPlayer).multiplyScalar(speed);
   if (wobbleStrength > 0) {
-    steering.add(new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(
-      Math.sin(state.elapsed * 2.2 + enemy.wobble) * wobbleStrength
-    ));
+    enemyScratch.perpendicular.set(-toPlayer.y, toPlayer.x)
+      .multiplyScalar(Math.sin(state.elapsed * 2.2 + enemy.wobble) * wobbleStrength);
+    steering.add(enemyScratch.perpendicular);
   }
   enemy.velocity.lerp(steering, 1 - Math.exp(-response * dt));
 }
 
 function updateChaser(enemy, dt, toPlayer) {
   enemy.stateTimer -= dt;
-  const flank = new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(enemy.intentIndex % 2 ? 1 : -1);
   if (enemy.state === "chase") {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.4, 0.16);
     if (enemy.stateTimer <= 0) {
@@ -2176,7 +2189,11 @@ function updateChaser(enemy, dt, toPlayer) {
       } else setEnemyState(enemy, "chase", 2.0 + Math.random() * 0.8);
     }
   } else if (enemy.state === "flank") {
-    steerEnemy(enemy, toPlayer.clone().add(flank.multiplyScalar(0.9)).normalize(), dt, enemy.speed * 1.05, 3.5, 0.05);
+    const flankTarget = enemyScratch.target.copy(toPlayer);
+    enemyScratch.perpendicular.set(-toPlayer.y, toPlayer.x)
+      .multiplyScalar((enemy.intentIndex % 2 ? 1 : -1) * 0.9);
+    flankTarget.add(enemyScratch.perpendicular).normalize();
+    steerEnemy(enemy, flankTarget, dt, enemy.speed * 1.05, 3.5, 0.05);
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 1.4 + Math.random() * 0.8);
   } else if (enemy.state === "chargeTelegraph") {
     enemy.velocity.multiplyScalar(Math.exp(-10 * dt));
@@ -2293,8 +2310,9 @@ function updateSwarm(enemy, dt, toPlayer) {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 4.2, 0.08);
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "split", 0.78);
   } else if (enemy.state === "split") {
-    const side = new THREE.Vector2(-toPlayer.y, toPlayer.x).multiplyScalar(enemy.wingSign);
-    const target = toPlayer.clone().add(side.multiplyScalar(0.85)).normalize();
+    const target = enemyScratch.target.copy(toPlayer);
+    enemyScratch.perpendicular.set(-toPlayer.y, toPlayer.x).multiplyScalar(enemy.wingSign * 0.85);
+    target.add(enemyScratch.perpendicular).normalize();
     steerEnemy(enemy, target, dt, enemy.speed * 1.08, 4.4, 0.04);
     enemy.group.rotation.z += enemy.wingSign * dt * 1.7;
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "pursuit", 1.6 + Math.random() * 1.2);
@@ -2348,7 +2366,7 @@ function updateElite(enemy, dt, toPlayer) {
   if (enemy.state === "chase") {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.8, 0.08);
     if (enemy.stateTimer <= 0 && enemy.dashCharges > 0) {
-      enemy.dashDirection = toPlayer.clone();
+      enemy.dashDirection.copy(toPlayer);
       enemy.velocity.copy(enemy.dashDirection).multiplyScalar(7.6);
       enemy.dashCharges -= 1;
       setEnemyState(enemy, "dash", 0.42);
@@ -2742,7 +2760,7 @@ function updateEnemies(dt) {
   for (let index = initialCount - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
     if (!enemy || enemy.dead) continue;
-    const toPlayer = player.position.clone().sub(enemy.group.position);
+    const toPlayer = enemyScratch.toPlayer.subVectors(player.position, enemy.group.position);
     const distance = Math.max(toPlayer.length(), 0.001);
     toPlayer.multiplyScalar(1 / distance);
     if (enemy.type === "striker") updateStriker(enemy, dt, toPlayer);
@@ -2986,7 +3004,12 @@ function sanitizeRuntimeState() {
 
   for (let index = enemies.length - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
-    if (!enemy || enemy.dead || !enemy.group) continue;
+    if (!enemy || enemy.dead || !enemy.group?.isObject3D || !enemy.velocity?.isVector2) {
+      removeEnemy(index);
+      runtimeStats.orphanGuards += 1;
+      corrected = true;
+      continue;
+    }
     const position = enemy.group.position;
     const velocity = enemy.velocity;
     const valid = Number.isFinite(position.x) && Number.isFinite(position.y)
@@ -3014,11 +3037,32 @@ function sanitizeRuntimeState() {
   }
   for (let index = particles.length - 1; index >= 0; index -= 1) {
     const particle = particles[index];
-    if (!particle || !particle.mesh || !Number.isFinite(particle.life) || !Number.isFinite(particle.maxLife)
-      || !Number.isFinite(particle.velocity.x) || !Number.isFinite(particle.velocity.y)) {
+    const mesh = particle?.mesh;
+    const velocity = particle?.velocity;
+    if (!particle || !mesh?.isObject3D || !velocity?.isVector2 || !Number.isFinite(particle.life)
+      || !Number.isFinite(particle.maxLife) || !Number.isFinite(velocity.x) || !Number.isFinite(velocity.y)) {
       if (particle?.mesh) particle.mesh.visible = false;
       particles.splice(index, 1);
       corrected = true;
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
+    const invalidTransform = !Number.isFinite(mesh.position.x) || !Number.isFinite(mesh.position.y)
+      || !Number.isFinite(mesh.position.z) || !Number.isFinite(mesh.scale.x)
+      || !Number.isFinite(mesh.scale.y) || !Number.isFinite(mesh.scale.z);
+    const invalidOpacity = !Number.isFinite(mesh.material?.opacity);
+    if (invalidTransform) {
+      mesh.position.set(0, 0, 4.2);
+      mesh.scale.setScalar(1);
+      corrected = true;
+    }
+    if (invalidOpacity) {
+      if (mesh.material) mesh.material.opacity = 0;
+      corrected = true;
+    } else if (mesh.material) {
+      const opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
+      if (opacity !== mesh.material.opacity) corrected = true;
+      mesh.material.opacity = opacity;
     }
   }
   while (particles.length > MAX_PARTICLES) {

@@ -754,8 +754,20 @@ async function runtimeGuardScenario() {
       const bad=spawnEnemy('chaser',new THREE.Vector2(0,0));
       bad.group.position.x=NaN;
       bad.velocity.y=Infinity;
+      const missingVelocity=spawnEnemy('chaser',new THREE.Vector2(0,0));
+      delete missingVelocity.velocity;
+      $enemies.push({type:'orphan',dead:false,velocity:null});
       $player.position.x=NaN;
       $state.enemySpawnTimer=Infinity;
+      const badParticle=particlePool[0];
+      badParticle.mesh.visible=true;
+      badParticle.mesh.position.x=NaN;
+      badParticle.mesh.scale.y=Infinity;
+      badParticle.mesh.material.opacity=Infinity;
+      badParticle.life=0.2;
+      badParticle.maxLife=0.4;
+      badParticle.velocity.x=NaN;
+      particles.push(badParticle);
       return {before,pools,afterPools:{particles:particlePool.length,trails:trailPool.length},afterSetup:runtimeStats.inputSetupCount};
     `);
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
@@ -777,6 +789,14 @@ async function runtimeGuardScenario() {
     assert.equal(healed.playerFinite, true);
     assert.equal(healed.spawnSentinel, 'Infinity');
     assert.ok(healed.particles <= 300 && healed.trails <= 48);
+    assert.ok(healed.particles === 0, `malformed particle remained active: ${JSON.stringify(healed)}`);
+    const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
+    assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
+    assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
+    assert.ok(qualityLifecycle.dispose >= qualityLifecycle.before.dispose + 2, `quality lifecycle did not dispose/recreate: ${JSON.stringify(qualityLifecycle)}`);
+    // Exercise first allocation with hostile counts; pools must never exceed their hard caps.
+    const overCapacity = await page.gameEvaluate(`for(const particle of particlePool){world.remove(particle.mesh);particle.mesh.material.dispose()}particlePool.length=0;for(const trail of trailPool){world.remove(trail.group);trail.meshes.forEach((mesh)=>mesh.material.dispose())}trailPool.length=0;createParticlePool(9999);createTrailPool(Infinity);return {particles:particlePool.length,trails:trailPool.length}`);
+    assert.deepEqual(overCapacity, { particles:300, trails:48 });
     const resized = await page.gameEvaluate(`const before=runtimeStats.composerRefreshCount;resize();return {before,after:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(resized, { before: injected.before.refresh, after: injected.before.refresh }, 'resize recreated Composer');
   });

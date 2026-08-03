@@ -5,6 +5,7 @@
 - **有限值防护**：渲染帧入口与出口校正 NaN/Infinity 的计时器、玩家向量、敌人位置/速度/生命值；孤儿实体会被标记并清理，不把坏值继续传播到 Three.js transform。
 - **容量兜底**：敌人继续由桌面 36 / 粗指针 28 cap 保护；粒子 300、拖尾 48 采用池并在 burst/guard 双重限额；涟漪与浮字增加轻量上限，避免异常反馈造成 DOM/材质堆积。
 - **生命周期**：`setupInput()` 具备幂等保护，监听器可集中解绑；Composer 在质量切换时先 dispose，再创建一次新的实例，resize 只调整既有实例；重开仍沿用同一批 geometry/material/pool。
+- `createParticlePool()` / `createTrailPool()` 也具备幂等保护，重复调用不会新增 geometry/material 或突破 300/48 池容量。
 - **无障碍与跨平台**：键盘、触屏摇杆、冲刺、暂停/恢复、canvas 聚焦、ARIA live/进度语义与 reduced-motion 行为保持；低帧率使用 wall-clock 推进、simulation delta 仍有上限。
 
 ## 新增回归覆盖

@@ -33,6 +33,8 @@ test('runtime sanitizers reject NaN and Infinity before they reach gameplay stat
   assert.equal(clampFinite(-10, 0, 5), 0);
   assert.equal(clampFinite(10, 0, 5), 5);
   assert.equal(capActiveCount(99.9, 36), 36);
+  assert.equal(capActiveCount(Number.POSITIVE_INFINITY, 36), 0);
+  assert.equal(capActiveCount(-Infinity, 36), 0);
   assert.equal(capActiveCount(Number.NaN, 36), 0);
 });
 
