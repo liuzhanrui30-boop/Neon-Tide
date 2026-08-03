@@ -25,9 +25,9 @@ test('director stage boundaries and total timing are stable', () => {
 });
 
 test('enemy caps honor desktop and coarse-pointer budgets', () => {
-  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 36);
-  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 28);
-  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 640 }), 28);
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 42);
+  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 32);
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 640 }), 32);
   assert.equal(GAME.maxParticles, 300);
   assert.equal(GAME.maxTrailNodes, 48);
 });
@@ -36,7 +36,7 @@ test('spawn intervals tighten by stage but never cross the floor', () => {
   const first = getSpawnInterval(0, 0);
   const second = getSpawnInterval(1, 30);
   const third = getSpawnInterval(2, 64);
-  assert.deepEqual([first, second, third], [0.72, 0.55, 0.42]);
+  assert.deepEqual([first, second, third], [0.62, 0.46, 0.34]);
   assert.ok(getSpawnInterval(2, 10_000) >= GAME.spawnIntervalFloor);
   assert.equal(getSpawnInterval(2, 10_000), GAME.spawnIntervalFloor);
 });
@@ -152,4 +152,12 @@ test('formations refuse an unsafe compact viewport rather than closing the safe 
   for (const name of Object.keys(FORMATION_TEMPLATES)) {
     assert.deepEqual(getFormationSlots(name, { width: 4, height: 4 }), []);
   }
+});
+
+
+test('2.2 pressure caps and spawn cadence are locked', () => {
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 42);
+  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 32);
+  assert.deepEqual([getSpawnInterval(0, 0), getSpawnInterval(1, 30), getSpawnInterval(2, 64)], [0.62, 0.46, 0.34]);
+  assert.equal(getSpawnInterval(2, 10_000), 0.26);
 });

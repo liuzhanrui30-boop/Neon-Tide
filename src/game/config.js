@@ -10,13 +10,13 @@ const STAGE_BOUNDARIES = [0, 30, 64, 100];
 const BOSS_WINDOW = 26;
 
 export const COMBAT = freeze({
-  desktopEnemyCap: 36,
-  coarsePointerEnemyCap: 28,
+  desktopEnemyCap: 42,
+  coarsePointerEnemyCap: 32,
   particleCap: 300,
   trailNodeCap: 48,
-  spawnIntervals: [0.72, 0.55, 0.42],
-  spawnIntervalFloor: 0.3,
-  formationCooldown: { min: 5, max: 9 },
+  spawnIntervals: [0.62, 0.46, 0.34],
+  spawnIntervalFloor: 0.26,
+  formationCooldown: { min: 4, max: 7 },
   formationTelegraph: { min: 0.45, max: 0.85 },
 });
 
