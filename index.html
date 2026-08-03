@@ -66,9 +66,9 @@
       <aside id="mission-panel">
         <span>当前任务</span>
         <strong id="mission-objective">坚持 100 秒，突破高压潮汐</strong>
-        <div class="energy-track"><i id="energy-fill"></i></div>
-        <small><b id="energy-value">0</b>% 护盾充能</small>
-        <span id="overdrive-label">OVERDRIVE // 待机</span>
+        <div class="energy-track"><i id="weapon-energy-fill"></i></div>
+        <small><b id="weapon-energy-value">0</b>% 光矛充能</small>
+        <span id="laser-status">光矛 // 未充能</span>
       </aside>
 
       <aside id="boss-panel" hidden aria-label="首领稳定度">
@@ -96,8 +96,15 @@
           <p class="kicker" id="overlay-kicker">ARCADE SURVIVAL // THREE.JS</p>
           <h1 id="overlay-title">NEON<br /><em>TIDE</em></h1>
           <p id="overlay-copy">
-            在失控的数字海域中突破编队、光束与雷墙。<br />坚持 100 秒定位深潮主脑，并在 26 秒内将其摧毁。
+            在失控的数字海域中突破编队、光束与雷墙。<br />收集光核为潮汐光矛充能，坚持 100 秒定位深潮主脑，并在 26 秒内将其摧毁。
           </p>
+          <ol id="journey-strip" class="journey-strip" aria-label="潮汐旅程"></ol>
+          <div id="briefing-grid" class="briefing-grid">
+            <article class="mechanic-card"><span>01</span><h2>Move</h2><p><kbd>WASD</kbd> / 方向键穿行潮流。</p></article>
+            <article class="mechanic-card"><span>02</span><h2>Phase Dash</h2><p><kbd>空格</kbd> 冲刺进入短暂相位状态。</p></article>
+            <article class="mechanic-card"><span>03</span><h2>Light Lance</h2><p><kbd>E</kbd> 满能后释放潮汐光矛。</p></article>
+            <article class="mechanic-card"><span>04</span><h2>Hull</h2><p>船体格即生命，归零即失联。</p></article>
+          </div>
           <div id="result-grid" class="result-grid" hidden>
             <div class="rank-result"><span>本局评级</span><b id="result-rank">C</b></div>
             <div><span>本局碎片</span><b id="result-score">0</b></div>
@@ -147,6 +154,9 @@
 
       <section id="touch-controls" aria-label="触屏控制">
         <div id="joystick" class="joystick"><i id="joystick-knob"></i></div>
+        <button id="laser-button" class="laser-button" type="button" aria-label="潮汐光矛未充能" aria-disabled="true">
+          <span>光矛</span><b>E</b>
+        </button>
         <button id="dash-button" type="button"><span>冲刺</span><i id="dash-ring" aria-hidden="true"></i></button>
       </section>
     </main>

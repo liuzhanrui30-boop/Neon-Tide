@@ -535,22 +535,62 @@ async function desktopCoreScenario() {
   });
 }
 
+async function briefingAndLaserUiScenario() {
+  await withPage('briefing-and-laser-ui', {}, async (page) => {
+    const briefing = await page.evaluate(`({
+      cards:document.querySelectorAll('#briefing-grid .mechanic-card').length,
+      journey:document.querySelectorAll('#journey-strip li').length,
+      copy:document.querySelector('#overlay-copy').textContent,
+      energyLabel:document.querySelector('#mission-panel small').textContent,
+      laserButton:Boolean(document.querySelector('#laser-button')),
+      hullLabel:document.querySelector('.health-card > span').textContent,
+    })`);
+    assert.equal(briefing.cards, 4);
+    assert.equal(briefing.journey, 4);
+    assert.match(briefing.copy, /潮汐光矛/);
+    assert.doesNotMatch(briefing.energyLabel, /护盾|OVERDRIVE/);
+    assert.equal(briefing.laserButton, true);
+    assert.equal(briefing.hullLabel, '船体');
+  });
+
+  await withPage('briefing-and-laser-phone', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+  }, async (page) => {
+    const layout = await page.evaluate(`(()=>{
+      const rect=(selector)=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}};
+      const overlap=(a,b)=>Math.max(0,Math.min(a.right,b.right)-Math.max(a.left,b.left))*Math.max(0,Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));
+      const briefing=rect('#briefing-grid'),joystick=rect('#joystick'),dash=rect('#dash-button'),laser=rect('#laser-button');
+      return {briefing,joystick,dash,laser,overlaps:[overlap(briefing,joystick),overlap(briefing,dash),overlap(briefing,laser),overlap(joystick,dash),overlap(joystick,laser),overlap(dash,laser)]};
+    })()`);
+    for (const [name, rect] of Object.entries({ briefing: layout.briefing, joystick: layout.joystick, dash: layout.dash, laser: layout.laser })) {
+      assert.ok(rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= 390.5 && rect.bottom <= 844.5,
+        `${name} outside viewport ${JSON.stringify(rect)}`);
+    }
+    assert.deepEqual(layout.overlaps, [0, 0, 0, 0, 0, 0], `phone controls overlap ${JSON.stringify(layout)}`);
+  });
+}
+
 function layoutSnapshotExpression() {
   return `(()=>{
     const rect=(selector)=>{const e=document.querySelector(selector),r=e.getBoundingClientRect(),s=getComputedStyle(e);return {x:r.x,y:r.y,left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height,display:s.display,visibility:s.visibility}};
     const overlap=(a,b)=>Math.max(0,Math.min(a.right,b.right)-Math.max(a.left,b.left))*Math.max(0,Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));
-    const mission=rect('#mission-panel'),joystick=rect('#joystick'),dash=rect('#dash-button'),hud=rect('#hud'),touch=rect('#touch-controls');
+    const mission=rect('#mission-panel'),joystick=rect('#joystick'),dash=rect('#dash-button'),laser=rect('#laser-button'),hud=rect('#hud'),touch=rect('#touch-controls');
     return {
       coarse:matchMedia('(pointer: coarse)').matches,
       touchPoints:navigator.maxTouchPoints,
       size:[innerWidth,innerHeight],
       overflow:[document.documentElement.scrollWidth-innerWidth,document.documentElement.scrollHeight-innerHeight],
-      mission,joystick,dash,hud,touch,
+      mission,joystick,dash,laser,hud,touch,
       missionJoystickOverlap:overlap(mission,joystick),
       missionDashOverlap:overlap(mission,dash),
+      missionLaserOverlap:overlap(mission,laser),
       objective:document.querySelector('#mission-objective').textContent.trim(),
       energyVisible:getComputedStyle(document.querySelector('.energy-track')).display!=='none',
-      overdriveVisible:getComputedStyle(document.querySelector('#overdrive-label')).display!=='none',
+      laserStatusVisible:getComputedStyle(document.querySelector('#laser-status')).display!=='none',
     };
   })()`;
 }
@@ -565,10 +605,11 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
     assert.ok(layout.overflow[0] <= 0 && layout.overflow[1] <= 0, `${name}: document overflow ${layout.overflow}`);
     assert.notEqual(layout.mission.display, 'none', `${name}: mission panel hidden`);
     assert.notEqual(layout.touch.display, 'none', `${name}: touch controls hidden`);
-    assert.ok(layout.objective.length > 0 && layout.energyVisible && layout.overdriveVisible, `${name}: compact mission status incomplete`);
+    assert.ok(layout.objective.length > 0 && layout.energyVisible && layout.laserStatusVisible, `${name}: compact mission status incomplete`);
     assert.equal(layout.missionJoystickOverlap, 0, `${name}: mission overlaps joystick by ${layout.missionJoystickOverlap}px²`);
     assert.equal(layout.missionDashOverlap, 0, `${name}: mission overlaps dash by ${layout.missionDashOverlap}px²`);
-    for (const [elementName, rect] of [['mission', layout.mission], ['joystick', layout.joystick], ['dash', layout.dash]]) {
+    assert.equal(layout.missionLaserOverlap, 0, `${name}: mission overlaps laser by ${layout.missionLaserOverlap}px²`);
+    for (const [elementName, rect] of [['mission', layout.mission], ['joystick', layout.joystick], ['dash', layout.dash], ['laser', layout.laser]]) {
       assert.ok(rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= width + 0.5 && rect.bottom <= height + 0.5,
         `${name}: ${elementName} outside viewport ${JSON.stringify(rect)}`);
     }
@@ -1270,6 +1311,7 @@ async function bossPhaseTwoScenario() {
 }
 
 const scenarios = [
+  ['briefing and laser UI', briefingAndLaserUiScenario],
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],
   ['reviewed combat contracts', reviewedCombatContractsScenario],

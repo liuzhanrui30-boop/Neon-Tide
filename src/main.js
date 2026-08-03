@@ -18,6 +18,8 @@ import {
   pickUpgradeOptions,
 } from "./game/gameplay.js";
 import { FORMATION_TEMPLATES } from "./game/config.js";
+import { LASER_RULES } from "./game/skill.js";
+import { REALMS } from "./game/realms.js";
 import {
   chooseFormation,
   getActiveEnemyCap,
@@ -47,6 +49,7 @@ const MAX_MINES = 8;
 const BOSS_DASH_DAMAGE = 5;
 const BOSS_TELEGRAPH_TIME = 0.68;
 const TRAUMA_DECAY = 1.35;
+const PLAYER_VISUAL_SCALE = 0.88;
 const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
@@ -113,9 +116,9 @@ const dom = {
   timeLabel: document.querySelector(".time-card > span"),
   time: document.querySelector("#time-value"),
   health: document.querySelector("#health-pips"),
-  energy: document.querySelector("#energy-value"),
-  energyFill: document.querySelector("#energy-fill"),
-  overdriveLabel: document.querySelector("#overdrive-label"),
+  weaponEnergy: document.querySelector("#weapon-energy-value"),
+  weaponEnergyFill: document.querySelector("#weapon-energy-fill"),
+  laserStatus: document.querySelector("#laser-status"),
   stageName: document.querySelector("#stage-name"),
   stageProgress: document.querySelector("#stage-progress"),
   stageTrack: document.querySelector(".stage-track"),
@@ -145,6 +148,8 @@ const dom = {
   joystickKnob: document.querySelector("#joystick-knob"),
   dashButton: document.querySelector("#dash-button"),
   dashRing: document.querySelector("#dash-ring"),
+  laserButton: document.querySelector("#laser-button"),
+  journeyStrip: document.querySelector("#journey-strip"),
 };
 
 dom.floatingLayer = document.createElement("div");
@@ -272,6 +277,7 @@ const state = {
 const input = {
   keys: new Set(),
   dashBuffer: 0,
+  laserBuffer: 0,
   touch: new THREE.Vector2(),
   joystickPointerId: null,
 };
@@ -349,7 +355,7 @@ const player = {
   position: new THREE.Vector2(0, -1.2),
   velocity: new THREE.Vector2(),
   facing: new THREE.Vector2(0, 1),
-  radius: 0.42,
+  radius: 0.37,
 };
 
 const shared = {
@@ -1613,21 +1619,26 @@ function resetState() {
   dom.timeLabel.textContent = "首领接入";
   dom.time.textContent = `00:${String(GAME.bossStart).padStart(2, "0")}`;
   dom.time.classList.remove("warning");
-  dom.energy.textContent = "0";
-  dom.energyFill.style.width = "0%";
-  dom.overdriveLabel.classList.remove("active");
-  dom.overdriveLabel.textContent = "OVERDRIVE // 待机";
+  dom.weaponEnergy.textContent = "0";
+  dom.weaponEnergyFill.style.width = "0%";
+  dom.laserStatus.classList.remove("ready", "charging");
+  dom.laserStatus.textContent = "光矛 // 未充能";
+  dom.laserButton.classList.remove("ready", "charging");
+  dom.laserButton.setAttribute("aria-disabled", "true");
+  dom.laserButton.setAttribute("aria-label", "潮汐光矛未充能");
+  dom.laserButton.style.setProperty("--laser-progress", "0deg");
   dom.stageProgress.style.width = "0%";
   dom.stageName.textContent = STAGE_LABELS[0];
   dom.stageTrack.setAttribute("aria-valuenow", "0");
   state.cameraLookAhead.set(0, 0);
   input.dashBuffer = 0;
+  input.laserBuffer = 0;
   input.keys.clear();
   resetJoystick();
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
   player.facing.set(0, 1);
-  player.group.scale.set(1, 1, 1);
+  player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
   player.group.rotation.z = 0;
   player.group.rotation.y = 0;
   player.flame.scale.setScalar(1);
@@ -1766,6 +1777,7 @@ function setBackgroundInert(inert) {
   dom.pauseButton.disabled = inert;
   dom.muteButton.disabled = inert;
   dom.dashButton.disabled = inert;
+  dom.laserButton.disabled = inert;
 }
 
 function transitionTo(nextMode, payload = {}) {
@@ -1777,6 +1789,7 @@ function transitionTo(nextMode, payload = {}) {
   if (nextMode !== "playing") {
     input.keys.clear();
     input.dashBuffer = 0;
+    input.laserBuffer = 0;
     resetJoystick();
     audio.suspendBeat();
   }
@@ -1802,7 +1815,7 @@ function renderMode(mode, previousMode, payload = {}) {
     showOverlay(
       "ARCADE SURVIVAL // THREE.JS",
       "NEON<br /><em>TIDE</em>",
-      `在失控的数字海域中收集光核，躲开追猎信号。<br />坚持 ${GAME.bossStart} 秒定位深潮主脑，并在 ${GAME.bossWindow} 秒内将其摧毁。`,
+      `在失控的数字海域中收集光核，为潮汐光矛充能并躲开追猎信号。<br />坚持 ${GAME.bossStart} 秒定位深潮主脑，并在 ${GAME.bossWindow} 秒内将其摧毁。`,
       "进入潮汐"
     );
   } else if (mode === "paused") {
@@ -1904,8 +1917,8 @@ function getDerivedValues() {
 
 function addEnergy(amount) {
   if (!Number.isFinite(amount) || amount <= 0) return state.energy;
-  state.energy = Math.min(GAME.overdriveEnergy, state.energy + amount);
-  if (state.energy >= GAME.overdriveEnergy) triggerOverdrive();
+  state.energy = Math.min(LASER_RULES.maxEnergy, state.energy + amount);
+  if (state.energy >= LASER_RULES.maxEnergy) triggerOverdrive();
   return state.energy;
 }
 
@@ -1922,7 +1935,7 @@ function triggerOverdrive() {
     rippleScale: 2,
     flashColor: "#64f5ff",
     flashOpacity: 0.2,
-    text: "OVERDRIVE",
+    text: "光矛 READY",
     tone: "cyan",
   });
   audio.event("overdrive");
@@ -1975,17 +1988,23 @@ function renderUpgradeOptions(options) {
   const effectLabels = {
     "ion-drive": "极速 +15%",
     "prism-core": "收益 +20%",
-    "echo-shield": "防护 +0.08 秒",
+    "echo-shield": "相位 +0.08 秒",
     "magnet-field": "拾取范围 +25%",
     overclock: "充能 +20%",
     "repair-swarm": "最大船体 4 · 立即修复 +1",
+  };
+  const displayNames = {
+    "echo-shield": "相位外壳",
+  };
+  const displayDescriptions = {
+    "echo-shield": "延长冲刺相位状态时间。",
   };
   const buttons = options.map((upgrade, index) => {
     const button = document.createElement("button");
     button.className = "upgrade-option";
     button.type = "button";
     button.dataset.upgradeId = upgrade.id;
-    button.innerHTML = `<span class="upgrade-number" aria-hidden="true">${index + 1}</span><span class="upgrade-title">${upgrade.name}</span><span class="upgrade-description">${upgrade.description}</span><strong class="upgrade-effect">${effectLabels[upgrade.id] ?? "信号强化"}</strong>`;
+    button.innerHTML = `<span class="upgrade-number" aria-hidden="true">${index + 1}</span><span class="upgrade-title">${displayNames[upgrade.id] ?? upgrade.name}</span><span class="upgrade-description">${displayDescriptions[upgrade.id] ?? upgrade.description}</span><strong class="upgrade-effect">${effectLabels[upgrade.id] ?? "信号强化"}</strong>`;
     return button;
   });
   dom.upgradeOptions.replaceChildren(...buttons);
@@ -2061,14 +2080,14 @@ function updatePlayer(dt) {
   const flameScale = 0.75 + Math.min(speed / 5, 1) * 0.7;
   const hitStrength = THREE.MathUtils.clamp(player.hitReactTimer / 0.18, 0, 1);
   if (state.reducedMotion) {
-    player.group.scale.set(1, 1, 1);
+    player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
     player.flame.scale.setScalar(1);
     player.core.scale.set(1, 0.72, 1);
     player.coreGlow.scale.set(1.22, 0.76, 1);
   } else {
-    const targetScale = state.dashTimer > 0 ? 1.22 : 1;
+    const targetScale = (state.dashTimer > 0 ? 1.22 : 1) * PLAYER_VISUAL_SCALE;
     player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
-    player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, state.dashTimer > 0 ? 0.82 : 1, 1 - Math.exp(-22 * dt));
+    player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, (state.dashTimer > 0 ? 0.82 : 1) * PLAYER_VISUAL_SCALE, 1 - Math.exp(-22 * dt));
     player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
     const corePulse = 1 + Math.sin(state.elapsed * (state.overdriveTimer > 0 ? 16 : 7)) * (state.overdriveTimer > 0 ? 0.16 : 0.08);
     player.core.scale.set(1.12 * corePulse, 0.72 * corePulse, 1);
@@ -2109,8 +2128,8 @@ function attemptDash(direction) {
   state.dashSequence += 1;
   player.facing.copy(dashDirection);
   player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getDerivedValues().speedMultiplier);
-  if (state.reducedMotion) player.group.scale.set(1, 1, 1);
-  else player.group.scale.set(1.25, 0.78, 1);
+  if (state.reducedMotion) player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
+  else player.group.scale.set(1.25 * PLAYER_VISUAL_SCALE, 0.78 * PLAYER_VISUAL_SCALE, PLAYER_VISUAL_SCALE);
   spawnTrail(true);
   spawnParticleBurst(player.position, 0x64f5ff, 10, 3.7, 0.85);
   spawnRipple(player.position, 0x64f5ff, 1.2);
@@ -3223,6 +3242,35 @@ function updateVisuals(dt) {
   updateHUD(dt);
 }
 
+function updateLaserHUD() {
+  const energy = THREE.MathUtils.clamp(state.energy, 0, LASER_RULES.maxEnergy);
+  const energyPercent = (energy / LASER_RULES.maxEnergy) * 100;
+  const ready = energy >= LASER_RULES.maxEnergy;
+  const charging = energy > 0 && !ready;
+  const roundedEnergy = Math.round(energy);
+  dom.weaponEnergy.textContent = String(roundedEnergy);
+  dom.weaponEnergyFill.style.width = `${energyPercent}%`;
+  dom.laserStatus.classList.toggle("ready", ready);
+  dom.laserStatus.classList.toggle("charging", charging);
+  dom.laserStatus.textContent = ready ? "光矛 // READY" : (charging ? `光矛 // 充能 ${roundedEnergy}%` : "光矛 // 未充能");
+  dom.laserButton.classList.toggle("ready", ready);
+  dom.laserButton.classList.toggle("charging", charging);
+  dom.laserButton.setAttribute("aria-disabled", String(!ready));
+  dom.laserButton.setAttribute("aria-label", ready ? "潮汐光矛已充能，按 E 发射" : `潮汐光矛充能 ${roundedEnergy}%`);
+  dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
+}
+
+function renderJourneyStrip() {
+  const items = REALMS.map((realm) => {
+    const item = document.createElement("li");
+    item.dataset.realm = realm.id;
+    const name = realm.id.replaceAll("-", " ").toUpperCase();
+    item.innerHTML = `<span>${String(realm.index + 1).padStart(2, "0")}</span><strong>${name}</strong><small>${realm.start}–${realm.end} 秒</small>`;
+    return item;
+  });
+  dom.journeyStrip.replaceChildren(...items);
+}
+
 function updateHUD(dt) {
   dom.score.textContent = String(state.score).padStart(4, "0");
   const totalSeconds = Math.max(0, Math.ceil(state.timeLeft));
@@ -3231,14 +3279,7 @@ function updateHUD(dt) {
   dom.timeLabel.textContent = state.bossDeadline === null ? "首领接入" : "首领窗口";
   dom.time.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   dom.time.classList.toggle("warning", state.timeLeft <= 10 && state.mode === "playing");
-  dom.energy.textContent = String(Math.round(state.energy));
-  const energyPercent = THREE.MathUtils.clamp((state.energy / GAME.overdriveEnergy) * 100, 0, 100);
-  dom.energyFill.style.width = `${energyPercent}%`;
-  const overdriveActive = state.overdriveTimer > 0;
-  dom.overdriveLabel.classList.toggle("active", overdriveActive);
-  dom.overdriveLabel.textContent = overdriveActive
-    ? `OVERDRIVE // ${state.overdriveTimer.toFixed(1)}S`
-    : "OVERDRIVE // 待机";
+  updateLaserHUD();
   syncHealthPips();
   state.dashCharges.forEach((charge, index) => {
     const pip = dom.dashPips[index];
@@ -3363,6 +3404,10 @@ function requestDash() {
   if (state.mode === "playing") input.dashBuffer = DASH_BUFFER_WINDOW;
 }
 
+function requestLaser() {
+  if (state.mode === "playing") input.laserBuffer = 0.14;
+}
+
 function isControlTarget(target) {
   return Boolean(target?.closest?.("button,[role='button'],input,select,textarea,a,[contenteditable='true']"));
 }
@@ -3376,6 +3421,10 @@ function onKeyDown(event) {
   if (state.mode === "playing" && gameplayControlKey && !controlTarget) event.preventDefault();
   if (state.mode === "playing") input.keys.add(key);
   if (!event.repeat && !controlTarget && event.code === "Space") requestDash();
+  if (!event.repeat && !controlTarget && event.code === "KeyE") {
+    event.preventDefault();
+    requestLaser();
+  }
   if (!event.repeat && state.mode === "upgrade" && /^[1-3]$/.test(key)) {
     const option = state.upgradeOptions[Number(key) - 1];
     if (option) chooseUpgrade(option.id);
@@ -3461,6 +3510,11 @@ function setupInput() {
     audio.unlock();
     requestDash();
   });
+  bindInputListener(dom.laserButton, "pointerdown", (event) => {
+    event.preventDefault();
+    audio.unlock();
+    requestLaser();
+  });
   bindInputListener(dom.joystick, "pointerdown", (event) => {
     event.preventDefault();
     audio.unlock();
@@ -3524,7 +3578,7 @@ function animate() {
     updateRipples(idleSimDt);
     updateTrails(idleSimDt);
   }
-  const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / GAME.overdriveEnergy;
+  const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / LASER_RULES.maxEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(wallDt);
@@ -3550,6 +3604,7 @@ createPlayer();
 createParticlePool();
 createTrailPool();
 setupInput();
+renderJourneyStrip();
 updateBounds();
 refreshRenderQuality();
 resetState();
