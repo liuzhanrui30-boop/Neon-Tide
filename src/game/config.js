@@ -57,11 +57,11 @@ export const ENEMY_TYPES = freeze({
 });
 
 export const FORMATION_TEMPLATES = freeze({
-  pincer: { name: 'pincer', enemyCost: 9, minSafeGap: 2.4, cooldown: 5, palette: '#ff4fba', roles: ['hunter', 'striker', 'lancer', 'striker', 'hunter'] },
-  crossfire: { name: 'crossfire', enemyCost: 10, minSafeGap: 2.6, cooldown: 6, palette: '#a56bff', roles: ['striker', 'lancer', 'lancer', 'striker'] },
-  'mine-wall': { name: 'mine-wall', enemyCost: 12, minSafeGap: 2.8, cooldown: 7, palette: '#ff9f43', roles: ['mine', 'mine', 'mine', 'mine', 'mine', 'swarm', 'swarm'] },
-  spiral: { name: 'spiral', enemyCost: 5, minSafeGap: 2.5, cooldown: 6, palette: '#36e0ff', roles: ['swarm', 'hunter', 'swarm', 'hunter', 'swarm'] },
-  'elite-escort': { name: 'elite-escort', enemyCost: 8, minSafeGap: 3.2, cooldown: 9, palette: '#ff4fba', roles: ['elite', 'striker', 'striker'] },
+  pincer: { name: 'pincer', minStage: 1, enemyCost: 9, minSafeGap: 2.4, cooldown: 5, palette: '#ff4fba', roles: ['hunter', 'striker', 'lancer', 'striker', 'hunter'] },
+  crossfire: { name: 'crossfire', minStage: 1, enemyCost: 10, minSafeGap: 2.6, cooldown: 6, palette: '#a56bff', roles: ['striker', 'lancer', 'lancer', 'striker'] },
+  'mine-wall': { name: 'mine-wall', minStage: 2, enemyCost: 12, minSafeGap: 2.8, cooldown: 7, palette: '#ff9f43', roles: ['mine', 'mine', 'mine', 'mine', 'mine', 'swarm', 'swarm'] },
+  spiral: { name: 'spiral', minStage: 0, enemyCost: 5, minSafeGap: 2.5, cooldown: 6, palette: '#36e0ff', roles: ['swarm', 'hunter', 'swarm', 'hunter', 'swarm'] },
+  'elite-escort': { name: 'elite-escort', minStage: 2, enemyCost: 8, minSafeGap: 3.2, cooldown: 9, palette: '#ff4fba', roles: ['elite', 'striker', 'striker'] },
 });
 
 export const UPGRADES = freeze([

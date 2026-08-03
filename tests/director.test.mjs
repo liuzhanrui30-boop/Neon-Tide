@@ -104,6 +104,36 @@ test('pincer adds a protected midline lancer while mine-wall adds two swarm flan
   assert.equal(FORMATION_TEMPLATES['mine-wall'].enemyCost, 12);
 });
 
+test('formation stage gates preserve the intended enemy learning curve', () => {
+  const stageOneChoices = new Set(Array.from({ length: 24 }, (_, seed) => chooseFormation({
+    stageIndex: 0,
+    elapsed: 18,
+    activeCost: 0,
+    maxEnemyCap: 36,
+    safeGap: 4,
+    seed,
+  })?.name).filter(Boolean));
+  assert.deepEqual([...stageOneChoices], ['spiral']);
+
+  const stageTwoChoices = new Set(Array.from({ length: 24 }, (_, seed) => chooseFormation({
+    stageIndex: 1,
+    elapsed: 48,
+    activeCost: 0,
+    maxEnemyCap: 36,
+    safeGap: 4,
+    seed,
+  })?.name).filter(Boolean));
+  assert.ok(stageTwoChoices.has('pincer'));
+  assert.ok(stageTwoChoices.has('crossfire'));
+  assert.equal(stageTwoChoices.has('mine-wall'), false);
+  assert.equal(stageTwoChoices.has('elite-escort'), false);
+
+  assert.equal(FORMATION_TEMPLATES.pincer.minStage, 1);
+  assert.equal(FORMATION_TEMPLATES.crossfire.minStage, 1);
+  assert.equal(FORMATION_TEMPLATES['mine-wall'].minStage, 2);
+  assert.equal(FORMATION_TEMPLATES['elite-escort'].minStage, 2);
+});
+
 test('elite and bulwark armor require exactly three ordinary dash hits', () => {
   assert.equal(ENEMY_TYPES.elite.hp, 3);
   assert.equal(ENEMY_TYPES.bulwark.hp, 3);

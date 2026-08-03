@@ -640,7 +640,10 @@ async function highPressureCombatScenario() {
     assert.ok(snapshot.timerProbe.spawn < snapshot.spawnTimerStart && snapshot.timerProbe.formation < snapshot.formationTimerStart, `director timers did not count down: ${JSON.stringify(snapshot.timerProbe)}`);
     assert.ok(snapshot.firstThirty.peak >= 8, `enemy density too low in first 30s: ${snapshot.firstThirty.peak}`);
     assert.ok(snapshot.firstThirty.formations >= 2, `first 30s formations: ${snapshot.firstThirty.formations}`);
-    assert.ok(Object.keys(snapshot.firstThirty.roles).length >= 3, `first 30s roles: ${JSON.stringify(snapshot.firstThirty.roles)}`);
+    assert.ok(Object.keys(snapshot.firstThirty.roles).length >= 2, `first 30s roles: ${JSON.stringify(snapshot.firstThirty.roles)}`);
+    assert.equal(snapshot.firstThirty.roles.Striker ?? 0, 0, `stage 1 leaked Striker: ${JSON.stringify(snapshot.firstThirty.roles)}`);
+    assert.equal(snapshot.firstThirty.roles.Lancer ?? 0, 0, `stage 1 leaked Lancer: ${JSON.stringify(snapshot.firstThirty.roles)}`);
+    assert.equal(snapshot.firstThirty.roles.Bulwark ?? 0, 0, `stage 1 leaked Bulwark: ${JSON.stringify(snapshot.firstThirty.roles)}`);
     assert.ok(snapshot.stageTwo.formations >= snapshot.firstThirty.formations + 1, 'stage 2 formation did not fire');
     assert.ok(snapshot.stageThree.formations >= snapshot.stageTwo.formations + 1, 'stage 3 formation did not fire');
     assert.equal(snapshot.lancerActive, true, 'lancer beam telegraph/active lifecycle did not run');

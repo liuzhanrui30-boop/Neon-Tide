@@ -1392,7 +1392,7 @@ function spawnEnemy(type = null, position = null, overrides = {}) {
   let chosenType = type;
   if (!chosenType) {
     const roleCycles = [
-      ["chaser", "chaser", "striker", "swarm", "chaser"],
+      ["chaser", "chaser", "swarm", "chaser", "swarm"],
       ["striker", "lancer", "swarm", "chaser", "striker"],
       ["chaser", "striker", "lancer", "mine", "swarm", "elite"],
     ];

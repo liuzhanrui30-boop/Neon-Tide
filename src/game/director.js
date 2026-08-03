@@ -65,9 +65,11 @@ export function chooseFormation({
   seed = 0,
 } = {}) {
   if ((Number(cooldownRemaining) || 0) > 0) return null;
-  const budget = getFormationBudget(stageIndex, elapsed, { activeCost, maxEnemyCap });
+  const activeStage = clamp(Math.trunc(Number(stageIndex) || 0), 0, STAGES.length - 1);
+  const budget = getFormationBudget(activeStage, elapsed, { activeCost, maxEnemyCap });
   const candidates = Object.values(FORMATION_TEMPLATES).filter((template) => (
-    template.enemyCost <= budget
+    activeStage >= (template.minStage ?? 0)
+      && template.enemyCost <= budget
       && template.name !== lastFormation
       && (!Number.isFinite(safeGap) || safeGap >= template.minSafeGap)
   ));
