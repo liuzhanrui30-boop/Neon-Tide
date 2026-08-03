@@ -51,6 +51,7 @@ const MAX_RIPPLES = 64;
 const MAX_FLOATING_TEXTS = 24;
 const enemyScratch = {
   toPlayer: new THREE.Vector2(),
+  nearMissDirection: new THREE.Vector2(),
   steering: new THREE.Vector2(),
   perpendicular: new THREE.Vector2(),
   target: new THREE.Vector2(),
@@ -2666,7 +2667,7 @@ function trianglePulseHitsPlayer(enemy) {
 
 function registerNearMiss(enemy, distance, collided = false) {
   if (enemy.nearMissed || enemy.nearMissResolved || enemy.type === "mine" || enemy.type === "boss") return false;
-  const toPlayer = player.position.clone().sub(enemy.group.position);
+  const toPlayer = enemyScratch.nearMissDirection.subVectors(player.position, enemy.group.position);
   toPlayer.multiplyScalar(1 / Math.max(distance, 0.001));
   const collisionDistance = player.radius + enemy.radius;
   const nearMissEdge = collisionDistance + 0.62;
@@ -3039,9 +3040,15 @@ function sanitizeRuntimeState() {
     const particle = particles[index];
     const mesh = particle?.mesh;
     const velocity = particle?.velocity;
-    if (!particle || !mesh?.isObject3D || !velocity?.isVector2 || !Number.isFinite(particle.life)
+    if (!particle || !mesh?.isObject3D || !mesh.material?.isMaterial || !velocity?.isVector2 || !Number.isFinite(particle.life)
       || !Number.isFinite(particle.maxLife) || !Number.isFinite(velocity.x) || !Number.isFinite(velocity.y)) {
-      if (particle?.mesh) particle.mesh.visible = false;
+      if (mesh?.isObject3D) {
+        mesh.visible = false;
+        world.remove(mesh);
+        mesh.material?.dispose?.();
+      }
+      const poolIndex = particlePool.indexOf(particle);
+      if (poolIndex >= 0) particlePool.splice(poolIndex, 1);
       particles.splice(index, 1);
       corrected = true;
       runtimeStats.orphanGuards += 1;

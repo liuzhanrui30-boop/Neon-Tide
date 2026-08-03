@@ -768,6 +768,12 @@ async function runtimeGuardScenario() {
       badParticle.maxLife=0.4;
       badParticle.velocity.x=NaN;
       particles.push(badParticle);
+      const missingMaterial=particlePool[1];
+      missingMaterial.mesh.visible=true;
+      delete missingMaterial.mesh.material;
+      missingMaterial.life=0.2;
+      missingMaterial.maxLife=0.4;
+      particles.push(missingMaterial);
       return {before,pools,afterPools:{particles:particlePool.length,trails:trailPool.length},afterSetup:runtimeStats.inputSetupCount};
     `);
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
@@ -794,11 +800,12 @@ async function runtimeGuardScenario() {
     assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
     assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
     assert.ok(qualityLifecycle.dispose >= qualityLifecycle.before.dispose + 2, `quality lifecycle did not dispose/recreate: ${JSON.stringify(qualityLifecycle)}`);
+    assert.equal(qualityLifecycle.refresh, qualityLifecycle.before.refresh + 2, `quality lifecycle did not refresh exactly twice: ${JSON.stringify(qualityLifecycle)}`);
     // Exercise first allocation with hostile counts; pools must never exceed their hard caps.
     const overCapacity = await page.gameEvaluate(`for(const particle of particlePool){world.remove(particle.mesh);particle.mesh.material.dispose()}particlePool.length=0;for(const trail of trailPool){world.remove(trail.group);trail.meshes.forEach((mesh)=>mesh.material.dispose())}trailPool.length=0;createParticlePool(9999);createTrailPool(Infinity);return {particles:particlePool.length,trails:trailPool.length}`);
     assert.deepEqual(overCapacity, { particles:300, trails:48 });
     const resized = await page.gameEvaluate(`const before=runtimeStats.composerRefreshCount;resize();return {before,after:runtimeStats.composerRefreshCount}`);
-    assert.deepEqual(resized, { before: injected.before.refresh, after: injected.before.refresh }, 'resize recreated Composer');
+    assert.deepEqual(resized, { before: qualityLifecycle.refresh, after: qualityLifecycle.refresh }, 'resize recreated Composer');
   });
 }
 
