@@ -22,3 +22,8 @@ test('laser timing, narrow collision and penetration cap are stable', () => {
   assert.equal(laserHitsCircle({ originX: 0, originY: 0, directionX: 1, directionY: 0 }, { x: 4, y: 0.5, radius: 0.1 }), false);
   assert.equal(selectLaserTargets(Array.from({ length: 8 }, (_, index) => ({ id: index, along: 7 - index }))).length, 5);
 });
+
+test('laser phase changes exactly at charge and completion boundaries', () => {
+  assert.equal(getLaserPhase(0.28), 'active');
+  assert.equal(getLaserPhase(0.60), 'done');
+});

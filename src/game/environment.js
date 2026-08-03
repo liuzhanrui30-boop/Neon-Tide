@@ -16,6 +16,7 @@ const getRealm = (realmId) => REALMS.find((realm) => realm.id === realmId) ?? RE
 
 export const getEnvironmentDelay = (realmId, seed = 0) => {
   const [minimum, maximum] = getRealm(realmId).environment.interval;
+  if (!Number.isFinite(minimum) || !Number.isFinite(maximum)) return Infinity;
   const amount = clamp(finite(seed), 0, 1);
   return minimum + ((maximum - minimum) * amount);
 };

@@ -29,7 +29,7 @@ export const canFireLaser = (energy) => finite(energy) >= LASER_RULES.maxEnergy;
 export const getLaserPhase = (elapsed = 0) => {
   const seconds = Math.max(0, finite(elapsed));
   if (seconds < LASER_RULES.chargeDuration) return 'charge';
-  if (seconds < LASER_RULES.chargeDuration + LASER_RULES.activeDuration) return 'active';
+  if (seconds < 0.6) return 'active';
   return 'done';
 };
 

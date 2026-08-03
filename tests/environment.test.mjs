@@ -12,3 +12,17 @@ test('realm environments telegraph before active and never return non-finite for
   assert.ok(Number.isFinite(gravity.x) && Number.isFinite(gravity.y));
   assert.equal(getEnvironmentFrame('void-cathedral', 110).phase, 'disabled');
 });
+
+test('environment timing clamps seeds and respects exact phase boundaries', () => {
+  assert.equal(getEnvironmentDelay('abyss', -1), 7);
+  assert.equal(getEnvironmentDelay('abyss', 2), 10);
+  assert.equal(getEnvironmentFrame('abyss', 0.799).phase, 'telegraph');
+  assert.equal(getEnvironmentFrame('abyss', 0.8).phase, 'active');
+  assert.equal(getEnvironmentFrame('abyss', 4).phase, 'cooldown');
+});
+
+test('disabled and non-finite environment intervals never produce NaN', () => {
+  for (const seed of [-1, 0, 0.5, 1, 2, Infinity, NaN]) {
+    assert.equal(getEnvironmentDelay('void-cathedral', seed), Infinity);
+  }
+});
