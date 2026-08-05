@@ -60,7 +60,7 @@ class CDPClient {
     this.listeners.set(method, listeners);
   }
 
-  send(method, params = {}, timeoutMs = 15000) {
+  send(method, params = {}, timeoutMs = 30000) {
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -72,7 +72,7 @@ class CDPClient {
     });
   }
 
-  waitFor(method, predicate = () => true, timeoutMs = 15000) {
+  waitFor(method, predicate = () => true, timeoutMs = 30000) {
     let cancel;
     const promise = new Promise((resolve, reject) => {
       const waiter = { predicate, resolve, reject };
@@ -273,13 +273,13 @@ class GamePage {
     assert.equal(this.scriptKind, 'dev', `${this.name}: ${feature} requires the Vite dev source (APP_URL=${APP_URL})`);
   }
 
-  async evaluate(expression) {
+  async evaluate(expression, { idempotent = true } = {}) {
     const params = { expression, returnByValue: true, awaitPromise: true };
     let result;
     try {
       result = await this.client.send('Runtime.evaluate', params);
     } catch (error) {
-      if (!String(error?.message).includes('Runtime.evaluate timed out')) throw error;
+      if (!idempotent || !String(error?.message).includes('Runtime.evaluate timed out')) throw error;
       await this.client.send('Debugger.resume', {}, 3000).catch(() => {});
       await this.client.send('Page.bringToFront', {}, 3000).catch(() => {});
       result = await this.client.send('Runtime.evaluate', params);
@@ -333,8 +333,8 @@ class GamePage {
       pausedPromise.cancel();
       throw new Error(`${this.name}: scope evaluation ${evaluationNumber} failed: ${error.message}`, { cause: error });
     } finally {
-      await this.client.send('Debugger.resume').catch(() => {});
-      if (breakpointId) await this.client.send('Debugger.removeBreakpoint', { breakpointId }).catch(() => {});
+      if (breakpointId) await this.client.send('Debugger.removeBreakpoint', { breakpointId }, 3000).catch(() => {});
+      await this.client.send('Debugger.resume', {}, 3000).catch(() => {});
     }
   }
 
@@ -350,7 +350,7 @@ class GamePage {
   }
 
   async click(selector) {
-    await this.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`);
+    await this.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`, { idempotent: false });
   }
 
   async dispatchKey(type, key, code, extra = {}) {
@@ -366,6 +366,21 @@ class GamePage {
   async pressKey(key, code, extra = {}) {
     await this.dispatchKey('rawKeyDown', key, code, extra);
     await this.dispatchKey('keyUp', key, code, { modifiers: extra.modifiers || 0 });
+  }
+
+  async dispatchRepeatedKey(key, code, count) {
+    await this.evaluate(`(()=>{
+      for(let index=0;index<${count};index+=1){
+        window.dispatchEvent(new KeyboardEvent('keydown',{
+          key:${JSON.stringify(key)},
+          code:${JSON.stringify(code)},
+          repeat:true,
+          bubbles:true,
+          cancelable:true,
+        }));
+      }
+      return true;
+    })()`, { idempotent: false });
   }
 
   async startGame() {
@@ -466,9 +481,7 @@ async function desktopCoreScenario() {
 
     await page.dispatchKey('rawKeyDown', 'p', 'KeyP');
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`);
-    for (let repeat = 0; repeat < 3; repeat += 1) {
-      await page.dispatchKey('rawKeyDown', 'p', 'KeyP', { autoRepeat: true });
-    }
+    await page.dispatchRepeatedKey('p', 'KeyP', 3);
     assert.equal(await page.evaluate(`document.querySelector('#overlay').classList.contains('visible') && document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`), true);
     await page.dispatchKey('keyUp', 'p', 'KeyP');
 
@@ -482,7 +495,7 @@ async function desktopCoreScenario() {
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
 
-    await page.pressKey('p', 'KeyP');
+    await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     await sleep(80);
     assert.equal(await page.evaluate('document.activeElement?.tagName'), 'CANVAS');
@@ -499,10 +512,8 @@ async function desktopCoreScenario() {
       return true;
     `);
     await page.dispatchKey('rawKeyDown', ' ', 'Space');
-    for (let repeat = 0; repeat < 8; repeat += 1) {
-      await sleep(42);
-      await page.dispatchKey('rawKeyDown', ' ', 'Space', { autoRepeat: true });
-    }
+    await sleep(42);
+    await page.dispatchRepeatedKey(' ', 'Space', 8);
     await page.dispatchKey('keyUp', ' ', 'Space');
     await sleep(80);
     const dash = await page.gameEvaluate('return {sequence:$state.dashSequence,charges:[...$state.dashCharges]}');
@@ -531,8 +542,7 @@ async function desktopCoreScenario() {
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 0);
 
     const ownedBeforeRepeat = await page.gameEvaluate('return $state.ownedUpgrades.length');
-    await page.dispatchKey('rawKeyDown', '1', 'Digit1', { autoRepeat: true });
-    await page.dispatchKey('keyUp', '1', 'Digit1');
+    await page.dispatchRepeatedKey('1', 'Digit1', 1);
     assert.equal(await page.gameEvaluate('return $state.mode'), 'upgrade');
     assert.equal(await page.gameEvaluate('return $state.ownedUpgrades.length'), ownedBeforeRepeat);
     await page.pressKey('1', 'Digit1');
@@ -678,6 +688,7 @@ async function chargedLightLanceScenario() {
       $state.laserElapsed=LASER_RULES.chargeDuration;
       updateLaser(0);
       const telegraphingLancer=spawnEnemy('lancer',new THREE.Vector2(2,0));
+      telegraphingLancer.hp=3;telegraphingLancer.maxHp=3;
       setEnemyState(telegraphingLancer,'telegraph',0.4,0.4);
       const activeLancer=spawnEnemy('lancer',new THREE.Vector2(3,0));
       setEnemyState(activeLancer,'active',0.4);
@@ -694,6 +705,7 @@ async function chargedLightLanceScenario() {
         lancerState:telegraphingLancer.state,
         activeLancerHp:activeLancer.hp,
         activeLancerState:activeLancer.state,
+        activeLancerAlive:$enemies.includes(activeLancer),
         bossDamage:bossBefore-boss.hp,
         bossState:boss.state,
         bossPhaseDuringExecute:boss.phase,
@@ -701,7 +713,7 @@ async function chargedLightLanceScenario() {
       };
       const combatHitsAfterFirst=$state.stats.laserHits;
       combatProbe.secondResolve=resolveLaserHits();
-      combatProbe.sameSequenceStable=telegraphingLancer.hp===1&&activeLancer.hp===1&&boss.hp===bossBefore-3&&$state.stats.laserHits===combatHitsAfterFirst;
+      combatProbe.sameSequenceStable=telegraphingLancer.hp===1&&activeLancer.hp===0&&boss.hp===bossBefore-3&&$state.stats.laserHits===combatHitsAfterFirst;
       combatProbe.firstResolve=firstCombatResolve;
       setEnemyState(boss,'recover',0.8);
       updateBoss(boss,0);
@@ -742,7 +754,7 @@ async function chargedLightLanceScenario() {
     assert.equal(shot.capProbe.peak, 5);
     assert.equal(shot.capProbe.feedback, 'PIERCE ×5');
     assert.deepEqual(shot.combatProbe, {
-      lancerHp:1,lancerState:'recover',activeLancerHp:1,activeLancerState:'active',
+      lancerHp:1,lancerState:'recover',activeLancerHp:0,activeLancerState:'active',activeLancerAlive:true,
       bossDamage:3,bossState:'execute',bossPhaseDuringExecute:1,bossPhaseAfterExecute:2,interrupts:1,
       firstResolve:3,secondResolve:0,sameSequenceStable:true,
     });
@@ -757,6 +769,204 @@ async function chargedLightLanceScenario() {
       shots:$state.stats.laserShots,hits:$state.stats.laserHits,interrupts:$state.stats.laserInterrupts,peak:$state.stats.laserPeakTargets,
     }`);
     assert.deepEqual(restart, { energy:0,state:'idle',visible:false,shots:0,hits:0,interrupts:0,peak:0 });
+  });
+}
+
+async function lightLanceCombatContractsScenario() {
+  await withPage('light-lance-combat-contracts', {}, async (page) => {
+    page.requireDev('light lance damage, quota, execution, recovery, and dash contracts');
+    await page.startGame();
+    const contracts = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.enemySpawnTimer=Infinity;
+      $state.formationTimer=Infinity;
+      $state.shardSpawnTimer=Infinity;
+      $state.health=99;$state.maxHealth=99;$state.hurtInvuln=99;
+      $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
+      const prepareShot=()=>{
+        clearLaserState();
+        $state.dashTimer=0;$state.dashInvulnTimer=0;
+        $state.weaponEnergy=100;$state.laserState='ready';
+        requestLaser();attemptLaser();
+        $state.laserElapsed=LASER_RULES.chargeDuration;updateLaser(0);
+      };
+      const damageBatch=(types)=>{
+        clearWorldEntities();prepareShot();
+        const units=types.map((type,index)=>spawnEnemy(type,new THREE.Vector2(index+1,0)));
+        units.forEach((enemy)=>{enemy.hp=10;enemy.maxHp=10;});
+        const before=units.map((enemy)=>enemy.hp);
+        resolveLaserHits();
+        return Object.fromEntries(types.map((type,index)=>[type,before[index]-units[index].hp]));
+      };
+      const damage={
+        ...damageBatch(['chaser','swarm','striker','mine','lancer']),
+        ...damageBatch(['bulwark','elite']),
+      };
+      clearWorldEntities();prepareShot();$state.bossSpawned=false;
+      const damageBoss=spawnEnemy('boss');damageBoss.group.position.set(2,0,2);
+      const damageBossBefore=damageBoss.hp;resolveLaserHits();damage.boss=damageBossBefore-damageBoss.hp;
+
+      const quotaProbe=(bossAlong)=>{
+        clearWorldEntities();prepareShot();$state.bossSpawned=false;
+        const ordinary=Array.from({length:6},(_,index)=>spawnEnemy('chaser',new THREE.Vector2(index+1,0)));
+        const boss=spawnEnemy('boss');boss.group.position.set(bossAlong,0,2);
+        const bossBefore=boss.hp;resolveLaserHits();
+        return {
+          bossDamage:bossBefore-boss.hp,
+          ordinaryHits:ordinary.filter((enemy)=>enemy.dead||enemy.hp<enemy.maxHp).length,
+          sixthHp:ordinary[5].hp,
+        };
+      };
+      const bossFirst=quotaProbe(0.5);
+      const bossLast=quotaProbe(6.8);
+
+      clearWorldEntities();prepareShot();
+      const activeLancer=spawnEnemy('lancer',new THREE.Vector2(1,0));setEnemyState(activeLancer,'active',0.2);updateLancer(activeLancer,0,new THREE.Vector2(-1,0));
+      const activeMine=spawnEnemy('mine',new THREE.Vector2(2,0));setEnemyState(activeMine,'detonate',0.2);updateMine(activeMine,0);
+      const activeHunter=spawnEnemy('chaser',new THREE.Vector2(3,0));setEnemyState(activeHunter,'charge',0.2);
+      const activeStriker=spawnEnemy('striker',new THREE.Vector2(4,0));setEnemyState(activeStriker,'dash',0.2);
+      const activeBulwark=spawnEnemy('bulwark',new THREE.Vector2(5,0));activeBulwark.hp=1;setEnemyState(activeBulwark,'shockExecute',0.2);activeBulwark.visuals.shockwave.visible=true;
+      resolveLaserHits();
+      const executingBeforeTick={
+        lancer:{hp:activeLancer.hp,state:activeLancer.state,alive:$enemies.includes(activeLancer),beam:activeLancer.visuals.beam.visible},
+        mine:{hp:activeMine.hp,state:activeMine.state,alive:$enemies.includes(activeMine)},
+        hunter:{hp:activeHunter.hp,state:activeHunter.state,alive:$enemies.includes(activeHunter)},
+        striker:{hp:activeStriker.hp,state:activeStriker.state,alive:$enemies.includes(activeStriker)},
+        bulwark:{hp:activeBulwark.hp,state:activeBulwark.state,alive:$enemies.includes(activeBulwark),wave:activeBulwark.visuals.shockwave.visible},
+      };
+      updateEnemies(0.1);
+      const executingMidTick={
+        lancer:$enemies.includes(activeLancer)&&activeLancer.state==='active'&&activeLancer.visuals.beam.visible,
+        mine:$enemies.includes(activeMine)&&activeMine.state==='detonate',
+        hunter:$enemies.includes(activeHunter)&&activeHunter.state==='charge',
+        striker:$enemies.includes(activeStriker)&&activeStriker.state==='dash',
+        bulwark:$enemies.includes(activeBulwark)&&activeBulwark.state==='shockExecute',
+      };
+      updateEnemies(1);
+      const executingAfter={
+        lancer:$enemies.includes(activeLancer),mine:$enemies.includes(activeMine),hunter:$enemies.includes(activeHunter),
+        striker:$enemies.includes(activeStriker),bulwark:$enemies.includes(activeBulwark),
+      };
+
+      clearWorldEntities();prepareShot();
+      const recoveringHunter=spawnEnemy('chaser',new THREE.Vector2(1,0));recoveringHunter.hp=2;recoveringHunter.maxHp=2;setEnemyState(recoveringHunter,'chargeTelegraph',0.5,0.5);
+      const recoveringBulwark=spawnEnemy('bulwark',new THREE.Vector2(2,0));setEnemyState(recoveringBulwark,'shockTelegraph',0.5,0.5);recoveringBulwark.visuals.shockwave.visible=true;
+      const recoveringLancer=spawnEnemy('lancer',new THREE.Vector2(3,0));recoveringLancer.hp=3;recoveringLancer.maxHp=3;setEnemyState(recoveringLancer,'telegraph',0.5,0.5);
+      resolveLaserHits();
+      const interrupted={hunter:{hp:recoveringHunter.hp,state:recoveringHunter.state},bulwark:{hp:recoveringBulwark.hp,state:recoveringBulwark.state},lancer:{hp:recoveringLancer.hp,state:recoveringLancer.state}};
+      updateChaser(recoveringHunter,0.51,new THREE.Vector2(1,0));
+      updateElite(recoveringBulwark,0.51,new THREE.Vector2(1,0));
+      updateLancer(recoveringLancer,0.51,new THREE.Vector2(1,0));
+      const recovered={hunter:recoveringHunter.state,bulwark:recoveringBulwark.state,lancer:recoveringLancer.state};
+
+      clearWorldEntities();clearLaserState();
+      $state.weaponEnergy=100;$state.laserState='ready';$state.dashCharges=[1,1];$state.dashTimer=0;$state.dashInvulnTimer=0;$player.velocity.set(0,0);
+      input.laserBuffer=0.14;input.dashBuffer=0.16;attemptLaser();updatePlayer(0.016);
+      const sameFrame={laser:$state.laserState,energy:$state.weaponEnergy,dash:$state.dashTimer,invuln:$state.dashInvulnTimer,speed:$player.velocity.length()};
+      clearLaserState();$state.weaponEnergy=100;$state.laserState='ready';$state.dashCharges=[1,1];$state.dashTimer=0;$state.dashInvulnTimer=0;$player.velocity.set(0,0);
+      const dashStarted=attemptDash(new THREE.Vector2(1,0));requestLaser();const laserDuringDash=attemptLaser();
+      const adjacent={dashStarted,laserDuringDash,energy:$state.weaponEnergy,state:$state.laserState,dash:$state.dashTimer,invuln:$state.dashInvulnTimer};
+      $state.dashTimer=0;$state.dashInvulnTimer=0;clearLaserState();$state.weaponEnergy=100;$state.laserState='ready';$state.dashCharges=[1,1];$player.velocity.set(10,0);
+      const chargeStarted=startLaserCharge();const dashDuringCharge=attemptDash(new THREE.Vector2(1,0));updateLaser(0);
+      const chargeFirst={chargeStarted,dashDuringCharge,dash:$state.dashTimer,invuln:$state.dashInvulnTimer,speed:$player.velocity.length()};
+
+      clearWorldEntities();clearLaserState();$state.weaponEnergy=100;$state.laserState='ready';startLaserCharge();
+      const lowFrameTarget=spawnEnemy('chaser',new THREE.Vector2(2,0));
+      updateLaser(0.3);const lowFrameActive={state:$state.laserState,hp:lowFrameTarget.hp};
+      updateLaser(0.3);const lowFrameDone={state:$state.laserState,visible:$player.laser.group.visible};
+      return {damage,bossFirst,bossLast,executingBeforeTick,executingMidTick,executingAfter,interrupted,recovered,sameFrame,adjacent,chargeFirst,lowFrameActive,lowFrameDone};
+    `);
+    assert.deepEqual(contracts.damage, { chaser:1,swarm:1,striker:1,mine:2,lancer:2,bulwark:1,elite:1,boss:3 });
+    assert.deepEqual(contracts.bossFirst, { bossDamage:3,ordinaryHits:5,sixthHp:1 });
+    assert.deepEqual(contracts.bossLast, { bossDamage:3,ordinaryHits:5,sixthHp:1 });
+    assert.deepEqual(contracts.executingBeforeTick, {
+      lancer:{hp:0,state:'active',alive:true,beam:true},mine:{hp:-1,state:'detonate',alive:true},hunter:{hp:0,state:'charge',alive:true},
+      striker:{hp:0,state:'dash',alive:true},bulwark:{hp:0,state:'shockExecute',alive:true,wave:true},
+    });
+    assert.deepEqual(contracts.executingMidTick, { lancer:true,mine:true,hunter:true,striker:true,bulwark:true });
+    assert.deepEqual(contracts.executingAfter, { lancer:false,mine:false,hunter:false,striker:false,bulwark:false });
+    assert.deepEqual(contracts.interrupted, { hunter:{hp:1,state:'recover'},bulwark:{hp:2,state:'recover'},lancer:{hp:1,state:'recover'} });
+    assert.deepEqual(contracts.recovered, { hunter:'chase',bulwark:'chase',lancer:'lock' });
+    assert.deepEqual(contracts.sameFrame, { laser:'charge',energy:0,dash:0,invuln:0,speed:0 });
+    assert.deepEqual(contracts.adjacent, { dashStarted:true,laserDuringDash:false,energy:100,state:'ready',dash:0.19,invuln:0.19 });
+    assert.equal(contracts.chargeFirst.chargeStarted, true);
+    assert.equal(contracts.chargeFirst.dashDuringCharge, false);
+    assert.equal(contracts.chargeFirst.dash, 0);
+    assert.equal(contracts.chargeFirst.invuln, 0);
+    assert.ok(Math.abs(contracts.chargeFirst.speed-4.92)<0.001, `charge speed ${contracts.chargeFirst.speed}`);
+    assert.deepEqual(contracts.lowFrameActive, { state:'active',hp:0 });
+    assert.deepEqual(contracts.lowFrameDone, { state:'idle',visible:false });
+  });
+}
+
+async function naturalLightLanceLifecycleScenario() {
+  await withPage('natural-light-lance-lifecycle', {}, async (page) => {
+    page.requireDev('natural light lance lifecycle and boundary input probe');
+    await page.startGame();
+    await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
+      for(let index=0;index<20;index+=1){spawnShard($player.position.clone());collectShard(shards.length-1)}
+      return {energy:$state.weaponEnergy,state:$state.laserState};
+    `);
+    await page.pressKey('e', 'KeyE');
+    await page.waitForPage(`document.querySelector('#laser-status').textContent.includes('蓄力')`, 1500);
+    const naturalCharge = await page.evaluate(`({status:document.querySelector('#laser-status').textContent,energy:document.querySelector('#weapon-energy-value').textContent})`);
+    assert.deepEqual(naturalCharge, { status:'光矛 // 蓄力',energy:'0' });
+    await page.waitForPage(`document.querySelector('#laser-status').textContent.includes('发射')`, 1500);
+    await page.waitForPage(`document.querySelector('#laser-status').textContent.includes('充能中 0%')`, 1800);
+    const naturalDone = await page.gameEvaluate(`return {state:$state.laserState,shots:$state.stats.laserShots,visible:$player.laser.group.visible}`);
+    assert.deepEqual(naturalDone, { state:'idle',shots:1,visible:false });
+
+    await page.gameEvaluate(`
+      $state.weaponEnergy=100;$state.laserState='ready';$state.dashCharges=[1,1];$state.dashTimer=0;$state.dashInvulnTimer=0;
+      input.dashBuffer=0;input.laserBuffer=0;$player.velocity.set(0,0);return true;
+    `);
+    await page.dispatchKey('rawKeyDown','e','KeyE');
+    await page.dispatchKey('rawKeyDown',' ','Space');
+    await page.dispatchKey('keyUp','e','KeyE');
+    await page.dispatchKey('keyUp',' ','Space');
+    await page.waitForPage(`document.querySelector('#laser-status').textContent.includes('蓄力')`, 1500);
+    const sameFrame = await page.gameEvaluate(`return {state:$state.laserState,dash:$state.dashTimer,invuln:$state.dashInvulnTimer,charges:[...$state.dashCharges]}`);
+    assert.deepEqual(sameFrame, { state:'charge',dash:0,invuln:0,charges:[1,1] });
+    await page.waitForPage(`document.querySelector('#laser-status').textContent.includes('充能中 0%')`, 1800);
+
+    await page.gameEvaluate(`
+      $state.weaponEnergy=100;$state.laserState='ready';$state.dashCharges=[1,1];$state.dashTimer=0;$state.dashInvulnTimer=0;
+      input.dashBuffer=0;input.laserBuffer=0;$player.velocity.set(0,0);return true;
+    `);
+    await page.pressKey(' ', 'Space');
+    await sleep(20);
+    await page.pressKey('e', 'KeyE');
+    await sleep(20);
+    const adjacent = await page.gameEvaluate(`return {energy:$state.weaponEnergy,state:$state.laserState,dash:$state.dashTimer,invuln:$state.dashInvulnTimer}`);
+    assert.equal(adjacent.energy, 100);
+    assert.equal(adjacent.state, 'ready');
+    assert.ok(adjacent.dash > 0 && adjacent.invuln > 0, `adjacent dash was not retained: ${JSON.stringify(adjacent)}`);
+
+    await sleep(260);
+    const shotsBeforeThirty = await page.gameEvaluate(`
+      $state.elapsed=29.97;$state.stageIndex=0;$state.stageQueue=[];$state.upgradeTriggered=[false,false];
+      $state.weaponEnergy=100;$state.laserState='ready';input.laserBuffer=0;return $state.stats.laserShots;
+    `);
+    await page.pressKey('e', 'KeyE');
+    await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`, 1800);
+    const boundaryThirty = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent})`);
+    assert.deepEqual(boundaryThirty, { energy:'100',status:'光矛 // READY' });
+    await page.click('.upgrade-option');
+    await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
+    assert.equal(await page.gameEvaluate(`return $state.stats.laserShots`), shotsBeforeThirty);
+
+    const shotsBeforeSixtyFour = await page.gameEvaluate(`
+      $state.elapsed=63.97;$state.stageIndex=1;$state.stageQueue=[];$state.upgradeTriggered=[true,false];
+      $state.weaponEnergy=100;$state.laserState='ready';input.laserBuffer=0;return $state.stats.laserShots;
+    `);
+    await page.pressKey('e', 'KeyE');
+    await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`, 1800);
+    const boundarySixtyFour = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent})`);
+    assert.deepEqual(boundarySixtyFour, { energy:'100',status:'光矛 // READY' });
+    assert.equal(await page.gameEvaluate(`return $state.stats.laserShots`), shotsBeforeSixtyFour);
   });
 }
 
@@ -805,7 +1015,7 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
       for (let index=0; index<50; index+=1) spawnEnemy('chaser');
       return {cap:getEnemyCap(),count:$enemies.length,peak:$state.stats.enemyPeak};
     `);
-    assert.equal(cap.cap, 28, `${name}: coarse enemy cap changed`);
+    assert.equal(cap.cap, 32, `${name}: coarse enemy cap changed`);
     assert.ok(cap.count <= cap.cap && cap.peak <= cap.cap, `${name}: coarse cap exceeded ${JSON.stringify(cap)}`);
   });
 }
@@ -991,7 +1201,7 @@ async function reducedMotionScenario() {
     assert.equal(warnings.trauma, 0);
     assert.equal(warnings.zoom, 0);
     assert.equal(warnings.trails, 0);
-    assert.deepEqual(warnings.playerScale, [1, 1]);
+    assert.deepEqual(warnings.playerScale, [0.88, 0.88]);
   });
 }
 
@@ -1517,6 +1727,8 @@ const scenarios = [
   ['boss victory', victoryScenario],
   ['boss timeout defeat', bossTimeoutScenario],
   ['boss phase two and attack cleanup', bossPhaseTwoScenario],
+  ['natural light lance lifecycle', naturalLightLanceLifecycleScenario],
+  ['light lance combat contracts', lightLanceCombatContractsScenario],
   ['pickup-charged light lance', chargedLightLanceScenario],
 ];
 

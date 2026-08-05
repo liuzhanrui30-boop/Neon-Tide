@@ -43,15 +43,15 @@ export const STAGES = freeze([
 ]);
 
 export const ENEMY_TYPES = freeze({
-  hunter: { id: 'hunter', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100 },
-  chaser: { id: 'chaser', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100 },
-  striker: { id: 'striker', role: 'Striker', radius: 0.9, hp: 1, damage: 1, speed: 2.8, threatCost: 2, telegraph: 0.55, score: 150 },
-  lancer: { id: 'lancer', role: 'Lancer', radius: 0.85, hp: 2, damage: 2, speed: 1.6, threatCost: 3, telegraph: 0.7, score: 220 },
-  swarm: { id: 'swarm', role: 'Swarm', radius: 0.42, hp: 1, damage: 1, speed: 3.2, threatCost: 1, telegraph: 0.45, score: 80 },
-  mine: { id: 'mine', role: 'Mine', radius: 0.65, hp: 1, damage: 2, speed: 0, threatCost: 2, telegraph: 1.1, score: 125 },
-  bulwark: { id: 'bulwark', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 400 },
-  elite: { id: 'elite', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 350 },
-  boss: { id: 'boss', role: 'Boss', radius: 3.5, hp: 30, damage: 3, speed: 1.2, threatCost: 8, telegraph: 0.68, score: 2500 },
+  hunter: { id: 'hunter', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, laserDamage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100 },
+  chaser: { id: 'chaser', role: 'Hunter', radius: 0.75, hp: 1, damage: 1, laserDamage: 1, speed: 2.2, threatCost: 1, telegraph: 0.5, score: 100 },
+  striker: { id: 'striker', role: 'Striker', radius: 0.9, hp: 1, damage: 1, laserDamage: 1, speed: 2.8, threatCost: 2, telegraph: 0.55, score: 150 },
+  lancer: { id: 'lancer', role: 'Lancer', radius: 0.85, hp: 2, damage: 2, laserDamage: 2, speed: 1.6, threatCost: 3, telegraph: 0.7, score: 220 },
+  swarm: { id: 'swarm', role: 'Swarm', radius: 0.42, hp: 1, damage: 1, laserDamage: 1, speed: 3.2, threatCost: 1, telegraph: 0.45, score: 80 },
+  mine: { id: 'mine', role: 'Mine', radius: 0.65, hp: 1, damage: 2, laserDamage: 2, speed: 0, threatCost: 2, telegraph: 1.1, score: 125 },
+  bulwark: { id: 'bulwark', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, laserDamage: 1, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 400 },
+  elite: { id: 'elite', role: 'Bulwark', radius: 1.15, hp: 3, damage: 2, laserDamage: 1, speed: 1.5, threatCost: 4, telegraph: 0.68, score: 350 },
+  boss: { id: 'boss', role: 'Boss', radius: 3.5, hp: 30, damage: 3, laserDamage: 3, speed: 1.2, threatCost: 8, telegraph: 0.68, score: 2500 },
 });
 
 export const FORMATION_TEMPLATES = freeze({

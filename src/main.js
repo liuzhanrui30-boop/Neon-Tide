@@ -2155,7 +2155,7 @@ function updatePlayer(dt) {
 }
 
 function attemptDash(direction) {
-  if (state.mode !== "playing" || state.playerAttacking) return false;
+  if (state.mode !== "playing" || state.playerAttacking || ["charge", "active"].includes(state.laserState)) return false;
   const chargeIndex = state.dashCharges.findIndex((charge) => charge >= 0.999);
   if (chargeIndex < 0) return false;
   const dashDirection = direction.lengthSq() > 0.01 ? direction.clone().normalize() : player.facing.clone().normalize();
@@ -2256,7 +2256,7 @@ function clearLaserState() {
 }
 
 function startLaserCharge() {
-  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy) || ["charge", "active"].includes(state.laserState)) return false;
+  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy) || state.dashTimer > 0 || state.dashInvulnTimer > 0 || ["charge", "active"].includes(state.laserState)) return false;
   state.weaponEnergy = 0;
   state.laserElapsed = 0;
   state.laserSequence += 1;
@@ -2293,15 +2293,32 @@ function interruptLaserTarget(enemy) {
   enemy.visuals?.chargeArc && (enemy.visuals.chargeArc.visible = false);
   enemy.visuals?.chargeArc?.children.forEach((segment) => { segment.visible = false; });
   enemy.visuals?.shockwave && (enemy.visuals.shockwave.visible = false);
+  enemy.visuals?.body?.scale?.setScalar(1);
   setEnemyState(enemy, "recover", 0.5);
   state.stats.laserInterrupts += 1;
+  return true;
+}
+
+function isEnemyAttackExecuting(enemy) {
+  if (!enemy || typeof enemy.state !== "string") return false;
+  if (enemy.type === "boss") return enemy.state === "execute";
+  return ["active", "detonate", "charge", "dash", "shockExecute"].includes(enemy.state);
+}
+
+function deferOrDestroyLaserTarget(enemy) {
+  if (enemy.hp > 0) return false;
+  if (isEnemyAttackExecuting(enemy)) {
+    enemy.pendingLaserDeath = true;
+    enemy.pendingDeathSource = "laser";
+    return true;
+  }
+  destroyEnemy(enemy, "laser");
   return true;
 }
 
 function resolveLaserHits() {
   if (state.laserState !== "active") return 0;
   const remainingTargets = Math.max(0, LASER_RULES.maxTargets - state.laserSequenceTargets);
-  if (remainingTargets <= 0) return 0;
   const originX = player.position.x + state.laserDirection.x * player.radius;
   const originY = player.position.y + state.laserDirection.y * player.radius;
   const beam = {
@@ -2311,7 +2328,7 @@ function resolveLaserHits() {
     directionY: state.laserDirection.y,
   };
   const candidates = enemies
-    .filter((enemy) => enemy && !enemy.dead && enemy.lastLaserSequence !== state.laserSequence)
+    .filter((enemy) => enemy && !enemy.dead && !enemy.pendingLaserDeath && enemy.lastLaserSequence !== state.laserSequence)
     .filter((enemy) => laserHitsCircle(beam, {
       x: enemy.group.position.x,
       y: enemy.group.position.y,
@@ -2322,12 +2339,17 @@ function resolveLaserHits() {
       along: ((enemy.group.position.x - originX) * state.laserDirection.x)
         + ((enemy.group.position.y - originY) * state.laserDirection.y),
     }));
-  const targets = selectLaserTargets(candidates).slice(0, remainingTargets);
+  const ordinaryTargets = selectLaserTargets(candidates.filter(({ enemy }) => enemy.type !== "boss")).slice(0, remainingTargets);
+  const bossTargets = candidates
+    .filter(({ enemy }) => enemy.type === "boss")
+    .sort((left, right) => left.along - right.along)
+    .slice(0, 1);
+  const targets = [...ordinaryTargets, ...bossTargets].sort((left, right) => left.along - right.along);
   for (const { enemy } of targets) {
     enemy.lastLaserSequence = state.laserSequence;
-    enemy.hp -= enemy.type === "boss" ? 3 : 1;
+    enemy.hp -= ENEMY_TYPES[enemy.type]?.laserDamage ?? 1;
     state.stats.laserHits += 1;
-    state.laserSequenceTargets += 1;
+    if (enemy.type !== "boss") state.laserSequenceTargets += 1;
     interruptLaserTarget(enemy);
     enemy.hitReactTimer = 0.18;
     if (enemy.type === "boss") {
@@ -2340,7 +2362,7 @@ function resolveLaserHits() {
     }
     const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
     spawnParticleBurst(hitPosition, enemy.type === "boss" ? 0xe7ffff : paletteState.primary.getHex(), enemy.type === "boss" ? 10 : 6, 3.2, 0.78);
-    if (enemy.hp <= 0) destroyEnemy(enemy, "laser");
+    deferOrDestroyLaserTarget(enemy);
   }
   if (targets.length > 0) {
     state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
@@ -2438,6 +2460,9 @@ function updateChaser(enemy, dt, toPlayer) {
   } else if (enemy.state === "charge") {
     enemy.visuals.chargeArc.visible = false;
     if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 2.1 + Math.random() * 0.7);
+  } else if (enemy.state === "recover") {
+    enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 1.4 + Math.random() * 0.8);
   }
   const pulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 4 + enemy.wobble) * 0.08;
   enemy.visuals.glow.scale.setScalar(1.45 * pulse);
@@ -2580,7 +2605,10 @@ function updateMine(enemy, dt) {
     const glowScale = state.reducedMotion ? 1.55 + frame.stage * 0.38 : 1.45 + frame.stage * 0.42 + frame.stageProgress * 0.28;
     enemy.visuals.glow.scale.setScalar(glowScale);
     state.stats.activeHazards += 1;
-    if (enemy.stateTimer <= 0) enemy.dead = true;
+    if (enemy.stateTimer <= 0) {
+      if (enemy.pendingLaserDeath) setEnemyState(enemy, "spent", 0);
+      else enemy.dead = true;
+    }
   }
 }
 
@@ -2627,6 +2655,10 @@ function updateElite(enemy, dt, toPlayer) {
       enemy.visuals.shockwave.visible = false;
       setEnemyState(enemy, "chase", 1.1 + Math.random() * 0.7);
     }
+  } else if (enemy.state === "recover") {
+    enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
+    enemy.visuals.shockwave.visible = false;
+    if (enemy.stateTimer <= 0) setEnemyState(enemy, "chase", 1.1 + Math.random() * 0.7);
   }
   enemy.visuals.shield.rotation.z += dt * 1.4;
   enemy.visuals.outer.rotation.z -= dt * 0.9;
@@ -3006,6 +3038,10 @@ function updateEnemies(dt) {
     else if (enemy.type === "boss") updateBoss(enemy, dt);
     else updateChaser(enemy, dt, toPlayer);
     if (enemy.dead) continue;
+    if (enemy.pendingLaserDeath && !isEnemyAttackExecuting(enemy)) {
+      destroyEnemy(enemy, enemy.pendingDeathSource ?? "laser");
+      continue;
+    }
     const stationary = ["enter", "telegraph", "active", "shockTelegraph", "shockExecute", "detonate", "chargeTelegraph"].includes(enemy.state);
     if (enemy.type !== "mine" && !stationary) {
       enemy.group.position.x += enemy.velocity.x * dt;
@@ -3763,7 +3799,6 @@ function animate() {
     state.hurtInvuln = Math.max(0, state.hurtInvuln - simDt);
     input.dashBuffer = Math.max(0, input.dashBuffer - simDt);
     input.laserBuffer = Math.max(0, input.laserBuffer - simDt);
-    if (input.laserBuffer > 0) attemptLaser();
     const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
     state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     state.comboTimer = Math.max(0, state.comboTimer - simDt);
@@ -3775,6 +3810,7 @@ function animate() {
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
     if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
     if (state.mode === "playing") {
+      if (input.laserBuffer > 0) attemptLaser();
       updatePlayer(simDt);
       updateLaser(simDt);
       updateShards(simDt);
