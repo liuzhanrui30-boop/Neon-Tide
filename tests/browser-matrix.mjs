@@ -561,12 +561,15 @@ async function briefingAndLaserUiScenario() {
     touch: true,
   }, async (page) => {
     const layout = await page.evaluate(`(()=>{
-      const rect=(selector)=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}};
+      const rect=(selector)=>{const element=document.querySelector(selector),r=element.getBoundingClientRect(),style=getComputedStyle(element);return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height,display:style.display,visibility:style.visibility}};
       const overlap=(a,b)=>Math.max(0,Math.min(a.right,b.right)-Math.max(a.left,b.left))*Math.max(0,Math.min(a.bottom,b.bottom)-Math.max(a.top,b.top));
       const briefing=rect('#briefing-grid'),joystick=rect('#joystick'),dash=rect('#dash-button'),laser=rect('#laser-button');
       return {briefing,joystick,dash,laser,overlaps:[overlap(briefing,joystick),overlap(briefing,dash),overlap(briefing,laser),overlap(joystick,dash),overlap(joystick,laser),overlap(dash,laser)]};
     })()`);
     for (const [name, rect] of Object.entries({ briefing: layout.briefing, joystick: layout.joystick, dash: layout.dash, laser: layout.laser })) {
+      assert.notEqual(rect.display, 'none', `${name} is display:none`);
+      assert.equal(rect.visibility, 'visible', `${name} is not visible`);
+      assert.ok(rect.width > 0 && rect.height > 0, `${name} has zero size ${JSON.stringify(rect)}`);
       assert.ok(rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= 390.5 && rect.bottom <= 844.5,
         `${name} outside viewport ${JSON.stringify(rect)}`);
     }
