@@ -68,7 +68,14 @@ test('rewards cap combo scaling while retaining the supplied multiplier', () => 
 
   assert.deepEqual(beyondCap, atCap);
   assert.equal(atCap.score, unmultiplied.score * 1.5);
-  assert.equal(atCap.energy, unmultiplied.energy * 1.5);
+  assert.equal(atCap.energy, 0);
+  assert.equal(unmultiplied.energy, 0);
+});
+
+test('score rewards never carry weapon charge or an automatic overdrive contract', () => {
+  assert.deepEqual(['pickup', 'nearMiss', 'break', 'bossHit'].map((kind) => computeReward(kind, 8, 1).energy), [0, 0, 0, 0]);
+  assert.equal('overdriveEnergy' in GAME, false);
+  assert.equal('overdriveDuration' in GAME, false);
 });
 
 test('upgrade options are deterministic, unowned, and unique', () => {

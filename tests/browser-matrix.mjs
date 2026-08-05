@@ -274,11 +274,16 @@ class GamePage {
   }
 
   async evaluate(expression) {
-    const result = await this.client.send('Runtime.evaluate', {
-      expression,
-      returnByValue: true,
-      awaitPromise: true,
-    });
+    const params = { expression, returnByValue: true, awaitPromise: true };
+    let result;
+    try {
+      result = await this.client.send('Runtime.evaluate', params);
+    } catch (error) {
+      if (!String(error?.message).includes('Runtime.evaluate timed out')) throw error;
+      await this.client.send('Debugger.resume', {}, 3000).catch(() => {});
+      await this.client.send('Page.bringToFront', {}, 3000).catch(() => {});
+      result = await this.client.send('Runtime.evaluate', params);
+    }
     if (result.exceptionDetails) {
       throw new Error(`${this.name}: ${result.exceptionDetails.exception?.description || result.exceptionDetails.text}`);
     }
@@ -307,10 +312,11 @@ class GamePage {
     const pausedPromise = this.client.waitFor('Debugger.paused');
     let breakpointId;
     try {
-      ({ breakpointId } = await this.client.send('Debugger.setBreakpoint', {
+      const breakpointPromise = this.client.send('Debugger.setBreakpoint', {
         location: this.breakpointLocation,
-      }));
-      const paused = await pausedPromise;
+      });
+      const [breakpoint, paused] = await Promise.all([breakpointPromise, pausedPromise]);
+      ({ breakpointId } = breakpoint);
       const frame = paused.callFrames.find((candidate) => candidate.functionName === 'animate') || paused.callFrames[0];
       if (stallMs > 0) await sleep(stallMs);
       const result = await this.client.send('Debugger.evaluateOnCallFrame', {
@@ -327,8 +333,8 @@ class GamePage {
       pausedPromise.cancel();
       throw new Error(`${this.name}: scope evaluation ${evaluationNumber} failed: ${error.message}`, { cause: error });
     } finally {
-      if (breakpointId) await this.client.send('Debugger.removeBreakpoint', { breakpointId }).catch(() => {});
       await this.client.send('Debugger.resume').catch(() => {});
+      if (breakpointId) await this.client.send('Debugger.removeBreakpoint', { breakpointId }).catch(() => {});
     }
   }
 
@@ -365,7 +371,7 @@ class GamePage {
   async startGame() {
     await this.click('#primary-button');
     await this.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
-    await sleep(60);
+    await this.waitForPage(`document.activeElement?.tagName === 'CANVAS'`, 1500);
     assert.equal(await this.evaluate(`document.activeElement?.tagName`), 'CANVAS', `${this.name}: gameplay focus did not move to the canvas`);
     assert.equal(await this.evaluate(`document.activeElement?.matches('button')`), false, `${this.name}: gameplay focus remains on a button`);
   }
@@ -463,7 +469,7 @@ async function desktopCoreScenario() {
     for (let repeat = 0; repeat < 3; repeat += 1) {
       await page.dispatchKey('rawKeyDown', 'p', 'KeyP', { autoRepeat: true });
     }
-    assert.equal(await page.gameEvaluate('return $state.mode'), 'paused');
+    assert.equal(await page.evaluate(`document.querySelector('#overlay').classList.contains('visible') && document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`), true);
     await page.dispatchKey('keyUp', 'p', 'KeyP');
 
     await sleep(100);
@@ -574,6 +580,183 @@ async function briefingAndLaserUiScenario() {
         `${name} outside viewport ${JSON.stringify(rect)}`);
     }
     assert.deepEqual(layout.overlaps, [0, 0, 0, 0, 0, 0], `phone controls overlap ${JSON.stringify(layout)}`);
+  });
+}
+
+async function chargedLightLanceScenario() {
+  await withPage('charged-light-lance', {}, async (page) => {
+    page.requireDev('pickup-charged light lance runtime probe');
+    await page.startGame();
+    const pickupContract = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.enemySpawnTimer=Infinity;
+      $state.formationTimer=Infinity;
+      $state.shardSpawnTimer=Infinity;
+      $player.position.set(0,0);
+      $player.velocity.set(0,0);
+      $player.facing.set(1,0);
+      syncPlayerTransform();
+      const baseDerived=getDerivedValues();
+      $state.ownedUpgrades=['overclock'];
+      const focusedDerived=getDerivedValues();
+      $state.ownedUpgrades=[];
+      $state.weaponEnergy=40;
+      awardReward('nearMiss');
+      awardReward('break');
+      awardReward('bossHit');
+      const rewardEnergy=$state.weaponEnergy;
+      $state.weaponEnergy=0;
+      const collect=()=>{
+        spawnShard($player.position.clone());
+        collectShard(shards.length-1);
+      };
+      for(let index=0;index<19;index+=1) collect();
+      const afterNineteen={energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots};
+      collect();
+      const beforeFire={energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots};
+      return {
+        afterNineteen,beforeFire,rewardEnergy,
+        baseDerived,focusedDerived,hasOverdriveTimer:'overdriveTimer' in $state,
+      };
+    `);
+    assert.deepEqual(pickupContract.baseDerived, {
+      speedMultiplier:1,scoreMultiplier:1,pickupRadiusMultiplier:1,
+      dashRecoveryMultiplier:1,dashInvulnerability:0.19,pickupWeaponEnergy:5,
+    });
+    assert.deepEqual(pickupContract.focusedDerived, {
+      speedMultiplier:1,scoreMultiplier:1,pickupRadiusMultiplier:1,
+      dashRecoveryMultiplier:1,dashInvulnerability:0.19,pickupWeaponEnergy:7,
+    });
+    assert.equal(pickupContract.rewardEnergy, 40);
+    assert.equal(pickupContract.hasOverdriveTimer, false);
+    assert.deepEqual(pickupContract.afterNineteen, { energy:95, state:'idle', shots:0 });
+    assert.deepEqual(pickupContract.beforeFire, { energy:100, state:'ready', shots:0 });
+
+    await page.pressKey('e', 'KeyE');
+    await sleep(35);
+    const charging = await page.gameEvaluate(`return {
+      energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,
+      buffer:input.laserBuffer,
+    }`);
+    assert.deepEqual(charging, { energy:0, state:'charge', shots:1, buffer:0 });
+
+    const shot = await page.gameEvaluate(`
+      $state.laserElapsed=LASER_RULES.chargeDuration;
+      updateLaser(0);
+      const active={
+        visible:$player.laser.group.visible,
+        length:$player.laser.group.scale.x,
+        width:$player.laser.group.scale.y,
+        haloColor:$player.laser.halo.material.color.getHex(),
+        stageColor:paletteState.primary.getHex(),
+        coreColor:$player.laser.core.material.color.getHex(),
+        coreOpacity:$player.laser.core.material.opacity,
+        flash:dom.flash.style.opacity,
+      };
+      updateLaser(0.1);
+      active.laterCoreOpacity=$player.laser.core.material.opacity;
+      clearWorldEntities();
+      const aligned=Array.from({length:6},(_,index)=>spawnEnemy('chaser',new THREE.Vector2(index+1,0)));
+      const offAxis=spawnEnemy('chaser',new THREE.Vector2(2,2));
+      const resolved=resolveLaserHits();
+      const resolvedAgain=resolveLaserHits();
+      const capProbe={
+        hitFlags:aligned.map((enemy)=>enemy.dead || enemy.hp<enemy.maxHp),
+        sixthHp:aligned[5].hp,
+        offAxisHp:offAxis.hp,
+        resolved,resolvedAgain,
+        hits:$state.stats.laserHits,
+        peak:$state.stats.laserPeakTargets,
+        feedback:floatingTexts.at(-1)?.element.textContent,
+      };
+      clearLaserState();
+      clearWorldEntities();
+      $state.weaponEnergy=100;
+      $state.laserState='ready';
+      requestLaser();
+      attemptLaser();
+      $state.laserElapsed=LASER_RULES.chargeDuration;
+      updateLaser(0);
+      const telegraphingLancer=spawnEnemy('lancer',new THREE.Vector2(2,0));
+      setEnemyState(telegraphingLancer,'telegraph',0.4,0.4);
+      const activeLancer=spawnEnemy('lancer',new THREE.Vector2(3,0));
+      setEnemyState(activeLancer,'active',0.4);
+      $state.bossSpawned=false;
+      const boss=spawnEnemy('boss');
+      boss.group.position.set(5,0,2);
+      boss.hp=16;
+      boss.attackKind='sweepBeam';
+      setEnemyState(boss,'execute',0.8);
+      const bossBefore=boss.hp;
+      const firstCombatResolve=resolveLaserHits();
+      const combatProbe={
+        lancerHp:telegraphingLancer.hp,
+        lancerState:telegraphingLancer.state,
+        activeLancerHp:activeLancer.hp,
+        activeLancerState:activeLancer.state,
+        bossDamage:bossBefore-boss.hp,
+        bossState:boss.state,
+        bossPhaseDuringExecute:boss.phase,
+        interrupts:$state.stats.laserInterrupts,
+      };
+      const combatHitsAfterFirst=$state.stats.laserHits;
+      combatProbe.secondResolve=resolveLaserHits();
+      combatProbe.sameSequenceStable=telegraphingLancer.hp===1&&activeLancer.hp===1&&boss.hp===bossBefore-3&&$state.stats.laserHits===combatHitsAfterFirst;
+      combatProbe.firstResolve=firstCombatResolve;
+      setEnemyState(boss,'recover',0.8);
+      updateBoss(boss,0);
+      combatProbe.bossPhaseAfterExecute=boss.phase;
+      updateLaser(LASER_RULES.activeDuration+0.01);
+      const done={state:$state.laserState,visible:$player.laser.group.visible};
+      $state.weaponEnergy=42;
+      $state.laserState='active';
+      $player.laser.group.visible=true;
+      beginUpgrade(1);
+      const upgradeCleanup={mode:$state.mode,energy:$state.weaponEnergy,state:$state.laserState,visible:$player.laser.group.visible};
+      chooseUpgrade($state.upgradeOptions[0].id);
+      $state.weaponEnergy=100;
+      $state.laserState='ready';
+      requestLaser();attemptLaser();$state.laserElapsed=LASER_RULES.chargeDuration;updateLaser(0);
+      pauseGame();
+      const pauseCleanup={mode:$state.mode,state:$state.laserState,visible:$player.laser.group.visible};
+      resumeGame();
+      $state.weaponEnergy=100;
+      $state.laserState='ready';
+      requestLaser();attemptLaser();$state.laserElapsed=LASER_RULES.chargeDuration;updateLaser(0);
+      finishRun('gameover','hullBreach');
+      const terminalCleanup={mode:$state.mode,state:$state.laserState,visible:$player.laser.group.visible};
+      return {active,capProbe,combatProbe,done,upgradeCleanup,pauseCleanup,terminalCleanup};
+    `);
+    assert.equal(shot.active.visible, true);
+    assert.equal(shot.active.length, 7.2);
+    assert.equal(shot.active.width, 0.55);
+    assert.equal(shot.active.haloColor, shot.active.stageColor);
+    assert.equal(shot.active.coreColor, 0xffffff);
+    assert.ok(shot.active.coreOpacity > shot.active.laterCoreOpacity);
+    assert.equal(shot.active.flash, '0');
+    assert.deepEqual(shot.capProbe.hitFlags, [true,true,true,true,true,false]);
+    assert.equal(shot.capProbe.sixthHp, 1);
+    assert.equal(shot.capProbe.offAxisHp, 1);
+    assert.deepEqual([shot.capProbe.resolved, shot.capProbe.resolvedAgain], [5,0]);
+    assert.equal(shot.capProbe.hits, 5);
+    assert.equal(shot.capProbe.peak, 5);
+    assert.equal(shot.capProbe.feedback, 'PIERCE ×5');
+    assert.deepEqual(shot.combatProbe, {
+      lancerHp:1,lancerState:'recover',activeLancerHp:1,activeLancerState:'active',
+      bossDamage:3,bossState:'execute',bossPhaseDuringExecute:1,bossPhaseAfterExecute:2,interrupts:1,
+      firstResolve:3,secondResolve:0,sameSequenceStable:true,
+    });
+    assert.deepEqual(shot.done, { state:'idle', visible:false });
+    assert.deepEqual(shot.upgradeCleanup, { mode:'upgrade', energy:42, state:'idle', visible:false });
+    assert.deepEqual(shot.pauseCleanup, { mode:'paused', state:'idle', visible:false });
+    assert.deepEqual(shot.terminalCleanup, { mode:'gameover', state:'idle', visible:false });
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    const restart = await page.gameEvaluate(`return {
+      energy:$state.weaponEnergy,state:$state.laserState,visible:$player.laser.group.visible,
+      shots:$state.stats.laserShots,hits:$state.stats.laserHits,interrupts:$state.stats.laserInterrupts,peak:$state.stats.laserPeakTargets,
+    }`);
+    assert.deepEqual(restart, { energy:0,state:'idle',visible:false,shots:0,hits:0,interrupts:0,peak:0 });
   });
 }
 
@@ -1151,10 +1334,11 @@ async function bossPhaseTwoScenario() {
     assert.deepEqual({ duration:timing.duration,bossStart:timing.bossStart,bossWindow:timing.bossWindow }, { duration:126,bossStart:100,bossWindow:26 });
     const paused = await page.gameEvaluate(`const before=$state.elapsed;pauseGame();return {before,mode:$state.mode}`);
     await sleep(140);
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const pausedAfter = await page.gameEvaluate('return {elapsed:$state.elapsed,mode:$state.mode}');
-    assert.equal(pausedAfter.mode, 'paused');
+    assert.equal(pausedAfter.mode, 'playing');
     assert.ok(Math.abs(pausedAfter.elapsed - paused.before) < 0.03, `pause advanced elapsed ${paused.before} -> ${pausedAfter.elapsed}`);
-    await page.gameEvaluate('resumeGame();return $state.mode');
     const boss = await jumpToBoss(page);
     assert.equal(boss.deadline, 126);
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
@@ -1217,12 +1401,17 @@ async function bossPhaseTwoScenario() {
       return {mode:$state.mode,elapsed:$state.elapsed,state:boss.state,timer:boss.stateTimer,hazard:$state.stats.activeHazards};
     `);
     await sleep(140);
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const pausedBossAfter = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
       return {mode:$state.mode,elapsed:$state.elapsed,state:boss.state,timer:boss.stateTimer,hazard:$state.stats.activeHazards};
     `);
-    assert.deepEqual(pausedBossAfter, pausedBoss, 'boss telegraph progressed while paused');
-    await page.gameEvaluate('resumeGame();return $state.mode');
+    assert.equal(pausedBossAfter.mode, 'playing');
+    assert.equal(pausedBossAfter.state, pausedBoss.state, 'boss state changed while paused');
+    assert.equal(pausedBossAfter.hazard, pausedBoss.hazard, 'boss hazard count changed while paused');
+    assert.ok(Math.abs(pausedBossAfter.elapsed-pausedBoss.elapsed)<0.03, `boss pause advanced elapsed ${pausedBoss.elapsed} -> ${pausedBossAfter.elapsed}`);
+    assert.ok(Math.abs(pausedBossAfter.timer-pausedBoss.timer)<0.03, `boss pause advanced timer ${pausedBoss.timer} -> ${pausedBossAfter.timer}`);
 
     const attacks = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
@@ -1328,6 +1517,7 @@ const scenarios = [
   ['boss victory', victoryScenario],
   ['boss timeout defeat', bossTimeoutScenario],
   ['boss phase two and attack cleanup', bossPhaseTwoScenario],
+  ['pickup-charged light lance', chargedLightLanceScenario],
 ];
 
 let passed = 0;

@@ -18,7 +18,14 @@ import {
   pickUpgradeOptions,
 } from "./game/gameplay.js";
 import { FORMATION_TEMPLATES } from "./game/config.js";
-import { LASER_RULES } from "./game/skill.js";
+import {
+  LASER_RULES,
+  gainWeaponEnergy,
+  canFireLaser,
+  getLaserPhase,
+  laserHitsCircle,
+  selectLaserTargets,
+} from "./game/skill.js";
 import { REALMS } from "./game/realms.js";
 import {
   chooseFormation,
@@ -84,12 +91,6 @@ const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_IDLE_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_HIT_COLOR = new THREE.Color(0xffffff);
-const OVERDRIVE_MODIFIERS = Object.freeze({
-  speed: 1.18,
-  score: 1.5,
-  pickupRadius: 1.55,
-  dashRecovery: 1.4,
-});
 const STAGE_LABELS = ["第一幕 · 深潮接入", "第二幕 · 信号涌升", "第三幕 · 交叉流", "终幕 · 事件视界"];
 const MODES = new Set(["menu", "playing", "upgrade", "paused", "gameover", "victory"]);
 const ALLOWED_TRANSITIONS = Object.freeze({
@@ -214,7 +215,12 @@ const state = {
   highScore: Number.parseInt(localStorage.getItem(STORAGE_KEY) || "0", 10),
   health: BASE_MAX_HEALTH,
   maxHealth: BASE_MAX_HEALTH,
-  energy: 0,
+  weaponEnergy: 0,
+  laserState: "idle",
+  laserElapsed: 0,
+  laserSequence: 0,
+  laserSequenceTargets: 0,
+  laserDirection: new THREE.Vector2(0, 1),
   combo: 0,
   comboTimer: 0,
   stageIndex: 0,
@@ -229,7 +235,6 @@ const state = {
   dashInvulnTimer: 0,
   dashSequence: 0,
   hurtInvuln: 0,
-  overdriveTimer: 0,
   get playerAttacking() {
     return this.dashTimer > 0;
   },
@@ -269,6 +274,10 @@ const state = {
     bossPhase: 1,
     bossAttackLog: [],
     bossAttackTelegraphs: [],
+    laserShots: 0,
+    laserHits: 0,
+    laserInterrupts: 0,
+    laserPeakTargets: 0,
   },
   cameraLookAhead: new THREE.Vector2(),
   reducedMotion: reducedMotionPreference?.matches ?? false,
@@ -352,6 +361,7 @@ const player = {
   hitReactTimer: 0,
   wings: [],
   trailTimer: 0,
+  laser: null,
   position: new THREE.Vector2(0, -1.2),
   velocity: new THREE.Vector2(),
   facing: new THREE.Vector2(0, 1),
@@ -757,6 +767,32 @@ function createPlayer() {
   );
   core.position.set(0, 0.03, 0.07);
 
+  const laserGeometry = new THREE.PlaneGeometry(1, 1);
+  laserGeometry.translate(0.5, 0, 0);
+  const laserHaloMaterial = new THREE.MeshBasicMaterial({
+    color: STAGE_PALETTES[0].primary,
+    transparent: true,
+    opacity: 0.34,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const laserCoreMaterial = new THREE.MeshBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const laserHalo = new THREE.Mesh(laserGeometry, laserHaloMaterial);
+  const laserCore = new THREE.Mesh(laserGeometry, laserCoreMaterial);
+  laserCore.position.z = 0.03;
+  laserCore.scale.y = 0.28;
+  const laserGroup = new THREE.Group();
+  laserGroup.position.z = 3.35;
+  laserGroup.visible = false;
+  laserGroup.add(laserHalo, laserCore);
+  world.add(laserGroup);
+
   group.add(glow, flameSegments[2], flameSegments[1], flameSegments[0], flame, leftWing, rightWing, body, outline, coreGlow, core, shield);
   world.add(group);
 
@@ -769,6 +805,13 @@ function createPlayer() {
   player.coreGlow = coreGlow;
   player.flameSegments = flameSegments;
   player.wings = [leftWing, rightWing];
+  player.laser = {
+    group: laserGroup,
+    halo: laserHalo,
+    core: laserCore,
+    geometry: laserGeometry,
+    ownedMaterials: [laserHaloMaterial, laserCoreMaterial],
+  };
   player.position.set(0, -1.2);
   syncPlayerTransform();
 }
@@ -776,6 +819,14 @@ function createPlayer() {
 function syncPlayerTransform() {
   player.group.position.x = player.position.x;
   player.group.position.y = player.position.y;
+}
+
+function disposeLaserAssets() {
+  if (!player.laser) return;
+  renderer.setAnimationLoop(null);
+  world.remove(player.laser.group);
+  player.laser.ownedMaterials.forEach((material) => material.dispose());
+  player.laser.geometry.dispose();
 }
 
 function createParticlePool(count = MAX_PARTICLES) {
@@ -1570,7 +1621,10 @@ function resetState() {
   state.score = 0;
   state.maxHealth = BASE_MAX_HEALTH;
   state.health = state.maxHealth;
-  state.energy = 0;
+  state.weaponEnergy = 0;
+  state.laserSequence = 0;
+  state.laserSequenceTargets = 0;
+  state.laserDirection.set(0, 1);
   state.stageIndex = 0;
   state.spawnSequence = 0;
   state.enemySpawnTimer = 0.72;
@@ -1583,7 +1637,6 @@ function resetState() {
   state.dashInvulnTimer = 0;
   state.dashSequence = 0;
   state.hurtInvuln = 0;
-  state.overdriveTimer = 0;
   state.runFinished = false;
   state.trauma = 0;
   state.traumaClock = 0;
@@ -1614,6 +1667,10 @@ function resetState() {
   state.stats.bossPhase = 1;
   state.stats.bossAttackLog = [];
   state.stats.bossAttackTelegraphs = [];
+  state.stats.laserShots = 0;
+  state.stats.laserHits = 0;
+  state.stats.laserInterrupts = 0;
+  state.stats.laserPeakTargets = 0;
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -1622,10 +1679,10 @@ function resetState() {
   dom.weaponEnergy.textContent = "0";
   dom.weaponEnergyFill.style.width = "0%";
   dom.laserStatus.classList.remove("ready", "charging");
-  dom.laserStatus.textContent = "光矛 // 未充能";
+  dom.laserStatus.textContent = "光矛 // 充能中 0%";
   dom.laserButton.classList.remove("ready", "charging");
   dom.laserButton.setAttribute("aria-disabled", "true");
-  dom.laserButton.setAttribute("aria-label", "潮汐光矛未充能");
+  dom.laserButton.setAttribute("aria-label", "潮汐光矛充能中，能量 0");
   dom.laserButton.style.setProperty("--laser-progress", "0deg");
   dom.stageProgress.style.width = "0%";
   dom.stageName.textContent = STAGE_LABELS[0];
@@ -1638,6 +1695,7 @@ function resetState() {
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
   player.facing.set(0, 1);
+  clearLaserState();
   player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
   player.group.rotation.z = 0;
   player.group.rotation.y = 0;
@@ -1790,6 +1848,7 @@ function transitionTo(nextMode, payload = {}) {
     input.keys.clear();
     input.dashBuffer = 0;
     input.laserBuffer = 0;
+    clearLaserState();
     resetJoystick();
     audio.suspendBeat();
   }
@@ -1893,9 +1952,9 @@ function getDerivedValues() {
     speedMultiplier: 1,
     scoreMultiplier: 1,
     pickupRadiusMultiplier: 1,
-    energyMultiplier: 1,
     dashRecoveryMultiplier: 1,
     dashInvulnerability: DASH_ACTIVE_WINDOW,
+    pickupWeaponEnergy: LASER_RULES.pickupEnergy,
   };
   for (const id of state.ownedUpgrades) {
     const upgrade = UPGRADES.find((candidate) => candidate.id === id);
@@ -1904,41 +1963,18 @@ function getDerivedValues() {
     if (id === "prism-core") values.scoreMultiplier += upgrade.effect;
     if (id === "echo-shield") values.dashInvulnerability += upgrade.effect;
     if (id === "magnet-field") values.pickupRadiusMultiplier += upgrade.effect;
-    if (id === "overclock") values.energyMultiplier += upgrade.effect;
-  }
-  if (state.overdriveTimer > 0) {
-    values.speedMultiplier *= OVERDRIVE_MODIFIERS.speed;
-    values.scoreMultiplier *= OVERDRIVE_MODIFIERS.score;
-    values.pickupRadiusMultiplier *= OVERDRIVE_MODIFIERS.pickupRadius;
-    values.dashRecoveryMultiplier *= OVERDRIVE_MODIFIERS.dashRecovery;
+    if (id === "overclock") values.pickupWeaponEnergy = LASER_RULES.focusedPickupEnergy;
   }
   return values;
 }
 
-function addEnergy(amount) {
-  if (!Number.isFinite(amount) || amount <= 0) return state.energy;
-  state.energy = Math.min(LASER_RULES.maxEnergy, state.energy + amount);
-  if (state.energy >= LASER_RULES.maxEnergy) triggerOverdrive();
-  return state.energy;
-}
-
-function triggerOverdrive() {
-  state.energy = 0;
-  state.overdriveTimer = GAME.overdriveDuration;
-  toast("潮汐超载", "cyan");
-  triggerFeedback("large", {
-    position: player.position,
-    color: 0x64f5ff,
-    particles: 30,
-    speed: 4.2,
-    size: 1.2,
-    rippleScale: 2,
-    flashColor: "#64f5ff",
-    flashOpacity: 0.2,
-    text: "光矛 READY",
-    tone: "cyan",
-  });
-  audio.event("overdrive");
+function addWeaponEnergyFromPickup() {
+  const focused = getDerivedValues().pickupWeaponEnergy === LASER_RULES.focusedPickupEnergy;
+  state.weaponEnergy = gainWeaponEnergy(state.weaponEnergy, focused);
+  if (canFireLaser(state.weaponEnergy) && !["charge", "active"].includes(state.laserState)) {
+    state.laserState = "ready";
+  }
+  return state.weaponEnergy;
 }
 
 function advanceCombo(amount = 1) {
@@ -1961,7 +1997,6 @@ function awardReward(kind) {
   const derived = getDerivedValues();
   const reward = computeReward(kind, state.combo, 1);
   state.score += Math.round(reward.score * derived.scoreMultiplier);
-  addEnergy(reward.energy * derived.energyMultiplier);
   advanceCombo(reward.combo);
   return reward;
 }
@@ -1990,7 +2025,7 @@ function renderUpgradeOptions(options) {
     "prism-core": "收益 +20%",
     "echo-shield": "相位 +0.08 秒",
     "magnet-field": "拾取范围 +25%",
-    overclock: "充能 +20%",
+    overclock: "每枚光核充能 +2",
     "repair-swarm": "最大船体 4 · 立即修复 +1",
   };
   const displayNames = {
@@ -2031,6 +2066,7 @@ function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
   const derived = getDerivedValues();
+  const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
   const hasDirection = direction.lengthSq() > 0.01;
   if (hasDirection) {
     player.facing.lerp(direction, 1 - Math.exp(-TURN_ACCELERATION * 0.5 * dt)).normalize();
@@ -2053,7 +2089,7 @@ function updatePlayer(dt) {
     } else {
       player.velocity.multiplyScalar(Math.exp(-COAST_DAMPING * dt));
     }
-    player.velocity.clampLength(0, BASE_MAX_SPEED * derived.speedMultiplier);
+    player.velocity.clampLength(0, BASE_MAX_SPEED * derived.speedMultiplier * laserMovementMultiplier);
   }
 
   player.position.addScaledVector(player.velocity, dt);
@@ -2089,9 +2125,10 @@ function updatePlayer(dt) {
     player.group.scale.x = THREE.MathUtils.lerp(player.group.scale.x, targetScale, 1 - Math.exp(-22 * dt));
     player.group.scale.y = THREE.MathUtils.lerp(player.group.scale.y, (state.dashTimer > 0 ? 0.82 : 1) * PLAYER_VISUAL_SCALE, 1 - Math.exp(-22 * dt));
     player.flame.scale.setScalar(flameScale + Math.sin(state.elapsed * 30) * 0.08);
-    const corePulse = 1 + Math.sin(state.elapsed * (state.overdriveTimer > 0 ? 16 : 7)) * (state.overdriveTimer > 0 ? 0.16 : 0.08);
+    const laserPrimed = canFireLaser(state.weaponEnergy) || ["charge", "active"].includes(state.laserState);
+    const corePulse = 1 + Math.sin(state.elapsed * (laserPrimed ? 16 : 7)) * (laserPrimed ? 0.16 : 0.08);
     player.core.scale.set(1.12 * corePulse, 0.72 * corePulse, 1);
-    player.coreGlow.scale.set(1.22 * corePulse * (state.overdriveTimer > 0 ? 1.42 : 1.12), 0.76 * corePulse, 1);
+    player.coreGlow.scale.set(1.22 * corePulse * (laserPrimed ? 1.42 : 1.12), 0.76 * corePulse, 1);
   }
   player.flame.material.opacity = 0.48 + Math.min(speed / 5, 1) * 0.45;
   player.flameSegments.forEach((segment, index) => {
@@ -2101,8 +2138,8 @@ function updatePlayer(dt) {
   });
   player.core.material.color.lerpColors(PLAYER_CORE_IDLE_COLOR, PLAYER_CORE_HIT_COLOR, hitStrength);
   player.coreGlow.material.color.lerpColors(paletteState.primary, PLAYER_CORE_HIT_COLOR, hitStrength * 0.8);
-  player.coreGlow.material.opacity = (state.overdriveTimer > 0 ? 0.42 : 0.22) + hitStrength * 0.52;
-  player.glow.material.opacity = state.overdriveTimer > 0 ? 0.36 : 0.18;
+  player.coreGlow.material.opacity = (canFireLaser(state.weaponEnergy) ? 0.42 : 0.22) + hitStrength * 0.52;
+  player.glow.material.opacity = canFireLaser(state.weaponEnergy) ? 0.36 : 0.18;
   player.wings.forEach((wing, index) => {
     wing.material.color.copy(index === 0 ? paletteState.secondary : paletteState.primary);
   });
@@ -2177,6 +2214,7 @@ function collectShard(index) {
   removeShard(index);
   const previousScore = state.score;
   awardReward("pickup");
+  addWeaponEnergyFromPickup();
   triggerFeedback("small", {
     position,
     color: 0xffd166,
@@ -2188,6 +2226,158 @@ function collectShard(index) {
     tone: "gold",
   });
   audio.event("pickup", Math.min(1, state.combo / GAME.comboCap));
+}
+
+function syncLaserTransform() {
+  if (!player.laser) return;
+  const direction = state.laserDirection.lengthSq() > 0
+    ? state.laserDirection
+    : player.facing;
+  player.laser.group.position.set(
+    player.position.x + direction.x * player.radius,
+    player.position.y + direction.y * player.radius,
+    3.35,
+  );
+  player.laser.group.rotation.z = Math.atan2(direction.y, direction.x);
+}
+
+function clearLaserState() {
+  state.laserElapsed = 0;
+  state.laserSequenceTargets = 0;
+  state.laserState = canFireLaser(state.weaponEnergy) ? "ready" : "idle";
+  if (player.laser) {
+    player.laser.group.visible = false;
+    player.laser.group.scale.set(0.4, 0.08, 1);
+    player.laser.halo.material.opacity = 0.34;
+    player.laser.core.material.opacity = 0;
+    syncLaserTransform();
+  }
+  return state.laserState;
+}
+
+function startLaserCharge() {
+  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy) || ["charge", "active"].includes(state.laserState)) return false;
+  state.weaponEnergy = 0;
+  state.laserElapsed = 0;
+  state.laserSequence += 1;
+  state.laserSequenceTargets = 0;
+  state.laserDirection.copy(player.facing);
+  if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
+  else state.laserDirection.normalize();
+  state.laserState = "charge";
+  state.stats.laserShots += 1;
+  player.laser.group.visible = true;
+  player.laser.group.scale.set(0.4, 0.08, 1);
+  player.laser.halo.material.color.copy(paletteState.primary);
+  player.laser.halo.material.opacity = 0.34;
+  player.laser.core.material.color.set(0xffffff);
+  player.laser.core.material.opacity = 0.24;
+  syncLaserTransform();
+  spawnRipple(player.position, paletteState.primary.getHex(), 0.72);
+  toast("光矛蓄力", "cyan");
+  return true;
+}
+
+function attemptLaser() {
+  input.laserBuffer = 0;
+  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy)) return false;
+  return startLaserCharge();
+}
+
+function interruptLaserTarget(enemy) {
+  if (enemy.type === "boss" || typeof enemy.state !== "string") return false;
+  const interruptible = ["telegraph", "chargeTelegraph", "shockTelegraph"]
+    .some((stateName) => enemy.state.includes(stateName));
+  if (!interruptible) return false;
+  enemy.visuals?.line && (enemy.visuals.line.visible = false);
+  enemy.visuals?.chargeArc && (enemy.visuals.chargeArc.visible = false);
+  enemy.visuals?.chargeArc?.children.forEach((segment) => { segment.visible = false; });
+  enemy.visuals?.shockwave && (enemy.visuals.shockwave.visible = false);
+  setEnemyState(enemy, "recover", 0.5);
+  state.stats.laserInterrupts += 1;
+  return true;
+}
+
+function resolveLaserHits() {
+  if (state.laserState !== "active") return 0;
+  const remainingTargets = Math.max(0, LASER_RULES.maxTargets - state.laserSequenceTargets);
+  if (remainingTargets <= 0) return 0;
+  const originX = player.position.x + state.laserDirection.x * player.radius;
+  const originY = player.position.y + state.laserDirection.y * player.radius;
+  const beam = {
+    originX,
+    originY,
+    directionX: state.laserDirection.x,
+    directionY: state.laserDirection.y,
+  };
+  const candidates = enemies
+    .filter((enemy) => enemy && !enemy.dead && enemy.lastLaserSequence !== state.laserSequence)
+    .filter((enemy) => laserHitsCircle(beam, {
+      x: enemy.group.position.x,
+      y: enemy.group.position.y,
+      radius: enemy.radius,
+    }))
+    .map((enemy) => ({
+      enemy,
+      along: ((enemy.group.position.x - originX) * state.laserDirection.x)
+        + ((enemy.group.position.y - originY) * state.laserDirection.y),
+    }));
+  const targets = selectLaserTargets(candidates).slice(0, remainingTargets);
+  for (const { enemy } of targets) {
+    enemy.lastLaserSequence = state.laserSequence;
+    enemy.hp -= enemy.type === "boss" ? 3 : 1;
+    state.stats.laserHits += 1;
+    state.laserSequenceTargets += 1;
+    interruptLaserTarget(enemy);
+    enemy.hitReactTimer = 0.18;
+    if (enemy.type === "boss") {
+      syncBossProgress(enemy);
+      if (enemy.hp > 0 && enemy.state === "execute" && enemy.hp < enemy.maxHp * 0.5) {
+        enemy.laserPhaseTwoPending = true;
+      } else if (enemy.hp > 0) {
+        enterBossPhaseTwo(enemy);
+      }
+    }
+    const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+    spawnParticleBurst(hitPosition, enemy.type === "boss" ? 0xe7ffff : paletteState.primary.getHex(), enemy.type === "boss" ? 10 : 6, 3.2, 0.78);
+    if (enemy.hp <= 0) destroyEnemy(enemy, "laser");
+  }
+  if (targets.length > 0) {
+    state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
+    const feedbackPosition = player.position.clone().addScaledVector(state.laserDirection, Math.min(LASER_RULES.length, 4.2));
+    showFloatingText(`PIERCE ×${state.laserSequenceTargets}`, feedbackPosition, "cyan", "medium");
+  }
+  return targets.length;
+}
+
+function updateLaser(dt) {
+  if (!["charge", "active"].includes(state.laserState)) return state.laserState;
+  state.laserElapsed += Math.max(0, Number.isFinite(dt) ? dt : 0);
+  const phase = getLaserPhase(state.laserElapsed);
+  if (phase === "done") {
+    clearLaserState();
+    return state.laserState;
+  }
+  state.laserState = phase;
+  syncLaserTransform();
+  player.laser.group.visible = true;
+  player.laser.halo.material.color.copy(paletteState.primary);
+  if (phase === "charge") {
+    const progress = THREE.MathUtils.clamp(state.laserElapsed / LASER_RULES.chargeDuration, 0, 1);
+    player.laser.group.scale.set(
+      THREE.MathUtils.lerp(0.4, LASER_RULES.length, progress),
+      THREE.MathUtils.lerp(0.08, LASER_RULES.width, progress),
+      1,
+    );
+    player.laser.core.material.opacity = 0.18 + progress * 0.34;
+    player.velocity.clampLength(0, BASE_MAX_SPEED * getDerivedValues().speedMultiplier * 0.8);
+  } else {
+    const activeElapsed = Math.max(0, state.laserElapsed - LASER_RULES.chargeDuration);
+    player.laser.group.scale.set(LASER_RULES.length, LASER_RULES.width, 1);
+    player.laser.core.material.opacity = 0.18 + Math.max(0, 1 - activeElapsed / 0.08) * 0.82;
+    resolveLaserHits();
+  }
+  return state.laserState;
 }
 
 function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
@@ -2562,6 +2752,10 @@ function beginBossExecute(enemy) {
 }
 
 function updateBoss(enemy, dt) {
+  if (enemy.laserPhaseTwoPending && enemy.state !== "execute") {
+    enemy.laserPhaseTwoPending = false;
+    if (enterBossPhaseTwo(enemy)) return;
+  }
   enemy.stateTimer -= dt;
   enemy.hitReactTimer = Math.max(0, enemy.hitReactTimer - dt);
   const ringMotion = state.reducedMotion ? 0 : 1;
@@ -3057,7 +3251,10 @@ function sanitizeRuntimeState() {
   state.dashTimer = Math.max(0, finite(state.dashTimer, 0));
   state.dashInvulnTimer = Math.max(0, finite(state.dashInvulnTimer, 0));
   state.hurtInvuln = Math.max(0, finite(state.hurtInvuln, 0));
-  state.overdriveTimer = Math.max(0, finite(state.overdriveTimer, 0));
+  state.weaponEnergy = clampFinite(state.weaponEnergy, 0, LASER_RULES.maxEnergy, 0);
+  state.laserElapsed = Math.max(0, finite(state.laserElapsed, 0));
+  state.laserSequence = Math.max(0, Math.trunc(finite(state.laserSequence, 0)));
+  state.laserSequenceTargets = clampFinite(state.laserSequenceTargets, 0, LASER_RULES.maxTargets, 0);
   state.trauma = clampFinite(state.trauma, 0, 1, 0);
   state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
   state.slowMotionTimer = Math.max(0, finite(state.slowMotionTimer, 0));
@@ -3065,7 +3262,7 @@ function sanitizeRuntimeState() {
   state.dashCharges.forEach((charge, index) => {
     state.dashCharges[index] = clampFinite(charge, 0, 1, 0);
   });
-  [player.position, player.velocity, player.facing].forEach((vector) => {
+  [player.position, player.velocity, player.facing, state.laserDirection].forEach((vector) => {
     vector.x = finite(vector.x, 0);
     vector.y = finite(vector.y, 0);
   });
@@ -3243,20 +3440,33 @@ function updateVisuals(dt) {
 }
 
 function updateLaserHUD() {
-  const energy = THREE.MathUtils.clamp(state.energy, 0, LASER_RULES.maxEnergy);
+  const energy = THREE.MathUtils.clamp(state.weaponEnergy, 0, LASER_RULES.maxEnergy);
   const energyPercent = (energy / LASER_RULES.maxEnergy) * 100;
-  const ready = energy >= LASER_RULES.maxEnergy;
-  const charging = energy > 0 && !ready;
+  const ready = state.laserState === "ready";
+  const charging = state.laserState === "charge";
+  const active = state.laserState === "active";
   const roundedEnergy = Math.round(energy);
   dom.weaponEnergy.textContent = String(roundedEnergy);
   dom.weaponEnergyFill.style.width = `${energyPercent}%`;
   dom.laserStatus.classList.toggle("ready", ready);
-  dom.laserStatus.classList.toggle("charging", charging);
-  dom.laserStatus.textContent = ready ? "光矛 // READY" : (charging ? `光矛 // 充能 ${roundedEnergy}%` : "光矛 // 未充能");
+  dom.laserStatus.classList.toggle("charging", charging || active || (!ready && energy > 0));
+  dom.laserStatus.textContent = ready
+    ? "光矛 // READY"
+    : charging
+      ? "光矛 // 蓄力"
+      : active
+        ? "光矛 // 发射"
+        : `光矛 // 充能中 ${roundedEnergy}%`;
   dom.laserButton.classList.toggle("ready", ready);
-  dom.laserButton.classList.toggle("charging", charging);
+  dom.laserButton.classList.toggle("charging", charging || active || (!ready && energy > 0));
   dom.laserButton.setAttribute("aria-disabled", String(!ready));
-  dom.laserButton.setAttribute("aria-label", ready ? "潮汐光矛已充能，按 E 发射" : `潮汐光矛充能 ${roundedEnergy}%`);
+  dom.laserButton.setAttribute("aria-label", ready
+    ? "潮汐光矛 READY，按 E 发射"
+    : charging
+      ? "潮汐光矛蓄力"
+      : active
+        ? "潮汐光矛发射"
+        : `潮汐光矛充能中，能量 ${roundedEnergy}`);
   dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
 }
 
@@ -3551,8 +3761,9 @@ function animate() {
     state.dashTimer = Math.max(0, state.dashTimer - simDt);
     state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - simDt);
     state.hurtInvuln = Math.max(0, state.hurtInvuln - simDt);
-    state.overdriveTimer = Math.max(0, state.overdriveTimer - simDt);
     input.dashBuffer = Math.max(0, input.dashBuffer - simDt);
+    input.laserBuffer = Math.max(0, input.laserBuffer - simDt);
+    if (input.laserBuffer > 0) attemptLaser();
     const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
     state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     state.comboTimer = Math.max(0, state.comboTimer - simDt);
@@ -3565,6 +3776,7 @@ function animate() {
     if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
     if (state.mode === "playing") {
       updatePlayer(simDt);
+      updateLaser(simDt);
       updateShards(simDt);
       updateEnemies(simDt);
       if (state.mode === "playing") updateSpawning(simDt);
@@ -3578,7 +3790,7 @@ function animate() {
     updateRipples(idleSimDt);
     updateTrails(idleSimDt);
   }
-  const energyIntensity = state.overdriveTimer > 0 ? 1 : state.energy / LASER_RULES.maxEnergy;
+  const energyIntensity = ["charge", "active"].includes(state.laserState) ? 1 : state.weaponEnergy / LASER_RULES.maxEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode);
   updateVisuals(wallDt);
@@ -3611,5 +3823,6 @@ resetState();
 renderMode("menu", null);
 const clock = new THREE.Clock();
 window.addEventListener("resize", resize);
+window.addEventListener("beforeunload", disposeLaserAssets, { once: true });
 reducedMotionPreference?.addEventListener?.("change", (event) => applyReducedMotionPreference(event.matches));
 renderer.setAnimationLoop(animate);
