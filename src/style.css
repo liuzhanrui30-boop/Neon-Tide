@@ -1870,3 +1870,32 @@ kbd {
     transform: none;
   }
 }
+
+@media (forced-colors: active) {
+  button:focus-visible,
+  canvas:focus-visible {
+    outline: 3px solid Highlight;
+  }
+
+  .energy-track,
+  .stage-track,
+  .boss-track,
+  #health-pips i {
+    border: 1px solid CanvasText;
+  }
+
+  #weapon-energy-fill,
+  #stage-progress,
+  #boss-fill,
+  #health-pips i:not(.lost) {
+    background: Highlight;
+    box-shadow: none;
+  }
+
+  .laser-button[aria-disabled="true"],
+  #dash-button[aria-disabled="true"] {
+    border-color: GrayText;
+    color: GrayText;
+    opacity: 1;
+  }
+}

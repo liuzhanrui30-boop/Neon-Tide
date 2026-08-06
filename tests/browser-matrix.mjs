@@ -7,6 +7,7 @@ const CDP_PORT = Number(process.env.CDP_PORT || 9333);
 const WALL_STALL_MS = Number(process.env.WALL_STALL_MS || 1200);
 const CDP_HTTP = `http://127.0.0.1:${CDP_PORT}`;
 const REALM_SCREENSHOT_DIR = process.env.REALM_SCREENSHOT_DIR || '';
+const REALM_SCREENSHOT_ONLY = process.env.REALM_SCREENSHOT_ONLY === '1';
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -296,16 +297,19 @@ class GamePage {
   async waitForPage(expression, timeoutMs = 10000) {
     const deadline = Date.now() + timeoutMs;
     let lastValue;
+    let lastError = null;
     while (Date.now() < deadline) {
       try {
         lastValue = await this.evaluate(`Boolean(${expression})`);
         if (lastValue) return true;
-      } catch {
+        lastError = null;
+      } catch (error) {
+        lastError = error?.message || String(error);
         // The execution context can briefly disappear during Vite reloads.
       }
       await sleep(25);
     }
-    throw new Error(`${this.name}: page condition timed out: ${expression} (last=${lastValue})`);
+    throw new Error(`${this.name}: page condition timed out: ${expression} (last=${lastValue}; error=${lastError})`);
   }
 
   async scopeEvaluate(expression, { stallMs = 0 } = {}) {
@@ -353,8 +357,31 @@ class GamePage {
     return this.scopeEvaluate(`(()=>{${aliases.join(';')};${body}})()`, { stallMs });
   }
 
+  async waitForGame(body, predicate, timeoutMs = 1500) {
+    const deadline = Date.now() + timeoutMs;
+    let snapshot;
+    while (Date.now() < deadline) {
+      snapshot = await this.gameEvaluate(body);
+      if (predicate(snapshot)) return snapshot;
+      await sleep(25);
+    }
+    throw new Error(`${this.name}: game condition timed out (last=${JSON.stringify(snapshot)})`);
+  }
+
   async click(selector) {
     await this.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`, { idempotent: false });
+  }
+
+  async tap(selector) {
+    const point = await this.evaluate(`(()=>{
+      const rect=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+    })()`);
+    await this.client.send('Input.dispatchTouchEvent', {
+      type: 'touchStart',
+      touchPoints: [{ x: point.x, y: point.y, radiusX: 2, radiusY: 2, force: 1, id: 1 }],
+    });
+    await this.client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   }
 
   async dispatchKey(type, key, code, extra = {}) {
@@ -427,6 +454,77 @@ async function withPage(name, options, callback) {
   }
 }
 
+async function captureNaturalRealmScreenshots() {
+  assert.ok(REALM_SCREENSHOT_DIR, 'REALM_SCREENSHOT_DIR is required for release screenshots');
+  const captures = [
+    { elapsed:12, stage:0, file:'v2.2-abyss.png' },
+    { elapsed:44, stage:1, file:'v2.2-data-city.png' },
+    { elapsed:78, stage:2, file:'v2.2-star-forge.png' },
+    { elapsed:108, stage:3, file:'v2.2-void-cathedral.png' },
+  ];
+
+  await withPage('release-realm-screenshots', {}, async (page) => {
+    page.requireDev('natural release screenshot automation');
+    await page.startGame();
+    await page.gameEvaluate(`
+      const captureAutomation={
+        timer:null,
+        snapshot:()=>({
+          elapsed:$state.elapsed,stage:$state.stageIndex,mode:$state.mode,health:$state.health,
+          enemies:$enemies.filter((enemy)=>!enemy.dead).length,
+          projectiles:projectiles.filter((projectile)=>projectile.active).length,
+          hazards:$state.stats.activeHazards,
+          environment:{type:environmentFrame.type,phase:environmentFrame.phase,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length},
+          player:[Number($player.position.x.toFixed(2)),Number($player.position.y.toFixed(2))],
+          realm:document.documentElement.dataset.realm,
+        }),
+        stop:()=>{window.clearInterval(captureAutomation.timer);input.keys.clear();},
+      };
+      captureAutomation.timer=window.setInterval(()=>{
+        $state.health=$state.maxHealth;
+        $state.hurtInvuln=Math.max($state.hurtInvuln,0.45);
+        if($state.mode!=='playing') return;
+        const waypoints=[[-3,2],[3,2],[3,-2],[-3,-2]];
+        const target=waypoints[Math.floor($state.elapsed/6)%waypoints.length];
+        input.keys.clear();
+        if($player.position.x<target[0]-0.35) input.keys.add('d');
+        if($player.position.x>target[0]+0.35) input.keys.add('a');
+        if($player.position.y<target[1]-0.35) input.keys.add('w');
+        if($player.position.y>target[1]+0.35) input.keys.add('s');
+      },100);
+      Object.defineProperty(globalThis,'__NEON_TIDE_RELEASE_CAPTURE__',{configurable:true,value:captureAutomation});
+      return captureAutomation.snapshot();
+    `);
+
+    const deadline = Date.now() + 140000;
+    for (const capture of captures) {
+      let snapshot;
+      while (Date.now() < deadline) {
+        const upgradeOpen = await page.evaluate(`!document.querySelector('#upgrade-panel').hidden`);
+        if (upgradeOpen) {
+          await page.click('.upgrade-option');
+          await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
+          await page.waitForPage(`document.activeElement?.tagName === 'CANVAS'`);
+        }
+        snapshot = await page.evaluate(`globalThis.__NEON_TIDE_RELEASE_CAPTURE__.snapshot()`);
+        assert.ok(!['gameover','victory'].includes(snapshot.mode), `release capture ended early: ${JSON.stringify(snapshot)}`);
+        if (snapshot.elapsed >= capture.elapsed) break;
+        await sleep(40);
+      }
+      assert.ok(snapshot && snapshot.elapsed >= capture.elapsed && snapshot.elapsed < capture.elapsed + 0.8,
+        `release capture missed ${capture.elapsed}s: ${JSON.stringify(snapshot)}`);
+      assert.equal(snapshot.stage, capture.stage, `release capture realm mismatch: ${JSON.stringify(snapshot)}`);
+      assert.equal(snapshot.mode, 'playing', `release capture was not live combat: ${JSON.stringify(snapshot)}`);
+      assert.ok(snapshot.enemies > 0, `release capture had no active enemies: ${JSON.stringify(snapshot)}`);
+      const filePath = path.join(REALM_SCREENSHOT_DIR, capture.file);
+      await page.captureScreenshot(filePath);
+      console.log(`# screenshot ${filePath} elapsed=${snapshot.elapsed.toFixed(3)} stage=${snapshot.stage} enemies=${snapshot.enemies} projectiles=${snapshot.projectiles} environment=${snapshot.environment.type}/${snapshot.environment.phase}`);
+    }
+
+    await page.evaluate(`globalThis.__NEON_TIDE_RELEASE_CAPTURE__.stop();delete globalThis.__NEON_TIDE_RELEASE_CAPTURE__`);
+  });
+}
+
 async function desktopCoreScenario() {
   await withPage('desktop-core', {}, async (page) => {
     const load = await page.evaluate(`(()=>{
@@ -460,8 +558,10 @@ async function desktopCoreScenario() {
       return true;
     `);
     await page.pressKey(' ', 'Space');
-    await sleep(80);
-    const initialSpace = await page.gameEvaluate('return {mode:$state.mode,sequence:$state.dashSequence}');
+    const initialSpace = await page.waitForGame(
+      'return {mode:$state.mode,sequence:$state.dashSequence}',
+      (snapshot) => snapshot.mode === 'playing' && snapshot.sequence === 1,
+    );
     assert.deepEqual(initialSpace, { mode: 'playing', sequence: 1 }, 'Space after starting did not produce exactly one gameplay dash');
 
     const before = await page.gameEvaluate('return $state.elapsed');
@@ -493,8 +593,52 @@ async function desktopCoreScenario() {
     assert.equal(unmuted.muted, false);
     assert.ok(unmuted.next === 0 || unmuted.next >= unmuted.now - 0.002, `stale beat ${unmuted.next} < ${unmuted.now}`);
 
+    const activeBeforePause = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=0;scheduleEnvironmentForStage();$state.environmentTimer=0;applyEnvironment(1,0.05);
+      spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
+      $state.weaponEnergy=100;$state.laserState='ready';startLaserCharge();updateLaser(LASER_RULES.chargeDuration);
+      $audio.update($state.elapsed,0.8,'playing',{laserReady:false,bossPhase:1});
+      return {
+        projectile:projectiles.filter((projectile)=>projectile.active).length,
+        laser:$state.laserState,laserVisible:$player.laser.group.visible,
+        environmentElapsed:$state.environmentElapsed,environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+      };
+    `);
+    assert.ok(activeBeforePause.projectile > 0 && activeBeforePause.laser === 'active' && activeBeforePause.laserVisible,
+      `pause probe did not activate projectile/laser: ${JSON.stringify(activeBeforePause)}`);
+    assert.ok(activeBeforePause.environmentElapsed > 0 && activeBeforePause.environmentVisuals > 0,
+      `pause probe did not activate environment: ${JSON.stringify(activeBeforePause)}`);
+
     await page.dispatchKey('rawKeyDown', 'p', 'KeyP');
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`);
+    const pausedFreeze = await page.gameEvaluate(`return {
+      mode:$state.mode,elapsed:$state.elapsed,
+      audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
+      projectiles:projectiles.filter((projectile)=>projectile.active).length,
+      laser:$state.laserState,laserVisible:$player.laser.group.visible,
+      environmentElapsed:$state.environmentElapsed,environmentTimer:String($state.environmentTimer),
+      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+    }`);
+    await sleep(140);
+    const pausedFreezeAfter = await page.gameEvaluate(`return {
+      mode:$state.mode,elapsed:$state.elapsed,
+      audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
+      projectiles:projectiles.filter((projectile)=>projectile.active).length,
+      laser:$state.laserState,laserVisible:$player.laser.group.visible,
+      environmentElapsed:$state.environmentElapsed,environmentTimer:String($state.environmentTimer),
+      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+    }`);
+    assert.deepEqual(pausedFreeze, pausedFreezeAfter, 'pause allowed music, environment, projectile, or laser state to advance');
+    assert.deepEqual({
+      mode:pausedFreeze.mode,audio:pausedFreeze.audio,projectiles:pausedFreeze.projectiles,
+      laser:pausedFreeze.laser,laserVisible:pausedFreeze.laserVisible,
+      environmentElapsed:pausedFreeze.environmentElapsed,environmentTimer:pausedFreeze.environmentTimer,
+      environmentVisuals:pausedFreeze.environmentVisuals,
+    }, {
+      mode:'paused',audio:{initialized:false,next:0,sources:0},projectiles:0,
+      laser:'idle',laserVisible:false,environmentElapsed:0,environmentTimer:'Infinity',environmentVisuals:0,
+    });
     await page.dispatchRepeatedKey('p', 'KeyP', 3);
     assert.equal(await page.evaluate(`document.querySelector('#overlay').classList.contains('visible') && document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`), true);
     await page.dispatchKey('keyUp', 'p', 'KeyP');
@@ -545,10 +689,8 @@ async function desktopCoreScenario() {
       return true;
     `);
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`);
-    await sleep(100);
-    if (!await page.evaluate(`document.activeElement?.classList.contains('upgrade-option')`)) {
-      await page.pressKey('Tab', 'Tab');
-    }
+    await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(()=>resolve(true))))`);
+    await page.waitForPage(`document.activeElement?.classList.contains('upgrade-option')`);
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 0);
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 2);
@@ -567,20 +709,49 @@ async function desktopCoreScenario() {
 
 async function briefingAndLaserUiScenario() {
   await withPage('briefing-and-laser-ui', {}, async (page) => {
-    const briefing = await page.evaluate(`({
-      cards:document.querySelectorAll('#briefing-grid .mechanic-card').length,
-      journey:document.querySelectorAll('#journey-strip li').length,
-      copy:document.querySelector('#overlay-copy').textContent,
-      energyLabel:document.querySelector('#mission-panel small').textContent,
-      laserButton:Boolean(document.querySelector('#laser-button')),
-      hullLabel:document.querySelector('.health-card > span').textContent,
-    })`);
-    assert.equal(briefing.cards, 4);
+    const briefing = await page.evaluate(`(()=>{
+      const overlay=document.querySelector('#overlay');
+      const copy=document.querySelector('#overlay-copy').textContent.replace(/\s+/g,' ').trim();
+      const energy=document.querySelector('.energy-track');
+      return {
+        cards:Array.from(document.querySelectorAll('#briefing-grid .mechanic-card')).map((card)=>({
+          heading:card.querySelector('h2')?.textContent.trim(),copy:card.querySelector('p')?.textContent.replace(/\s+/g,' ').trim(),
+        })),
+        journey:document.querySelectorAll('#journey-strip li').length,
+        copy,
+        energyLabel:document.querySelector('#mission-panel small').textContent,
+        energyAria:{
+          role:energy.getAttribute('role'),min:energy.getAttribute('aria-valuemin'),max:energy.getAttribute('aria-valuemax'),
+          now:energy.getAttribute('aria-valuenow'),text:energy.getAttribute('aria-valuetext'),
+        },
+        laserButton:Boolean(document.querySelector('#laser-button')),
+        laserDisabled:document.querySelector('#laser-button').getAttribute('aria-disabled'),
+        hullLabel:document.querySelector('.health-card > span').textContent,
+        dialog:{role:overlay.getAttribute('role'),modal:overlay.getAttribute('aria-modal'),labelledby:overlay.getAttribute('aria-labelledby'),describedby:overlay.getAttribute('aria-describedby')},
+        liveRegions:[document.querySelector('#stage-banner'),document.querySelector('#toast'),document.querySelector('#formation-label')].map((element)=>element.getAttribute('aria-live')),
+        visibleText:document.body.innerText,
+      };
+    })()`);
+    assert.equal(briefing.cards.length, 4);
     assert.equal(briefing.journey, 4);
     assert.match(briefing.copy, /潮汐光矛/);
+    assert.match(briefing.copy, /坚持 100 秒/);
+    assert.ok(briefing.copy.length >= 35 && briefing.copy.length <= 120, `briefing copy length ${briefing.copy.length}`);
+    assert.deepEqual(briefing.cards.map(({ heading })=>heading), ['Move','Phase Dash','Light Lance','Hull']);
+    assert.ok(briefing.cards.every(({ copy })=>copy.length >= 8), `briefing card copy incomplete: ${JSON.stringify(briefing.cards)}`);
     assert.doesNotMatch(briefing.energyLabel, /护盾|OVERDRIVE/);
+    assert.doesNotMatch(briefing.visibleText, /护盾|OVERDRIVE/i);
+    assert.deepEqual(briefing.energyAria, { role:'progressbar',min:'0',max:'100',now:'0',text:'光矛充能 0%' });
     assert.equal(briefing.laserButton, true);
+    assert.equal(briefing.laserDisabled, 'true');
     assert.equal(briefing.hullLabel, '船体');
+    assert.deepEqual(briefing.dialog, { role:'dialog',modal:'true',labelledby:'overlay-title',describedby:'overlay-copy' });
+    assert.deepEqual(briefing.liveRegions, ['polite','polite','polite']);
+    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
+    await page.pressKey('Tab', 'Tab');
+    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
+    await page.pressKey('Tab', 'Tab', { modifiers: 8 });
+    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
   });
 
   await withPage('briefing-and-laser-phone', {
@@ -604,6 +775,35 @@ async function briefingAndLaserUiScenario() {
         `${name} outside viewport ${JSON.stringify(rect)}`);
     }
     assert.deepEqual(layout.overlaps, [0, 0, 0, 0, 0, 0], `phone controls overlap ${JSON.stringify(layout)}`);
+
+    await page.startGame();
+    page.requireDev('touch light lance input and energy reset probe');
+    const unavailable = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      $state.weaponEnergy=99;$state.laserState='idle';input.laserBuffer=0;
+      const shots=$state.stats.laserShots;
+      return {energy:$state.weaponEnergy,state:$state.laserState,shots};
+    `);
+    await page.tap('#laser-button');
+    await sleep(45);
+    const unavailableAfter = await page.gameEvaluate(`return {
+      energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,buffer:input.laserBuffer,
+      disabled:dom.laserButton.getAttribute('aria-disabled'),progress:dom.weaponEnergyFill.parentElement.getAttribute('aria-valuenow'),
+      progressText:dom.weaponEnergyFill.parentElement.getAttribute('aria-valuetext'),
+    }`);
+    assert.deepEqual(unavailable, { energy:99,state:'idle',shots:0 });
+    assert.deepEqual(unavailableAfter, { energy:99,state:'idle',shots:0,buffer:0,disabled:'true',progress:'99',progressText:'光矛充能 99%' });
+
+    await page.gameEvaluate(`$state.weaponEnergy=100;$state.laserState='ready';input.laserBuffer=0;return true`);
+    await page.waitForPage(`document.querySelector('#laser-button').getAttribute('aria-disabled')==='false'`);
+    await page.tap('#laser-button');
+    await sleep(45);
+    const touchStarted = await page.gameEvaluate(`return {
+      energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,buffer:input.laserBuffer,
+      disabled:dom.laserButton.getAttribute('aria-disabled'),progress:dom.weaponEnergyFill.parentElement.getAttribute('aria-valuenow'),
+    }`);
+    assert.deepEqual(touchStarted, { energy:0,state:'charge',shots:1,buffer:0,disabled:'true',progress:'0' });
   });
 }
 
@@ -951,10 +1151,15 @@ async function naturalLightLanceLifecycleScenario() {
       input.dashBuffer=0;input.laserBuffer=0;$player.velocity.set(0,0);return true;
     `);
     await page.pressKey(' ', 'Space');
-    await sleep(20);
+    await page.waitForGame(
+      'return {dash:$state.dashTimer,invuln:$state.dashInvulnTimer}',
+      (snapshot) => snapshot.dash > 0 && snapshot.invuln > 0,
+    );
     await page.pressKey('e', 'KeyE');
-    await sleep(20);
-    const adjacent = await page.gameEvaluate(`return {energy:$state.weaponEnergy,state:$state.laserState,dash:$state.dashTimer,invuln:$state.dashInvulnTimer}`);
+    const adjacent = await page.waitForGame(
+      'return {energy:$state.weaponEnergy,state:$state.laserState,dash:$state.dashTimer,invuln:$state.dashInvulnTimer,buffer:input.laserBuffer}',
+      (snapshot) => snapshot.buffer === 0,
+    );
     assert.equal(adjacent.energy, 100);
     assert.equal(adjacent.state, 'ready');
     assert.ok(adjacent.dash > 0 && adjacent.invuln > 0, `adjacent dash was not retained: ${JSON.stringify(adjacent)}`);
@@ -998,6 +1203,9 @@ function layoutSnapshotExpression() {
       missionJoystickOverlap:overlap(mission,joystick),
       missionDashOverlap:overlap(mission,dash),
       missionLaserOverlap:overlap(mission,laser),
+      joystickDashOverlap:overlap(joystick,dash),
+      joystickLaserOverlap:overlap(joystick,laser),
+      dashLaserOverlap:overlap(dash,laser),
       objective:document.querySelector('#mission-objective').textContent.trim(),
       energyVisible:getComputedStyle(document.querySelector('.energy-track')).display!=='none',
       laserStatusVisible:getComputedStyle(document.querySelector('#laser-status')).display!=='none',
@@ -1019,6 +1227,9 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
     assert.equal(layout.missionJoystickOverlap, 0, `${name}: mission overlaps joystick by ${layout.missionJoystickOverlap}px²`);
     assert.equal(layout.missionDashOverlap, 0, `${name}: mission overlaps dash by ${layout.missionDashOverlap}px²`);
     assert.equal(layout.missionLaserOverlap, 0, `${name}: mission overlaps laser by ${layout.missionLaserOverlap}px²`);
+    assert.equal(layout.joystickDashOverlap, 0, `${name}: joystick overlaps dash by ${layout.joystickDashOverlap}px²`);
+    assert.equal(layout.joystickLaserOverlap, 0, `${name}: joystick overlaps laser by ${layout.joystickLaserOverlap}px²`);
+    assert.equal(layout.dashLaserOverlap, 0, `${name}: dash overlaps laser by ${layout.dashLaserOverlap}px²`);
     for (const [elementName, rect] of [['mission', layout.mission], ['joystick', layout.joystick], ['dash', layout.dash], ['laser', layout.laser]]) {
       assert.ok(rect.left >= -0.5 && rect.top >= -0.5 && rect.right <= width + 0.5 && rect.bottom <= height + 0.5,
         `${name}: ${elementName} outside viewport ${JSON.stringify(rect)}`);
@@ -1376,7 +1587,7 @@ async function realmHazardsAndAttackVariantsScenario() {
       const mine=createMine(new THREE.Vector2(-3,3));mine.stateTimer=10;mine.velocity.set(0,0);
       const lancer=createLancer(new THREE.Vector2(-3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
       const shard=spawnShard(new THREE.Vector2(-7,-4));shard.velocity.set(0,0);
-      $state.environmentActive=true;$state.environmentElapsed=3.8;$state.environmentTimer=0;
+      $state.environmentActive=true;$state.environmentElapsed=3.4;$state.environmentTimer=0;
       environmentFrame=getEnvironmentFrame('abyss',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);
       return {player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x};
     `);
@@ -1390,7 +1601,7 @@ async function realmHazardsAndAttackVariantsScenario() {
     for(const body of ['player','mine','lancer','shard']) assert.ok(currentMoved[body]>currentStart[body], `current did not move ${body}: ${JSON.stringify({currentStart,currentMoved})}`);
     assert.ok(Math.abs(currentMoved.mineAi)<1e-9&&Math.abs(currentMoved.lancerAi)<1e-9, `current leaked into AI velocity: ${JSON.stringify(currentMoved)}`);
     assert.ok(currentMoved.mineEnvironment>0&&currentMoved.lancerEnvironment>0, `current environment velocity missing: ${JSON.stringify(currentMoved)}`);
-    await sleep(180);
+    await sleep(650);
     const currentEnded = await page.gameEvaluate(`
       const mine=$enemies.find((enemy)=>enemy.type==='mine'),lancer=$enemies.find((enemy)=>enemy.type==='lancer');
       return {active:$state.environmentActive,mine:mine.group.position.x,lancer:lancer.group.position.x,mineAi:mine.velocity.x,lancerAi:lancer.velocity.x,
@@ -1414,7 +1625,7 @@ async function realmHazardsAndAttackVariantsScenario() {
       const mine=createMine(new THREE.Vector2(3,3));mine.stateTimer=10;mine.velocity.set(0,0);
       const lancer=createLancer(new THREE.Vector2(3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
       const shard=spawnShard(new THREE.Vector2(7,-4));shard.velocity.set(0,0);
-      $state.environmentActive=true;$state.environmentElapsed=4;$state.environmentTimer=0;
+      $state.environmentActive=true;$state.environmentElapsed=3.5;$state.environmentTimer=0;
       environmentFrame=getEnvironmentFrame('star-forge',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);
       return {player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x};
     `);
@@ -1512,7 +1723,22 @@ async function reducedMotionScenario() {
     await page.startGame();
     assert.equal(await page.evaluate(`matchMedia('(prefers-reduced-motion: reduce)').matches`), true);
     assert.equal(await page.gameEvaluate('return $state.reducedMotion'), true);
-    assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('.signal-mark i')).animationName`), 'none');
+    const reducedCss = await page.evaluate(`(()=>{
+      document.querySelector('#time-value').classList.add('warning');
+      document.querySelector('#laser-button').classList.add('ready');
+      document.querySelector('#stage-banner').classList.add('show');
+      const style=(selector)=>getComputedStyle(document.querySelector(selector));
+      return {
+        signal:style('.signal-mark i').animationName,
+        timer:style('#time-value').animationName,
+        laser:style('#laser-button').animationName,
+        bannerTransition:style('#stage-banner').transitionDuration,
+        overlayTransition:style('#overlay').transitionDuration,
+      };
+    })()`);
+    assert.deepEqual(reducedCss, {
+      signal:'none',timer:'none',laser:'none',bannerTransition:'0s',overlayTransition:'0s',
+    });
 
     const warnings = await page.gameEvaluate(`
       clearWorldEntities();
@@ -1601,6 +1827,37 @@ async function realmArtDirectionsScenario() {
   await withPage('realm-art-directions-desktop', {}, async (page) => {
     page.requireDev('realm crossfade, boundary, reset, banner, and lifecycle probes');
     await page.startGame();
+
+    const realmContracts = await page.gameEvaluate(`
+      const realmData=REALMS.map((realm)=>({
+        id:realm.id,start:realm.start,end:realm.end,cssTheme:realm.cssTheme,bpm:realm.music.bpm,environment:realm.environment.type,
+      }));
+      const current=getEnvironmentFrame('abyss',1);
+      const data=getEnvironmentFrame('data-city',1);
+      const gravity=getEnvironmentFrame('star-forge',1.1);
+      const disabled=getEnvironmentFrame('void-cathedral',110);
+      return {
+        realmData,
+        rules:{
+          current:{type:current.type,phase:current.phase,force:getCurrentForce(current,{x:3,y:2})},
+          data:{type:data.type,phase:data.phase,penalty:getDataLanePenalty(data,{x:0,y:0})},
+          gravity:{type:gravity.type,phase:gravity.phase,force:getGravityForce(gravity,{x:2,y:0})},
+          disabled:{type:disabled.type,phase:disabled.phase},
+        },
+      };
+    `);
+    assert.deepEqual(realmContracts.realmData, [
+      {id:'abyss',start:0,end:30,cssTheme:'abyss',bpm:92,environment:'current'},
+      {id:'data-city',start:30,end:64,cssTheme:'data-city',bpm:116,environment:'data-lane'},
+      {id:'star-forge',start:64,end:100,cssTheme:'star-forge',bpm:132,environment:'gravity-well'},
+      {id:'void-cathedral',start:100,end:126,cssTheme:'void-cathedral',bpm:140,environment:'none'},
+    ]);
+    assert.deepEqual(realmContracts.rules, {
+      current:{type:'current',phase:'active',force:{x:0.7,y:0}},
+      data:{type:'data-lane',phase:'active',penalty:0.35},
+      gravity:{type:'gravity-well',phase:'active',force:{x:-0.5,y:0}},
+      disabled:{type:'none',phase:'disabled'},
+    });
 
     const crossfade = await page.gameEvaluate(`
       const controller=realmBackgrounds;
@@ -2060,60 +2317,6 @@ async function realmArtDirectionsScenario() {
     }
     assert.deepEqual(naturalEntries.map((entry)=>entry.dataset), expectedDatasets);
 
-    if (REALM_SCREENSHOT_DIR) {
-      for (let index = 0; index < 4; index += 1) {
-        const setup = await page.gameEvaluate(`
-          clearWorldEntities();
-          closeDialogs({restoreFocus:false});
-          $state.mode='paused';
-          $state.stageIndex=${index};
-          $state.elapsed=[12,42,76,108][${index}];
-          document.documentElement.dataset.realm=REALMS[${index}].cssTheme;
-          setPalette(${index},true);
-          realmBackgrounds.setRealm(${index},true);
-          realmBackgrounds.update({elapsed:$state.elapsed,dt:0,reducedMotion:false});
-          dom.stageBanner.classList.remove('show');
-          $state.stageBannerTimer=0;
-          dom.toast.classList.remove('show');
-          $state.toastTimer=0;
-          dom.combo.classList.remove('show');
-          $player.position.set(-2.2,-1.4);
-          $player.group.position.set($player.position.x,$player.position.y,0);
-          const lancer=spawnEnemy('lancer',new THREE.Vector2(3.2,2.1));
-          const chaser=spawnEnemy('chaser',new THREE.Vector2(-4.6,2.8));
-          const toPlayer=$player.position.clone().sub(lancer.group.position).normalize();
-          lancer.beamDirection.copy(toPlayer);
-          lancer.group.rotation.z=Math.atan2(toPlayer.y,toPlayer.x)-Math.PI/2;
-          lancer.visuals.line.visible=true;
-          setEnemyState(lancer,'telegraph',0.7,0.7);
-          updateLancer(lancer,0.2,toPlayer);
-          return {
-            enemies:$enemies.length,
-            lancerType:lancer.type,
-            telegraph:lancer.visuals.line.visible && lancer.state==='telegraph',
-            chaserType:chaser.type,
-            bannerShown:dom.stageBanner.classList.contains('show'),
-            toastShown:dom.toast.classList.contains('show'),
-            overlayShown:dom.overlay.classList.contains('visible'),
-          };
-        `);
-        assert.deepEqual(setup, {
-          enemies:2,
-          lancerType:'lancer',
-          telegraph:true,
-          chaserType:'chaser',
-          bannerShown:false,
-          toastShown:false,
-          overlayShown:false,
-        });
-        await sleep(260);
-        await page.captureScreenshot(path.join(
-          REALM_SCREENSHOT_DIR,
-          `realm-combat-${String(index + 1).padStart(2, '0')}-${['abyss','data-city','star-forge','void-cathedral'][index]}.png`,
-        ));
-      }
-    }
-
     const lifecycle = await page.gameEvaluate(`
       const controller=realmBackgrounds;
       const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
@@ -2366,6 +2569,41 @@ async function runtimeGuardScenario() {
         velocityFinite:Boolean(enemy&&Number.isFinite(enemy.environmentVelocity.x)&&Number.isFinite(enemy.environmentVelocity.y))};
     `);
     assert.deepEqual(environmentVelocityRepair, { present:true,positionFinite:true,velocityFinite:true });
+    const finiteRuntime = await page.gameEvaluate(`
+      const finiteObject=(object)=>[
+        object.position.x,object.position.y,object.position.z,
+        object.rotation.x,object.rotation.y,object.rotation.z,
+        object.scale.x,object.scale.y,object.scale.z,
+      ].every(Number.isFinite);
+      const finiteMaterials=(root)=>{
+        let valid=true;
+        root.traverse((object)=>{
+          if(!finiteObject(object)) valid=false;
+          const materials=(Array.isArray(object.material)?object.material:[object.material]).filter(Boolean);
+          if(materials.some((material)=>'opacity' in material&&!Number.isFinite(material.opacity))) valid=false;
+        });
+        return valid;
+      };
+      const backgroundRoot=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const audioSnapshot=$audio.getDebugSnapshot();
+      return {
+        player:finiteObject($player.group)&&[$player.position.x,$player.position.y,$player.velocity.x,$player.velocity.y].every(Number.isFinite),
+        projectiles:projectiles.every((projectile)=>!projectile.active||(
+          finiteObject(projectile.mesh)&&Number.isFinite(projectile.velocity.x)&&Number.isFinite(projectile.velocity.y)
+          &&Number.isFinite(projectile.life)&&Number.isFinite(projectile.mesh.material.opacity)
+        )),
+        background:Boolean(backgroundRoot)&&finiteMaterials(backgroundRoot),
+        sceneMaterials:finiteMaterials(scene),
+        audio:[audioSnapshot.masterGain,audioSnapshot.musicBase,audioSnapshot.musicTarget,audioSnapshot.bpm,audioSnapshot.gridStep,audioSnapshot.activeMusicSources,$audio.nextBeatTime].every(Number.isFinite),
+        environment:[
+          $state.environmentTimer,$state.environmentElapsed,$state.environmentSeed,$state.environmentSequence,
+          environmentFrame.elapsed,environmentFrame.telegraph,environmentFrame.activeDuration,
+        ].every(Number.isFinite),
+      };
+    `);
+    assert.deepEqual(finiteRuntime, {
+      player:true,projectiles:true,background:true,sceneMaterials:true,audio:true,environment:true,
+    });
     const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};runtimeHooks.applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
     assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
@@ -2440,6 +2678,8 @@ async function replayCleanupScenario() {
         toastTimer:$state.toastTimer,toastShow:dom.toast.classList.contains('show'),toastText:dom.toast.textContent,
         bannerTimer:$state.stageBannerTimer,bannerShow:dom.stageBanner.classList.contains('show'),bannerText:dom.stageBannerTitle.textContent,bannerTone:dom.stageBanner.dataset.tone ?? null,
         enemies:$enemies.length,shards:shards.length,particles:particles.length,ripples:ripples.length,trails:trails.length,floating:floatingTexts.length,
+        projectiles:projectiles.filter((projectile)=>projectile.active).length,hazards:$state.stats.activeHazards,
+        laserVisible:$player.laser.group.visible,environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
         score:$state.score,bossDeadline:$state.bossDeadline,bossSpawned:$state.bossSpawned,maxHealth:$state.maxHealth,health:$state.health,
       };
     `);
@@ -2460,6 +2700,10 @@ async function replayCleanupScenario() {
       ripples: 0,
       trails: 0,
       floating: 0,
+      projectiles: 0,
+      hazards: 0,
+      laserVisible: false,
+      environmentVisuals: 0,
       score: 0,
       bossDeadline: null,
       bossSpawned: false,
@@ -2536,26 +2780,32 @@ async function victoryScenario() {
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
     assert.equal(boss.bossHp, 30);
     assert.equal(await page.evaluate(`document.querySelector('.time-card > span').textContent`), '首领窗口');
-    assert.equal(await page.evaluate(`document.querySelector('#time-value').textContent`), '00:26');
+    const bossHudTime = await page.evaluate(`document.querySelector('#time-value').textContent`);
+    assert.match(bossHudTime, /^00:(?:25|26)$/, `boss HUD did not enter the 26-second window: ${bossHudTime}`);
 
     const settled = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
       boss.hp=5;
       $state.dashSequence+=1;
       damageEnemy(boss);
-      return {mode:$state.mode,reason:$state.terminalReason,finished:$state.runFinished,score:$state.score};
+      return {
+        mode:$state.mode,reason:$state.terminalReason,finished:$state.runFinished,score:$state.score,
+        enemies:$enemies.length,projectiles:projectiles.filter((projectile)=>projectile.active).length,hazards:$state.stats.activeHazards,
+        laserVisible:$player.laser.group.visible,environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+      };
     `);
     assert.equal(settled.mode, 'victory');
     assert.equal(settled.reason, 'bossDestroyed');
     assert.equal(settled.finished, true);
+    assert.deepEqual({
+      enemies:settled.enemies,projectiles:settled.projectiles,hazards:settled.hazards,
+      laserVisible:settled.laserVisible,environmentVisuals:settled.environmentVisuals,
+    }, { enemies:0,projectiles:0,hazards:0,laserVisible:false,environmentVisuals:0 });
     await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
-    // A debugger pause can defer the modal's requestAnimationFrame focus callback.
-    // Let that callback settle, then use the one-button trap as a deterministic
-    // fallback before asserting the terminal focus contract.
-    await sleep(100);
-    if (await page.evaluate(`document.activeElement?.id !== 'primary-button'`)) {
-      await page.pressKey('Tab', 'Tab');
-    }
+    // The terminal dialog has one action. Tabbing must deterministically enter
+    // and remain inside that trap even if the browser deferred auto-focus.
+    await page.pressKey('Tab', 'Tab');
+    await page.waitForPage(`document.activeElement?.id === 'primary-button'`, 1500);
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
     await page.pressKey('Tab', 'Tab');
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
@@ -2574,8 +2824,15 @@ async function bossTimeoutScenario() {
     assert.equal(boss.mode, 'playing');
     await page.gameEvaluate('$state.elapsed=$state.bossDeadline+0.01;return true');
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('WINDOW CLOSED')`);
-    const terminal = await page.gameEvaluate('return {mode:$state.mode,reason:$state.terminalReason,finished:$state.runFinished}');
-    assert.deepEqual(terminal, { mode: 'gameover', reason: 'bossDeadline', finished: true });
+    const terminal = await page.gameEvaluate(`return {
+      mode:$state.mode,reason:$state.terminalReason,finished:$state.runFinished,
+      enemies:$enemies.length,projectiles:projectiles.filter((projectile)=>projectile.active).length,hazards:$state.stats.activeHazards,
+      laserVisible:$player.laser.group.visible,environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+    }`);
+    assert.deepEqual(terminal, {
+      mode:'gameover',reason:'bossDeadline',finished:true,
+      enemies:0,projectiles:0,hazards:0,laserVisible:false,environmentVisuals:0,
+    });
     const copy = await page.evaluate(`document.querySelector('#overlay-copy').textContent`);
     assert.match(copy, /终幕窗口已经关闭/);
     assert.doesNotMatch(copy, /船体已经失效/);
@@ -2593,11 +2850,13 @@ async function bossPhaseTwoScenario() {
     assert.deepEqual({ duration:timing.duration,bossStart:timing.bossStart,bossWindow:timing.bossWindow }, { duration:126,bossStart:100,bossWindow:26 });
     const paused = await page.gameEvaluate(`const before=$state.elapsed;pauseGame();return {before,mode:$state.mode}`);
     await sleep(140);
+    const pausedHeld = await page.gameEvaluate('return {elapsed:$state.elapsed,mode:$state.mode}');
+    assert.equal(pausedHeld.mode, 'paused');
+    assert.ok(Math.abs(pausedHeld.elapsed - paused.before) < 0.005, `pause advanced elapsed ${paused.before} -> ${pausedHeld.elapsed}`);
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const pausedAfter = await page.gameEvaluate('return {elapsed:$state.elapsed,mode:$state.mode}');
     assert.equal(pausedAfter.mode, 'playing');
-    assert.ok(Math.abs(pausedAfter.elapsed - paused.before) < 0.03, `pause advanced elapsed ${paused.before} -> ${pausedAfter.elapsed}`);
     const boss = await jumpToBoss(page);
     assert.equal(boss.deadline, 126);
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
@@ -2744,9 +3003,16 @@ async function bossPhaseTwoScenario() {
 
     const victory = await page.gameEvaluate(`
       const before=finishRun('victory','bossDestroyed');
-      return {accepted:before,mode:$state.mode,enemies:$enemies.length,hazards:$state.stats.activeHazards,reason:$state.terminalReason};
+      return {
+        accepted:before,mode:$state.mode,enemies:$enemies.length,hazards:$state.stats.activeHazards,reason:$state.terminalReason,
+        projectiles:projectiles.filter((projectile)=>projectile.active).length,laserVisible:$player.laser.group.visible,
+        environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+      };
     `);
-    assert.deepEqual(victory, { accepted:true, mode:'victory', enemies:0, hazards:0, reason:'bossDestroyed' });
+    assert.deepEqual(victory, {
+      accepted:true,mode:'victory',enemies:0,hazards:0,reason:'bossDestroyed',
+      projectiles:0,laserVisible:false,environmentVisuals:0,
+    });
     await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -2755,18 +3021,26 @@ async function bossPhaseTwoScenario() {
       mode:$state.mode,bossPhase:$state.stats.bossPhase,bossAttackLog:$state.stats.bossAttackLog.length,
       bossAttackTelegraphs:$state.stats.bossAttackTelegraphs.length,enemies:$enemies.length,hazards:$state.stats.activeHazards,
       bossSpawned:$state.bossSpawned,bossTriggered:$state.bossTriggered,
+      projectiles:projectiles.filter((projectile)=>projectile.active).length,laserVisible:$player.laser.group.visible,
+      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
     }`);
     assert.deepEqual(restart, {
       mode:'playing',bossPhase:1,bossAttackLog:0,bossAttackTelegraphs:0,enemies:0,hazards:0,
-      bossSpawned:false,bossTriggered:false,
+      bossSpawned:false,bossTriggered:false,projectiles:0,laserVisible:false,environmentVisuals:0,
     });
 
     const restartedBoss = await jumpToBoss(page);
     assert.equal(restartedBoss.stage, 3);
     await page.gameEvaluate('$state.elapsed=$state.bossDeadline-0.05;return $state.elapsed', { stallMs: WALL_STALL_MS });
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('WINDOW CLOSED')`);
-    const cleanup = await page.gameEvaluate('return {enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode}');
-    assert.deepEqual(cleanup, { enemies: 0, hazards: 0, mode: 'gameover' });
+    const cleanup = await page.gameEvaluate(`return {
+      enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode,
+      projectiles:projectiles.filter((projectile)=>projectile.active).length,laserVisible:$player.laser.group.visible,
+      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+    }`);
+    assert.deepEqual(cleanup, {
+      enemies:0,hazards:0,mode:'gameover',projectiles:0,laserVisible:false,environmentVisuals:0,
+    });
   });
 }
 
@@ -2836,6 +3110,21 @@ if (process.env.BROWSER_MATRIX_BREAKPOINT_CLEANUP_SELF_TEST === '1') {
     console.log('1..1');
   } catch (error) {
     console.error('not ok 1 - paused-timeout breakpoint cleanup');
+    console.error(error?.stack || error);
+    console.log('1..1');
+    process.exitCode = 1;
+  }
+} else if (REALM_SCREENSHOT_ONLY) {
+  try {
+    const versionResponse = await fetch(`${CDP_HTTP}/json/version`);
+    assert.ok(versionResponse.ok, `Chrome CDP is not available at ${CDP_HTTP}`);
+    const version = await versionResponse.json();
+    console.log(`# ${version.Browser}; app=${APP_URL}`);
+    await captureNaturalRealmScreenshots();
+    console.log('ok 1 - natural 12/44/78/108 second release screenshots');
+    console.log('1..1');
+  } catch (error) {
+    console.error('not ok 1 - natural 12/44/78/108 second release screenshots');
     console.error(error?.stack || error);
     console.log('1..1');
     process.exitCode = 1;

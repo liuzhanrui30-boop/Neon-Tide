@@ -26,7 +26,7 @@ export const COMBAT = freeze({
 });
 
 export const GAME = freeze({
-  version: '2.1.0',
+  version: '2.2.0',
   bossStart: STAGE_BOUNDARIES.at(-1),
   bossWindow: BOSS_WINDOW,
   duration: STAGE_BOUNDARIES.at(-1) + BOSS_WINDOW,
@@ -70,7 +70,7 @@ export const FORMATION_TEMPLATES = freeze({
 export const UPGRADES = freeze([
   { id: 'ion-drive', name: 'Ion Drive', description: 'Increase movement speed.', effect: 0.15 },
   { id: 'prism-core', name: 'Prism Core', description: 'Increase score multiplier.', effect: 0.2 },
-  { id: 'echo-shield', name: 'Echo Shield', description: 'Extend dash invulnerability.', effect: 0.08 },
+  { id: 'echo-shield', name: 'Phase Shell', description: 'Extend dash phase invulnerability.', effect: 0.08 },
   { id: 'magnet-field', name: 'Magnet Field', description: 'Collect pickups from farther away.', effect: 0.25 },
   { id: 'overclock', name: 'Overclock', description: 'Gain 2 more light-lance energy from each pickup.', effect: 2 },
   { id: 'repair-swarm', name: 'Repair Swarm', description: 'Restore 1 hull now and raise maximum hull to 4.', effect: 1 },

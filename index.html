@@ -19,7 +19,7 @@
 
       <header id="hud">
         <section class="brand-panel" aria-label="Neon Tide">
-          <span class="eyebrow">SIGNAL // 07</span>
+          <span class="eyebrow">BUILD // 2.2.0</span>
           <strong>NEON TIDE</strong>
           <span class="subtitle">霓虹潮汐</span>
         </section>
@@ -66,7 +66,7 @@
       <aside id="mission-panel">
         <span>当前任务</span>
         <strong id="mission-objective">坚持 100 秒，突破高压潮汐</strong>
-        <div class="energy-track"><i id="weapon-energy-fill"></i></div>
+        <div class="energy-track" role="progressbar" aria-label="光矛充能" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="光矛充能 0%"><i id="weapon-energy-fill"></i></div>
         <small><b id="weapon-energy-value">0</b>% 光矛充能</small>
         <span id="laser-status">光矛 // 未充能</span>
       </aside>
@@ -139,8 +139,8 @@
             <button class="upgrade-option" type="button">
               <span class="upgrade-number" aria-hidden="true">2</span>
               <span class="upgrade-title">过载核心</span>
-              <span class="upgrade-description">提高光核收益，让连击更快进入超载。</span>
-              <strong class="upgrade-effect">收益 +25%</strong>
+              <span class="upgrade-description">提高每枚光核的光矛充能收益。</span>
+              <strong class="upgrade-effect">每枚光核充能 +2</strong>
             </button>
             <button class="upgrade-option" type="button">
               <span class="upgrade-number" aria-hidden="true">3</span>
@@ -161,5 +161,18 @@
       </section>
     </main>
     <script type="module" src="/src/main.js"></script>
+    <script>
+      (() => {
+        const value = document.querySelector("#weapon-energy-value");
+        const progress = document.querySelector(".energy-track");
+        const syncEnergyProgress = () => {
+          const energy = Math.min(100, Math.max(0, Number(value?.textContent) || 0));
+          progress?.setAttribute("aria-valuenow", String(energy));
+          progress?.setAttribute("aria-valuetext", `光矛充能 ${energy}%`);
+        };
+        new MutationObserver(syncEnergyProgress).observe(value, { childList: true, characterData: true, subtree: true });
+        syncEnergyProgress();
+      })();
+    </script>
   </body>
 </html>
