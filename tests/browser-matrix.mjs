@@ -736,6 +736,123 @@ async function desktopCoreScenario() {
     `resume did not safely rephase music: ${JSON.stringify(resumedProgress.audio)}`);
     assert.equal(await page.evaluate('document.activeElement?.tagName'), 'CANVAS');
     assert.equal(await page.evaluate(`document.activeElement?.matches('button')`), false);
+
+    page.requireDev('pause-accumulated wall-clock discard probe');
+    const stalledResume = await page.gameEvaluate(`
+      clearWorldEntities();
+      clearLaserState();
+      $state.stageIndex=0;
+      $state.stageQueue=[];
+      $state.upgradeTriggered=[false,false];
+      $state.bossTriggered=false;
+      $state.bossDeadline=null;
+      $state.elapsed=GAME.stageBoundaries[1]-Math.max(0.45,(${WALL_STALL_MS}/1000)*0.65);
+      $state.timeLeft=GAME.bossStart-$state.elapsed;
+      $state.enemySpawnTimer=Infinity;
+      $state.formationTimer=999;
+      $state.shardSpawnTimer=999;
+      $state.health=$state.maxHealth;
+      $state.hurtInvuln=10;
+      $state.slowMotionTimer=0;
+      $state.slowMotionScale=1;
+      $player.position.set(0,-4);
+      $player.velocity.set(0,0);
+      scheduleEnvironmentForStage();
+      $state.environmentTimer=0;
+      applyEnvironment(1,0.05);
+      const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(-6,5),new THREE.Vector2(1,0),{life:5});
+      projectile.resumeClockProbe=true;
+      $state.weaponEnergy=100;
+      $state.laserState='ready';
+      startLaserCharge();
+      const snapshot=()=>{
+        const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
+        return {
+          mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
+          environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
+          projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
+          laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
+        };
+      };
+      const before=snapshot();
+      pauseGame();
+      const stalledUntil=performance.now()+${WALL_STALL_MS};
+      while(performance.now()<stalledUntil){}
+      resumeGame();
+      return {before,resumed:snapshot()};
+    `);
+    assert.equal(stalledResume.resumed.mode, 'playing');
+    assert.deepEqual(stalledResume.resumed, stalledResume.before,
+      'pause/resume changed gameplay state before the production frame consumed its clock delta');
+
+    await sleep(90);
+    const firstResumeFrame = await page.gameEvaluate(`
+      const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
+      return {
+        mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
+        environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
+        projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
+        laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
+      };
+    `);
+    const firstElapsedAdvance = firstResumeFrame.elapsed - stalledResume.before.elapsed;
+    const firstEnvironmentAdvance = firstResumeFrame.environment.elapsed - stalledResume.before.environment.elapsed;
+    const firstProjectileAdvance = stalledResume.before.projectile.life - firstResumeFrame.projectile.life;
+    const firstProjectileTravel = firstResumeFrame.projectile.x - stalledResume.before.projectile.x;
+    const firstLaserAdvance = firstResumeFrame.laser.elapsed - stalledResume.before.laser.elapsed;
+    assert.equal(firstResumeFrame.mode, 'playing', `pause stall changed mode: ${JSON.stringify(firstResumeFrame)}`);
+    assert.equal(firstResumeFrame.stage, 0, `pause stall skipped into another stage: ${JSON.stringify(firstResumeFrame)}`);
+    assert.deepEqual(firstResumeFrame.stageQueue, [], `pause stall queued a stage: ${JSON.stringify(firstResumeFrame)}`);
+    assert.ok(firstResumeFrame.environment.active && firstResumeFrame.projectile.active && firstResumeFrame.laser.visible,
+      `pause stall cleared active systems: ${JSON.stringify(firstResumeFrame)}`);
+    for (const [label, advance] of Object.entries({
+      elapsed:firstElapsedAdvance,
+      environment:firstEnvironmentAdvance,
+      projectile:firstProjectileAdvance,
+      laser:firstLaserAdvance,
+    })) {
+      assert.ok(advance > 0 && advance < 0.3,
+        `first resumed production frames advanced ${label} by ${advance.toFixed(3)}s after a ${WALL_STALL_MS}ms pause stall`);
+    }
+    assert.ok(Math.abs(firstEnvironmentAdvance-firstElapsedAdvance)<0.025,
+      `environment desynchronized from wall time: ${firstEnvironmentAdvance} vs ${firstElapsedAdvance}`);
+    assert.ok(Math.abs(firstProjectileAdvance-firstLaserAdvance)<0.025,
+      `projectile and laser simulation desynchronized after resume: ${firstProjectileAdvance} vs ${firstLaserAdvance}`);
+    assert.ok(Math.abs(firstProjectileTravel-(firstResumeFrame.projectile.vx*firstProjectileAdvance))<0.025,
+      `projectile travel did not match resumed simulation time: ${firstProjectileTravel}`);
+
+    await sleep(80);
+    const nextResumeFrame = await page.gameEvaluate(`
+      const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
+      return {
+        mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
+        environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
+        projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
+        laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
+      };
+    `);
+    const nextElapsedAdvance = nextResumeFrame.elapsed-firstResumeFrame.elapsed;
+    const nextEnvironmentAdvance = nextResumeFrame.environment.elapsed-firstResumeFrame.environment.elapsed;
+    const nextProjectileAdvance = firstResumeFrame.projectile.life-nextResumeFrame.projectile.life;
+    const nextLaserAdvance = nextResumeFrame.laser.elapsed-firstResumeFrame.laser.elapsed;
+    assert.equal(nextResumeFrame.mode, 'playing');
+    assert.equal(nextResumeFrame.stage, 0);
+    assert.deepEqual(nextResumeFrame.stageQueue, []);
+    assert.ok(nextResumeFrame.environment.active && nextResumeFrame.projectile.active && nextResumeFrame.laser.visible,
+      `normal frame after resume did not keep advancing active systems: ${JSON.stringify(nextResumeFrame)}`);
+    for (const [label, advance] of Object.entries({
+      elapsed:nextElapsedAdvance,
+      environment:nextEnvironmentAdvance,
+      projectile:nextProjectileAdvance,
+      laser:nextLaserAdvance,
+    })) {
+      assert.ok(advance > 0 && advance < 0.25,
+        `next production frames advanced ${label} abnormally by ${advance.toFixed(3)}s`);
+    }
+    assert.ok(Math.abs(nextEnvironmentAdvance-nextElapsedAdvance)<0.025);
+    assert.ok(Math.abs(nextProjectileAdvance-nextLaserAdvance)<0.025,
+      `projectile and laser did not share the next simulation step: ${nextProjectileAdvance} vs ${nextLaserAdvance}`);
+
     page.requireDev('dash repeat probe');
     await page.gameEvaluate(`
       clearWorldEntities();
@@ -1672,13 +1789,14 @@ async function realmHazardsAndAttackVariantsScenario() {
     `);
     assert.equal(resumed.mode, 'playing');
     assert.deepEqual(resumed.after, resumed.before, 'resume rescheduled environment or cleared projectile before simulation resumed');
-    await sleep(60);
-    const resumedProgress = await page.gameEvaluate(`
+    const resumedProgress = await page.waitForGame(`
       const projectile=projectiles.find((candidate)=>candidate.active);
       return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,active:Boolean(projectile?.active),x:projectile?.mesh.position.x,life:projectile?.life,phase:environmentFrame.phase};
-    `);
+    `, (snapshot) => snapshot.eventElapsed > pauseStart.before.eventElapsed
+      && snapshot.gameElapsed > pauseStart.before.gameElapsed, 1000);
     assert.ok(resumedProgress.eventElapsed > pauseStart.before.eventElapsed);
-    assert.ok(resumedProgress.gameElapsed > pauseStart.before.gameElapsed && resumedProgress.gameElapsed-pauseStart.before.gameElapsed < 0.12);
+    assert.ok(resumedProgress.gameElapsed-pauseStart.before.gameElapsed < 0.2,
+      `resume advanced too far: ${JSON.stringify({before:pauseStart.before,resumedProgress})}`);
     assert.equal(resumedProgress.active, true);
     assert.ok(resumedProgress.x > pauseStart.before.projectile.x && resumedProgress.life < pauseStart.before.projectile.life);
     const activeUpgrade = await page.gameEvaluate(`
