@@ -310,13 +310,14 @@ class GamePage {
     const evaluationNumber = this.scopeEvaluationCount;
     await this.client.send('Page.bringToFront');
     const pausedPromise = this.client.waitFor('Debugger.paused');
+    pausedPromise.catch(() => {});
     let breakpointId;
     try {
-      const breakpointPromise = this.client.send('Debugger.setBreakpoint', {
+      const breakpoint = await this.client.send('Debugger.setBreakpoint', {
         location: this.breakpointLocation,
       });
-      const [breakpoint, paused] = await Promise.all([breakpointPromise, pausedPromise]);
       ({ breakpointId } = breakpoint);
+      const paused = await pausedPromise;
       const frame = paused.callFrames.find((candidate) => candidate.functionName === 'animate') || paused.callFrames[0];
       if (stallMs > 0) await sleep(stallMs);
       const result = await this.client.send('Debugger.evaluateOnCallFrame', {
@@ -1732,22 +1733,72 @@ const scenarios = [
   ['pickup-charged light lance', chargedLightLanceScenario],
 ];
 
-let passed = 0;
-try {
-  const versionResponse = await fetch(`${CDP_HTTP}/json/version`);
-  assert.ok(versionResponse.ok, `Chrome CDP is not available at ${CDP_HTTP}`);
-  const version = await versionResponse.json();
-  console.log(`# ${version.Browser}; app=${APP_URL}`);
-  for (const [name, scenario] of scenarios) {
-    const started = Date.now();
-    await scenario();
-    passed += 1;
-    console.log(`ok ${passed} - ${name} (${Date.now() - started}ms)`);
+async function breakpointCleanupFailurePathSelfTest() {
+  const calls = [];
+  const client = {
+    send(method) {
+      calls.push(method);
+      if (method === 'Debugger.setBreakpoint') return Promise.resolve({ breakpointId: 'bp-paused-timeout' });
+      return Promise.resolve({});
+    },
+    waitFor(method) {
+      calls.push(`wait:${method}`);
+      let cancel;
+      const promise = new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error(`${method} event timed out`)), 0);
+        cancel = () => {
+          clearTimeout(timeout);
+          resolve(undefined);
+        };
+      });
+      promise.cancel = () => cancel?.();
+      return promise;
+    },
+  };
+  const page = new GamePage('breakpoint-cleanup-self-test', {}, client, {});
+  page.breakpointLocation = { scriptId: 'script-1', lineNumber: 10, columnNumber: 0 };
+  await assert.rejects(
+    page.scopeEvaluate('return true'),
+    /scope evaluation 1 failed: Debugger\.paused event timed out/,
+  );
+  assert.deepEqual(calls, [
+    'Page.bringToFront',
+    'wait:Debugger.paused',
+    'Debugger.setBreakpoint',
+    'Debugger.removeBreakpoint',
+    'Debugger.resume',
+  ]);
+}
+
+if (process.env.BROWSER_MATRIX_BREAKPOINT_CLEANUP_SELF_TEST === '1') {
+  try {
+    await breakpointCleanupFailurePathSelfTest();
+    console.log('ok 1 - paused-timeout breakpoint cleanup');
+    console.log('1..1');
+  } catch (error) {
+    console.error('not ok 1 - paused-timeout breakpoint cleanup');
+    console.error(error?.stack || error);
+    console.log('1..1');
+    process.exitCode = 1;
   }
-  console.log(`1..${scenarios.length}`);
-} catch (error) {
-  console.error(`not ok ${passed + 1} - ${scenarios[passed]?.[0] || 'browser matrix setup'}`);
-  console.error(error?.stack || error);
-  console.log(`1..${scenarios.length}`);
-  process.exitCode = 1;
+} else {
+  let passed = 0;
+  try {
+    const versionResponse = await fetch(`${CDP_HTTP}/json/version`);
+    assert.ok(versionResponse.ok, `Chrome CDP is not available at ${CDP_HTTP}`);
+    const version = await versionResponse.json();
+    console.log(`# ${version.Browser}; app=${APP_URL}`);
+    for (const [name, scenario] of scenarios) {
+      const started = Date.now();
+      await scenario();
+      passed += 1;
+      console.log(`ok ${passed} - ${name} (${Date.now() - started}ms)`);
+    }
+    console.log(`1..${scenarios.length}`);
+  } catch (error) {
+    console.error(`not ok ${passed + 1} - ${scenarios[passed]?.[0] || 'browser matrix setup'}`);
+    console.error(error?.stack || error);
+    console.log(`1..${scenarios.length}`);
+    process.exitCode = 1;
+  }
 }
