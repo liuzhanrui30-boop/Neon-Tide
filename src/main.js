@@ -3828,7 +3828,10 @@ function animate() {
   }
   const energyIntensity = ["charge", "active"].includes(state.laserState) ? 1 : state.weaponEnergy / LASER_RULES.maxEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
-  audio.update(state.elapsed, intensity, state.mode);
+  audio.update(state.elapsed, intensity, state.mode, {
+    laserReady: state.weaponEnergy >= LASER_RULES.maxEnergy,
+    bossPhase: state.stats.bossPhase,
+  });
   updateVisuals(wallDt);
   sanitizeRuntimeState();
   postProcessing?.render();
