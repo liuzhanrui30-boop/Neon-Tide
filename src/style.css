@@ -1887,8 +1887,14 @@ kbd {
   #weapon-energy-fill,
   #stage-progress,
   #boss-fill,
-  #health-pips i:not(.lost) {
+  #health-pips i:not(.empty) {
     background: Highlight;
+    box-shadow: none;
+  }
+
+  #health-pips i.empty {
+    border-color: CanvasText;
+    background: Canvas;
     box-shadow: none;
   }
 

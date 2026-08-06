@@ -184,6 +184,7 @@ export class NeonAudio {
 
   update(realTime = 0, intensity = 0, mode = 'playing', context = {}) {
     const now = this.context ? Number(this.context.currentTime) || 0 : 0;
+    this._sanitizeSchedulerState();
     this._refreshDuckState(now);
     if (mode !== 'playing') {
       this.suspendBeat();
@@ -299,6 +300,28 @@ export class NeonAudio {
       && this.context.state !== 'suspended'
       && this.context.state !== 'closed',
     );
+  }
+
+  _sanitizeSchedulerState() {
+    this.stageIndex = Math.round(clamp(this.stageIndex, 0, REALMS.length - 1));
+    if (!Number.isFinite(this._musicBase)) this._musicBase = MUSIC_LEVEL;
+    if (!Number.isFinite(this._musicTarget)) this._musicTarget = this._musicBase;
+    if (!Number.isFinite(this._duckActiveUntil)) this._duckActiveUntil = 0;
+
+    if (this._beatInitialized && !Number.isFinite(this.nextBeatTime)) {
+      this.suspendBeat();
+      return true;
+    }
+
+    if (!Number.isFinite(this.nextBeatTime)) this.nextBeatTime = 0;
+    if (!Number.isFinite(this._gridStep)) this._gridStep = 0;
+    if (!Number.isFinite(this._lastScheduledStep)) this._lastScheduledStep = 0;
+    if (!Number.isFinite(this._barIndex)) this._barIndex = 0;
+    this._gridStep = Math.max(0, Math.trunc(this._gridStep)) % GRID_STEPS_PER_BAR;
+    this._lastScheduledStep = Math.max(0, Math.trunc(this._lastScheduledStep)) % GRID_STEPS_PER_BAR;
+    this._barIndex = Math.max(0, Math.trunc(this._barIndex));
+    if (this._lastRealTime !== null && !Number.isFinite(this._lastRealTime)) this._lastRealTime = null;
+    return true;
   }
 
   _refreshDuckState(now) {

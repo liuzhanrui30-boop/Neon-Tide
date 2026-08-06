@@ -787,6 +787,43 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
   const updateCounts = [0, 0, 0, 0];
   const objectCounts = builders.map((builder) => builder.objectCount);
 
+  function sanitizeRuntime() {
+    if (disposed) return false;
+    let corrected = false;
+    root.traverse((object) => {
+      const vectors = [object.position, object.rotation, object.scale];
+      vectors.forEach((vector, vectorIndex) => {
+        if (!vector) return;
+        for (const axis of ['x', 'y', 'z']) {
+          if (Number.isFinite(vector[axis])) continue;
+          vector[axis] = object === root && vectorIndex === 0 && axis === 'z'
+            ? -5
+            : vectorIndex === 2 ? 1 : 0;
+          corrected = true;
+        }
+      });
+      const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of objectMaterials) {
+        if (!material) continue;
+        let baseOpacity = material.userData.realmBaseOpacity;
+        if (!Number.isFinite(baseOpacity)) {
+          baseOpacity = Number.isFinite(material.opacity) ? material.opacity : 1;
+          material.userData.realmBaseOpacity = THREE.MathUtils.clamp(baseOpacity, 0, 1);
+          corrected = true;
+        }
+        if (!Number.isFinite(material.opacity)) {
+          material.opacity = material.userData.realmBaseOpacity;
+          corrected = true;
+        } else {
+          const opacity = THREE.MathUtils.clamp(material.opacity, 0, 1);
+          if (opacity !== material.opacity) corrected = true;
+          material.opacity = opacity;
+        }
+      }
+    });
+    return corrected;
+  }
+
   function setTransparent(material, transparent) {
     if (material.transparent === transparent) return;
     material.transparent = transparent;
@@ -888,6 +925,7 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
 
   function update({ elapsed = 0, dt = 0, reducedMotion = false } = {}) {
     if (disposed) return false;
+    sanitizeRuntime();
     const safeElapsed = Number.isFinite(elapsed) ? elapsed : 0;
     const safeDt = Math.max(0, Number.isFinite(dt) ? dt : 0);
 
@@ -897,6 +935,7 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
       builder.update(safeElapsed, safeDt, Boolean(reducedMotion));
       restoreBuilderMaterials(builder);
       updateCounts[activeRealm] += 1;
+      sanitizeRuntime();
       return true;
     }
 
@@ -914,6 +953,7 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     applyBuilderPresentation(builders[incomingRealm], realmWeights[incomingRealm], incomingRealm);
     applyBackdropPresentation(outgoingRealm, incomingRealm, realmWeights[incomingRealm]);
     if (transition.elapsed >= REALM_TRANSITION_DURATION) completeTransition();
+    sanitizeRuntime();
     return true;
   }
 

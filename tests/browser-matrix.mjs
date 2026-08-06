@@ -8,6 +8,7 @@ const WALL_STALL_MS = Number(process.env.WALL_STALL_MS || 1200);
 const CDP_HTTP = `http://127.0.0.1:${CDP_PORT}`;
 const REALM_SCREENSHOT_DIR = process.env.REALM_SCREENSHOT_DIR || '';
 const REALM_SCREENSHOT_ONLY = process.env.REALM_SCREENSHOT_ONLY === '1';
+const BROWSER_MATRIX_SCENARIO = process.env.BROWSER_MATRIX_SCENARIO || '';
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -159,6 +160,7 @@ class GamePage {
       mobile: false,
       touch: false,
       reducedMotion: false,
+      forcedColors: false,
       ...options,
     });
     await page.#initialize();
@@ -211,10 +213,16 @@ class GamePage {
     });
     await this.client.send('Emulation.setEmulatedMedia', {
       media: 'screen',
-      features: [{
-        name: 'prefers-reduced-motion',
-        value: this.options.reducedMotion ? 'reduce' : 'no-preference',
-      }],
+      features: [
+        {
+          name: 'prefers-reduced-motion',
+          value: this.options.reducedMotion ? 'reduce' : 'no-preference',
+        },
+        {
+          name: 'forced-colors',
+          value: this.options.forcedColors ? 'active' : 'none',
+        },
+      ],
     });
 
     const loaded = this.client.waitFor('Page.loadEventFired');
@@ -370,6 +378,15 @@ class GamePage {
 
   async click(selector) {
     await this.evaluate(`document.querySelector(${JSON.stringify(selector)}).click()`, { idempotent: false });
+  }
+
+  async trustedClick(selector) {
+    const point = await this.evaluate(`(()=>{
+      const rect=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+    })()`);
+    await this.client.send('Input.dispatchMouseEvent', { type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1 });
+    await this.client.send('Input.dispatchMouseEvent', { type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1 });
   }
 
   async tap(selector) {
@@ -593,52 +610,77 @@ async function desktopCoreScenario() {
     assert.equal(unmuted.muted, false);
     assert.ok(unmuted.next === 0 || unmuted.next >= unmuted.now - 0.002, `stale beat ${unmuted.next} < ${unmuted.now}`);
 
-    const activeBeforePause = await page.gameEvaluate(`
+    const pauseTransition = await page.gameEvaluate(`
       clearWorldEntities();
       $state.stageIndex=0;scheduleEnvironmentForStage();$state.environmentTimer=0;applyEnvironment(1,0.05);
-      spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
-      $state.weaponEnergy=100;$state.laserState='ready';startLaserCharge();updateLaser(LASER_RULES.chargeDuration);
+      const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(-6,5),new THREE.Vector2(0.25,0));
+      $state.weaponEnergy=100;$state.laserState='ready';startLaserCharge();updateLaser(0.04);
       $audio.update($state.elapsed,0.8,'playing',{laserReady:false,bossPhase:1});
+      const snapshot=()=>{
+        const activeProjectile=projectiles.find((candidate)=>candidate.active);
+        const visual=Object.values(environmentVisual).find((candidate)=>candidate.group.visible);
+        return {
+          elapsed:$state.elapsed,
+          projectile:{
+            active:Boolean(activeProjectile?.active),
+            position:[activeProjectile?.mesh.position.x,activeProjectile?.mesh.position.y],
+            velocity:[activeProjectile?.velocity.x,activeProjectile?.velocity.y],
+            life:activeProjectile?.life,
+          },
+          environment:{
+            active:$state.environmentActive,elapsed:$state.environmentElapsed,timer:$state.environmentTimer,
+            phase:environmentFrame.phase,type:environmentFrame.type,frameElapsed:environmentFrame.elapsed,
+            visual:Boolean(visual),visualPosition:visual?[visual.group.position.x,visual.group.position.y,visual.group.position.z]:null,
+            visualScale:visual?[visual.group.scale.x,visual.group.scale.y,visual.group.scale.z]:null,
+            visualOpacity:visual?.meshes.map((mesh)=>mesh.material.opacity)??[],
+          },
+          laser:{
+            state:$state.laserState,elapsed:$state.laserElapsed,energy:$state.weaponEnergy,
+            direction:[$state.laserDirection.x,$state.laserDirection.y],visible:$player.laser.group.visible,
+            position:[$player.laser.group.position.x,$player.laser.group.position.y,$player.laser.group.position.z],
+            rotation:$player.laser.group.rotation.z,scale:[$player.laser.group.scale.x,$player.laser.group.scale.y,$player.laser.group.scale.z],
+            opacity:[$player.laser.halo.material.opacity,$player.laser.core.material.opacity],
+          },
+        };
+      };
+      const before=snapshot();
+      pauseGame();
       return {
-        projectile:projectiles.filter((projectile)=>projectile.active).length,
-        laser:$state.laserState,laserVisible:$player.laser.group.visible,
-        environmentElapsed:$state.environmentElapsed,environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+        before,paused:snapshot(),mode:$state.mode,input:input.laserBuffer,
+        audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
       };
     `);
-    assert.ok(activeBeforePause.projectile > 0 && activeBeforePause.laser === 'active' && activeBeforePause.laserVisible,
-      `pause probe did not activate projectile/laser: ${JSON.stringify(activeBeforePause)}`);
-    assert.ok(activeBeforePause.environmentElapsed > 0 && activeBeforePause.environmentVisuals > 0,
-      `pause probe did not activate environment: ${JSON.stringify(activeBeforePause)}`);
-
-    await page.dispatchKey('rawKeyDown', 'p', 'KeyP');
-    await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`);
-    const pausedFreeze = await page.gameEvaluate(`return {
-      mode:$state.mode,elapsed:$state.elapsed,
-      audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
-      projectiles:projectiles.filter((projectile)=>projectile.active).length,
-      laser:$state.laserState,laserVisible:$player.laser.group.visible,
-      environmentElapsed:$state.environmentElapsed,environmentTimer:String($state.environmentTimer),
-      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
-    }`);
-    await sleep(140);
-    const pausedFreezeAfter = await page.gameEvaluate(`return {
-      mode:$state.mode,elapsed:$state.elapsed,
-      audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
-      projectiles:projectiles.filter((projectile)=>projectile.active).length,
-      laser:$state.laserState,laserVisible:$player.laser.group.visible,
-      environmentElapsed:$state.environmentElapsed,environmentTimer:String($state.environmentTimer),
-      environmentVisuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
-    }`);
-    assert.deepEqual(pausedFreeze, pausedFreezeAfter, 'pause allowed music, environment, projectile, or laser state to advance');
-    assert.deepEqual({
-      mode:pausedFreeze.mode,audio:pausedFreeze.audio,projectiles:pausedFreeze.projectiles,
-      laser:pausedFreeze.laser,laserVisible:pausedFreeze.laserVisible,
-      environmentElapsed:pausedFreeze.environmentElapsed,environmentTimer:pausedFreeze.environmentTimer,
-      environmentVisuals:pausedFreeze.environmentVisuals,
-    }, {
-      mode:'paused',audio:{initialized:false,next:0,sources:0},projectiles:0,
-      laser:'idle',laserVisible:false,environmentElapsed:0,environmentTimer:'Infinity',environmentVisuals:0,
+    assert.equal(pauseTransition.before.projectile.active, true, `pause projectile setup failed: ${JSON.stringify(pauseTransition)}`);
+    assert.equal(pauseTransition.before.environment.visual, true, `pause environment setup failed: ${JSON.stringify(pauseTransition)}`);
+    assert.deepEqual({ mode:pauseTransition.mode,input:pauseTransition.input,audio:pauseTransition.audio }, {
+      mode:'paused',input:0,audio:{initialized:false,next:0,sources:0},
     });
+    assert.deepEqual(pauseTransition.paused, pauseTransition.before,
+      'entering pause cleared or rearranged projectile, environment, laser, energy, or game time');
+    await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`);
+    await sleep(140);
+    await page.dispatchKey('rawKeyDown', 'e', 'KeyE');
+    await page.dispatchKey('keyUp', 'e', 'KeyE');
+    await page.tap('#laser-button');
+    const pausedFreezeAfter = await page.gameEvaluate(`
+      const activeProjectile=projectiles.find((candidate)=>candidate.active);
+      const visual=Object.values(environmentVisual).find((candidate)=>candidate.group.visible);
+      return {
+        game:{
+          elapsed:$state.elapsed,
+          projectile:{active:Boolean(activeProjectile?.active),position:[activeProjectile?.mesh.position.x,activeProjectile?.mesh.position.y],velocity:[activeProjectile?.velocity.x,activeProjectile?.velocity.y],life:activeProjectile?.life},
+          environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,timer:$state.environmentTimer,phase:environmentFrame.phase,type:environmentFrame.type,frameElapsed:environmentFrame.elapsed,visual:Boolean(visual),visualPosition:visual?[visual.group.position.x,visual.group.position.y,visual.group.position.z]:null,visualScale:visual?[visual.group.scale.x,visual.group.scale.y,visual.group.scale.z]:null,visualOpacity:visual?.meshes.map((mesh)=>mesh.material.opacity)??[]},
+          laser:{state:$state.laserState,elapsed:$state.laserElapsed,energy:$state.weaponEnergy,direction:[$state.laserDirection.x,$state.laserDirection.y],visible:$player.laser.group.visible,position:[$player.laser.group.position.x,$player.laser.group.position.y,$player.laser.group.position.z],rotation:$player.laser.group.rotation.z,scale:[$player.laser.group.scale.x,$player.laser.group.scale.y,$player.laser.group.scale.z],opacity:[$player.laser.halo.material.opacity,$player.laser.core.material.opacity]},
+        },
+        mode:$state.mode,input:input.laserBuffer,
+        audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,sources:$audio._musicSources.size},
+      };
+    `);
+    assert.deepEqual(pausedFreezeAfter.game, pauseTransition.before,
+      'paused frames advanced projectile, environment, laser, energy, visual, or game time');
+    assert.deepEqual({mode:pausedFreezeAfter.mode,input:pausedFreezeAfter.input,audio:pausedFreezeAfter.audio}, {
+      mode:'paused',input:0,audio:{initialized:false,next:0,sources:0},
+    }, 'paused keyboard/touch input queued a laser or restarted music');
     await page.dispatchRepeatedKey('p', 'KeyP', 3);
     assert.equal(await page.evaluate(`document.querySelector('#overlay').classList.contains('visible') && document.querySelector('#overlay-kicker').textContent.includes('PAUSED')`), true);
     await page.dispatchKey('keyUp', 'p', 'KeyP');
@@ -653,14 +695,51 @@ async function desktopCoreScenario() {
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
 
-    await page.click('#primary-button');
+    const resumeTransition = await page.gameEvaluate(`
+      const activeProjectile=projectiles.find((candidate)=>candidate.active);
+      const visual=Object.values(environmentVisual).find((candidate)=>candidate.group.visible);
+      const snapshot=()=>({
+        elapsed:$state.elapsed,
+        projectile:{active:Boolean(activeProjectile?.active),position:[activeProjectile?.mesh.position.x,activeProjectile?.mesh.position.y],velocity:[activeProjectile?.velocity.x,activeProjectile?.velocity.y],life:activeProjectile?.life},
+        environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,timer:$state.environmentTimer,phase:environmentFrame.phase,type:environmentFrame.type,frameElapsed:environmentFrame.elapsed,visual:Boolean(visual),visualPosition:visual?[visual.group.position.x,visual.group.position.y,visual.group.position.z]:null,visualScale:visual?[visual.group.scale.x,visual.group.scale.y,visual.group.scale.z]:null,visualOpacity:visual?.meshes.map((mesh)=>mesh.material.opacity)??[]},
+        laser:{state:$state.laserState,elapsed:$state.laserElapsed,energy:$state.weaponEnergy,direction:[$state.laserDirection.x,$state.laserDirection.y],visible:$player.laser.group.visible,position:[$player.laser.group.position.x,$player.laser.group.position.y,$player.laser.group.position.z],rotation:$player.laser.group.rotation.z,scale:[$player.laser.group.scale.x,$player.laser.group.scale.y,$player.laser.group.scale.z],opacity:[$player.laser.halo.material.opacity,$player.laser.core.material.opacity]},
+      });
+      const before=snapshot();resumeGame();return {before,after:snapshot(),mode:$state.mode};
+    `);
+    assert.equal(resumeTransition.mode, 'playing');
+    assert.deepEqual(resumeTransition.after, resumeTransition.before,
+      'resume rearranged, rescheduled, or cleared paused gameplay state before the first frame');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     await sleep(80);
+    const resumedProgress = await page.gameEvaluate(`
+      const projectile=projectiles.find((candidate)=>candidate.active);
+      return {
+        mode:$state.mode,elapsed:$state.elapsed,
+        projectile:{active:Boolean(projectile?.active),x:projectile?.mesh.position.x,life:projectile?.life},
+        environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
+        laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible,energy:$state.weaponEnergy},
+        audio:{initialized:$audio._beatInitialized,next:$audio.nextBeatTime,now:$audio.context?.currentTime??0,sources:$audio._musicSources.size},
+      };
+    `);
+    assert.equal(resumedProgress.mode, 'playing');
+    assert.ok(resumedProgress.elapsed > pauseTransition.before.elapsed);
+    assert.equal(resumedProgress.projectile.active, true);
+    assert.ok(resumedProgress.projectile.x > pauseTransition.before.projectile.position[0]);
+    assert.ok(resumedProgress.projectile.life < pauseTransition.before.projectile.life);
+    assert.equal(resumedProgress.environment.active, true);
+    assert.ok(resumedProgress.environment.elapsed > pauseTransition.before.environment.elapsed);
+    assert.equal(resumedProgress.laser.state, 'charge');
+    assert.ok(resumedProgress.laser.elapsed > pauseTransition.before.laser.elapsed && resumedProgress.laser.visible);
+    assert.equal(resumedProgress.laser.energy, pauseTransition.before.laser.energy);
+    assert.ok(resumedProgress.audio.initialized && Number.isFinite(resumedProgress.audio.next)
+      && resumedProgress.audio.next >= resumedProgress.audio.now - 0.02 && resumedProgress.audio.sources > 0,
+    `resume did not safely rephase music: ${JSON.stringify(resumedProgress.audio)}`);
     assert.equal(await page.evaluate('document.activeElement?.tagName'), 'CANVAS');
     assert.equal(await page.evaluate(`document.activeElement?.matches('button')`), false);
     page.requireDev('dash repeat probe');
     await page.gameEvaluate(`
       clearWorldEntities();
+      clearLaserState();
       $state.enemySpawnTimer=999;
       $state.dashCharges=[1,1];
       $state.dashSequence=0;
@@ -943,8 +1022,10 @@ async function chargedLightLanceScenario() {
       $state.weaponEnergy=100;
       $state.laserState='ready';
       requestLaser();attemptLaser();$state.laserElapsed=LASER_RULES.chargeDuration;updateLaser(0);
+      const pauseBefore={state:$state.laserState,elapsed:$state.laserElapsed,energy:$state.weaponEnergy,visible:$player.laser.group.visible,direction:[$state.laserDirection.x,$state.laserDirection.y],scale:[$player.laser.group.scale.x,$player.laser.group.scale.y]};
       pauseGame();
-      const pauseCleanup={mode:$state.mode,state:$state.laserState,visible:$player.laser.group.visible};
+      const pausePreserved={state:$state.laserState,elapsed:$state.laserElapsed,energy:$state.weaponEnergy,visible:$player.laser.group.visible,direction:[$state.laserDirection.x,$state.laserDirection.y],scale:[$player.laser.group.scale.x,$player.laser.group.scale.y]};
+      const pauseCleanup={mode:$state.mode,before:pauseBefore,after:pausePreserved};
       resumeGame();
       $state.weaponEnergy=100;
       $state.laserState='ready';
@@ -974,7 +1055,8 @@ async function chargedLightLanceScenario() {
     });
     assert.deepEqual(shot.done, { state:'idle', visible:false });
     assert.deepEqual(shot.upgradeCleanup, { mode:'upgrade', energy:42, state:'idle', visible:false });
-    assert.deepEqual(shot.pauseCleanup, { mode:'paused', state:'idle', visible:false });
+    assert.equal(shot.pauseCleanup.mode, 'paused');
+    assert.deepEqual(shot.pauseCleanup.after, shot.pauseCleanup.before, 'pause cleared an active light lance');
     assert.deepEqual(shot.terminalCleanup, { mode:'gameover', state:'idle', visible:false });
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -1171,8 +1253,8 @@ async function naturalLightLanceLifecycleScenario() {
     `);
     await page.pressKey('e', 'KeyE');
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`, 1800);
-    const boundaryThirty = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent})`);
-    assert.deepEqual(boundaryThirty, { energy:'100',status:'光矛 // READY' });
+    const boundaryThirty = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent,disabled:document.querySelector('#laser-button').getAttribute('aria-disabled')})`);
+    assert.deepEqual(boundaryThirty, { energy:'100',status:'光矛 // 不可用',disabled:'true' });
     await page.click('.upgrade-option');
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
     assert.equal(await page.gameEvaluate(`return $state.stats.laserShots`), shotsBeforeThirty);
@@ -1183,8 +1265,8 @@ async function naturalLightLanceLifecycleScenario() {
     `);
     await page.pressKey('e', 'KeyE');
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`, 1800);
-    const boundarySixtyFour = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent})`);
-    assert.deepEqual(boundarySixtyFour, { energy:'100',status:'光矛 // READY' });
+    const boundarySixtyFour = await page.evaluate(`({energy:document.querySelector('#weapon-energy-value').textContent,status:document.querySelector('#laser-status').textContent,disabled:document.querySelector('#laser-button').getAttribute('aria-disabled')})`);
+    assert.deepEqual(boundarySixtyFour, { energy:'100',status:'光矛 // 不可用',disabled:'true' });
     assert.equal(await page.gameEvaluate(`return $state.stats.laserShots`), shotsBeforeSixtyFour);
   });
 }
@@ -1549,23 +1631,58 @@ async function realmHazardsAndAttackVariantsScenario() {
 
     const pauseStart = await page.gameEvaluate(`
       $state.stageIndex=0;scheduleEnvironmentForStage();$state.environmentTimer=0;applyEnvironment(0.2,0.05);
-      const before={eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents};
-      spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
-      pauseGame();return {...before,mode:$state.mode,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,clearedElapsed:$state.environmentElapsed,timer:String($state.environmentTimer)};
+      const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
+      const before={
+        eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents,
+        active:projectiles.filter((candidate)=>candidate.active).length,
+        projectile:{x:projectile.mesh.position.x,y:projectile.mesh.position.y,life:projectile.life,vx:projectile.velocity.x,vy:projectile.velocity.y},
+        visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+        phase:environmentFrame.phase,type:environmentFrame.type,timer:$state.environmentTimer,
+      };
+      pauseGame();return {before,after:{
+        eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents,
+        active:projectiles.filter((candidate)=>candidate.active).length,
+        projectile:{x:projectile.mesh.position.x,y:projectile.mesh.position.y,life:projectile.life,vx:projectile.velocity.x,vy:projectile.velocity.y},
+        visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+        phase:environmentFrame.phase,type:environmentFrame.type,timer:$state.environmentTimer,
+      },mode:$state.mode};
     `);
-    assert.deepEqual(pauseStart, { eventElapsed:0.2,gameElapsed:pauseStart.gameElapsed,events:1,mode:'paused',active:0,visuals:0,clearedElapsed:0,timer:'Infinity' });
+    assert.equal(pauseStart.mode, 'paused');
+    assert.equal(pauseStart.before.active, 1);
+    assert.equal(pauseStart.before.visuals, 1);
+    assert.deepEqual(pauseStart.after, pauseStart.before, 'pause cleared the live environment/projectile contract');
     await sleep(160);
-    const paused = await page.gameEvaluate(`return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,mode:$state.mode}`);
-    assert.deepEqual(paused, { eventElapsed:0,gameElapsed:pauseStart.gameElapsed,events:pauseStart.events,active:0,visuals:0,mode:'paused' });
-    await page.click('#primary-button');
-    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
-    const resumed = await page.gameEvaluate(`return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,timer:$state.environmentTimer,mode:$state.mode}`);
+    const paused = await page.gameEvaluate(`
+      const projectile=projectiles.find((candidate)=>candidate.active);
+      return {
+        eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents,
+        active:projectiles.filter((candidate)=>candidate.active).length,
+        projectile:{x:projectile?.mesh.position.x,y:projectile?.mesh.position.y,life:projectile?.life,vx:projectile?.velocity.x,vy:projectile?.velocity.y},
+        visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,
+        phase:environmentFrame.phase,type:environmentFrame.type,timer:$state.environmentTimer,mode:$state.mode,
+      };
+    `);
+    assert.deepEqual({...paused,mode:undefined}, {...pauseStart.before,mode:undefined});
+    assert.equal(paused.mode, 'paused');
+    const resumed = await page.gameEvaluate(`
+      const projectile=projectiles.find((candidate)=>candidate.active);
+      const before={eventElapsed:$state.environmentElapsed,active:projectiles.filter((candidate)=>candidate.active).length,x:projectile?.mesh.position.x,life:projectile?.life,phase:environmentFrame.phase,timer:$state.environmentTimer};
+      resumeGame();
+      return {before,after:{eventElapsed:$state.environmentElapsed,active:projectiles.filter((candidate)=>candidate.active).length,x:projectile?.mesh.position.x,life:projectile?.life,phase:environmentFrame.phase,timer:$state.environmentTimer},mode:$state.mode};
+    `);
     assert.equal(resumed.mode, 'playing');
-    assert.equal(resumed.eventElapsed, 0);
-    assert.ok(Number.isFinite(resumed.timer)&&resumed.timer>0, `resume did not reschedule environment event: ${JSON.stringify(resumed)}`);
-    assert.ok(resumed.gameElapsed-pauseStart.gameElapsed < 0.08, `pause advanced game elapsed ${pauseStart.gameElapsed} -> ${resumed.gameElapsed}`);
+    assert.deepEqual(resumed.after, resumed.before, 'resume rescheduled environment or cleared projectile before simulation resumed');
+    await sleep(60);
+    const resumedProgress = await page.gameEvaluate(`
+      const projectile=projectiles.find((candidate)=>candidate.active);
+      return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,active:Boolean(projectile?.active),x:projectile?.mesh.position.x,life:projectile?.life,phase:environmentFrame.phase};
+    `);
+    assert.ok(resumedProgress.eventElapsed > pauseStart.before.eventElapsed);
+    assert.ok(resumedProgress.gameElapsed > pauseStart.before.gameElapsed && resumedProgress.gameElapsed-pauseStart.before.gameElapsed < 0.12);
+    assert.equal(resumedProgress.active, true);
+    assert.ok(resumedProgress.x > pauseStart.before.projectile.x && resumedProgress.life < pauseStart.before.projectile.life);
     const activeUpgrade = await page.gameEvaluate(`
-      $state.environmentTimer=0;applyEnvironment(0.2,0.05);
+      scheduleEnvironmentForStage();$state.environmentTimer=0;applyEnvironment(0.2,0.05);
       const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
       return {eventElapsed:$state.environmentElapsed,projectile:Boolean(projectile?.active),visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length};
     `);
@@ -2438,6 +2555,10 @@ async function runtimeGuardScenario() {
   await withPage('runtime-guards', {}, async (page) => {
     page.requireDev('runtime guard, cap, and listener lifecycle probe');
     await page.startGame();
+    await page.trustedClick('#mute-button');
+    await sleep(60);
+    await page.trustedClick('#mute-button');
+    await page.waitForGame(`return {state:$audio.context?.state,muted:$audio.muted}`, (snapshot) => snapshot.state === 'running' && !snapshot.muted, 2000);
     const injected = await page.gameEvaluate(`
       const before={setup:runtimeStats.inputSetupCount,refresh:runtimeStats.composerRefreshCount};
       const pools={particles:particlePool.length,trails:trailPool.length};
@@ -2497,6 +2618,18 @@ async function runtimeGuardScenario() {
       badTrail.group.rotation.z=Infinity;
       badTrail.meshes[0].material.opacity=NaN;
       trails.push(badTrail);
+      const backgroundRoot=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const backgroundMaterialObject=(()=>{let result=null;backgroundRoot?.traverse((object)=>{if(!result&&object.material) result=object;});return result;})();
+      globalThis.__finiteGuardRefs={
+        backgroundRoot,backgroundObjectCounts:realmBackgrounds.getStats().objectCounts,
+        sceneBackgroundRoots:scene.children.filter((child)=>child.userData?.realmBackgroundRoot).length,
+        audioBuses:[$audio.masterGain,$audio.musicGain,$audio.sfxGain,$audio.ambienceGain,$audio.uiGain],
+      };
+      backgroundRoot.position.x=NaN;backgroundRoot.position.z=NaN;backgroundRoot.rotation.z=Infinity;backgroundRoot.scale.y=NaN;
+      backgroundMaterialObject.material.opacity=NaN;
+      backgroundMaterialObject.material.userData.realmBaseOpacity=Infinity;
+      $audio.nextBeatTime=NaN;$audio._gridStep=Infinity;$audio._lastScheduledStep=NaN;$audio._barIndex=Infinity;
+      $audio._lastRealTime=NaN;$audio._musicBase=NaN;$audio._musicTarget=Infinity;$audio._duckActiveUntil=NaN;
       return {before,pools,afterPools:{particles:particlePool.length,trails:trailPool.length},afterSetup:runtimeStats.inputSetupCount};
     `);
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
@@ -2569,6 +2702,36 @@ async function runtimeGuardScenario() {
         velocityFinite:Boolean(enemy&&Number.isFinite(enemy.environmentVelocity.x)&&Number.isFinite(enemy.environmentVelocity.y))};
     `);
     assert.deepEqual(environmentVelocityRepair, { present:true,positionFinite:true,velocityFinite:true });
+    const finiteRecovery = await page.gameEvaluate(`
+      const refs=globalThis.__finiteGuardRefs;
+      const finiteTransform=(object)=>[
+        object.position.x,object.position.y,object.position.z,
+        object.rotation.x,object.rotation.y,object.rotation.z,
+        object.scale.x,object.scale.y,object.scale.z,
+      ].every(Number.isFinite);
+      const finiteMaterials=(root)=>{let valid=true;root.traverse((object)=>{const materials=(Array.isArray(object.material)?object.material:[object.material]).filter(Boolean);if(materials.some((material)=>'opacity' in material&&!Number.isFinite(material.opacity))) valid=false;});return valid;};
+      const healed={background:finiteTransform(refs.backgroundRoot)&&finiteMaterials(refs.backgroundRoot),rootZ:refs.backgroundRoot.position.z,audio:[
+        $audio.nextBeatTime,$audio._gridStep,$audio._lastScheduledStep,$audio._barIndex,
+        $audio._musicBase,$audio._musicTarget,$audio._duckActiveUntil,
+      ].every(Number.isFinite)};
+      realmBackgrounds.setRealm(1,true);realmBackgrounds.update({elapsed:44,dt:0.016,reducedMotion:false});
+      $audio.setStage(1);$audio.update($state.elapsed,0.8,'playing',{laserReady:false,bossPhase:1});
+      const audioSnapshot=$audio.getDebugSnapshot();
+      const stats=realmBackgrounds.getStats();
+      return {
+        healed,
+        realm:{active:stats.activeRealm,objectCounts:stats.objectCounts,rootCount:scene.children.filter((child)=>child.userData?.realmBackgroundRoot).length,finite:finiteTransform(refs.backgroundRoot)&&finiteMaterials(refs.backgroundRoot)},
+        audio:{stage:audioSnapshot.stageIndex,bpm:audioSnapshot.bpm,ready:audioSnapshot.schedulerReady,next:$audio.nextBeatTime,sources:audioSnapshot.activeMusicSources,buses:refs.audioBuses.every((bus,index)=>bus===[$audio.masterGain,$audio.musicGain,$audio.sfxGain,$audio.ambienceGain,$audio.uiGain][index]),mode:$state.mode,context:$audio.context?.state,unlocked:$audio._unlocked,muted:$audio.muted},
+        expected:{objectCounts:refs.backgroundObjectCounts,rootCount:refs.sceneBackgroundRoots},
+      };
+    `);
+    assert.deepEqual(finiteRecovery.healed, { background:true,rootZ:-5,audio:true }, `finite corruption did not heal: ${JSON.stringify(finiteRecovery)}`);
+    assert.deepEqual(finiteRecovery.realm, { active:1,objectCounts:finiteRecovery.expected.objectCounts,rootCount:finiteRecovery.expected.rootCount,finite:true });
+    assert.equal(finiteRecovery.realm.rootCount, 1);
+    assert.deepEqual({stage:finiteRecovery.audio.stage,bpm:finiteRecovery.audio.bpm,ready:finiteRecovery.audio.ready,buses:finiteRecovery.audio.buses}, {stage:1,bpm:116,ready:true,buses:true}, JSON.stringify(finiteRecovery));
+    assert.ok(Number.isFinite(finiteRecovery.audio.next)&&finiteRecovery.audio.sources>0&&finiteRecovery.audio.sources<=8,
+      `music did not resume safely after scheduler repair: ${JSON.stringify(finiteRecovery.audio)}`);
+
     const finiteRuntime = await page.gameEvaluate(`
       const finiteObject=(object)=>[
         object.position.x,object.position.y,object.position.z,
@@ -2618,7 +2781,7 @@ async function runtimeGuardScenario() {
 }
 
 async function repairAndAriaScenario() {
-  await withPage('repair-aria', {}, async (page) => {
+  await withPage('repair-aria', { forcedColors:true }, async (page) => {
     page.requireDev('Repair Swarm and combat ARIA probe');
     await page.startGame();
     const repair = await page.gameEvaluate(`
@@ -2656,6 +2819,67 @@ async function repairAndAriaScenario() {
     assert.deepEqual(bossAria.before, { now: '100', max: '100', text: '深潮主脑稳定度 6 / 6' });
     assert.equal(bossAria.hp, 25);
     assert.deepEqual(bossAria.after, { now: '83', max: '100', text: '深潮主脑稳定度 5 / 6' });
+
+    const forcedColors = await page.gameEvaluate(`
+      $state.maxHealth=4;$state.health=2;syncHealthPips();
+      const filled=dom.healthPips[0],empty=dom.healthPips[3];
+      const filledStyle=getComputedStyle(filled),emptyStyle=getComputedStyle(empty);
+      return {
+        active:matchMedia('(forced-colors: active)').matches,
+        classes:[filled.className,empty.className],
+        filled:{background:filledStyle.backgroundColor,border:filledStyle.borderColor},
+        empty:{background:emptyStyle.backgroundColor,border:emptyStyle.borderColor},
+      };
+    `);
+    assert.equal(forcedColors.active, true);
+    assert.deepEqual(forcedColors.classes, ['', 'empty']);
+    assert.notEqual(forcedColors.filled.background, forcedColors.empty.background,
+      `forced colors rendered empty hull as filled: ${JSON.stringify(forcedColors)}`);
+    assert.notEqual(forcedColors.filled.border, 'rgba(0, 0, 0, 0)');
+    assert.notEqual(forcedColors.empty.border, 'rgba(0, 0, 0, 0)');
+
+    const laserEligibility = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.mode='playing';$state.weaponEnergy=100;$state.laserState='ready';
+      $state.dashTimer=0;$state.dashInvulnTimer=0;input.laserBuffer=0;clearLaserState();updateLaserHUD();
+      const read=()=>({
+        disabled:dom.laserButton.getAttribute('aria-disabled'),
+        label:dom.laserButton.getAttribute('aria-label'),
+        status:dom.laserStatus.textContent,
+        energy:$state.weaponEnergy,state:$state.laserState,buffer:input.laserBuffer,
+      });
+      const ready=read();
+      $state.dashTimer=0.12;updateLaserHUD();requestLaser();const dash=read();
+      $state.dashTimer=0;$state.dashInvulnTimer=0.12;updateLaserHUD();requestLaser();const dashInvulnerable=read();
+      $state.dashInvulnTimer=0;$state.laserState='cooldown';updateLaserHUD();requestLaser();const conflict=read();
+      $state.laserState='ready';pauseGame();updateLaserHUD();requestLaser();attemptLaser();const paused=read();
+      resumeGame();updateLaserHUD();const resumed=read();
+      startLaserCharge();updateLaserHUD();const charge=read();
+      $state.laserElapsed=LASER_RULES.chargeDuration;updateLaser(0);updateLaserHUD();const active=read();
+      return {ready,dash,dashInvulnerable,conflict,paused,resumed,charge,active};
+    `);
+    assert.deepEqual(laserEligibility.ready, {
+      disabled:'false',label:'潮汐光矛 READY，按 E 发射',status:'光矛 // READY',energy:100,state:'ready',buffer:0,
+    });
+    for (const blocked of [laserEligibility.dash,laserEligibility.dashInvulnerable]) {
+      assert.deepEqual(blocked, {
+        disabled:'true',label:'潮汐光矛暂不可用，相位冲刺中',status:'光矛 // 相位冲刺中',energy:100,state:'ready',buffer:0,
+      });
+    }
+    assert.deepEqual(laserEligibility.conflict, {
+      disabled:'true',label:'潮汐光矛暂不可用，状态冲突',status:'光矛 // 状态冲突',energy:100,state:'cooldown',buffer:0,
+    });
+    assert.deepEqual(laserEligibility.paused, {
+      disabled:'true',label:'潮汐光矛已暂停，继续游戏后可发射',status:'光矛 // 已暂停',energy:100,state:'ready',buffer:0,
+    });
+    assert.deepEqual(laserEligibility.resumed, laserEligibility.ready);
+    assert.deepEqual(laserEligibility.charge, {
+      disabled:'true',label:'潮汐光矛蓄力',status:'光矛 // 蓄力',energy:0,state:'charge',buffer:0,
+    });
+    assert.deepEqual(laserEligibility.active, {
+      disabled:'true',label:'潮汐光矛发射',status:'光矛 // 发射',energy:0,state:'active',buffer:0,
+    });
+
   });
 }
 
@@ -3136,17 +3360,24 @@ if (process.env.BROWSER_MATRIX_BREAKPOINT_CLEANUP_SELF_TEST === '1') {
     assert.ok(versionResponse.ok, `Chrome CDP is not available at ${CDP_HTTP}`);
     const version = await versionResponse.json();
     console.log(`# ${version.Browser}; app=${APP_URL}`);
-    for (const [name, scenario] of scenarios) {
+    const selectedScenarios = BROWSER_MATRIX_SCENARIO
+      ? scenarios.filter(([name]) => name.includes(BROWSER_MATRIX_SCENARIO))
+      : scenarios;
+    assert.ok(selectedScenarios.length > 0, `No browser scenario matched ${BROWSER_MATRIX_SCENARIO}`);
+    for (const [name, scenario] of selectedScenarios) {
       const started = Date.now();
       await scenario();
       passed += 1;
       console.log(`ok ${passed} - ${name} (${Date.now() - started}ms)`);
     }
-    console.log(`1..${scenarios.length}`);
+    console.log(`1..${selectedScenarios.length}`);
   } catch (error) {
-    console.error(`not ok ${passed + 1} - ${scenarios[passed]?.[0] || 'browser matrix setup'}`);
+    const failedScenarios = BROWSER_MATRIX_SCENARIO
+      ? scenarios.filter(([name]) => name.includes(BROWSER_MATRIX_SCENARIO))
+      : scenarios;
+    console.error(`not ok ${passed + 1} - ${failedScenarios[passed]?.[0] || 'browser matrix setup'}`);
     console.error(error?.stack || error);
-    console.log(`1..${scenarios.length}`);
+    console.log(`1..${failedScenarios.length}`);
     process.exitCode = 1;
   }
 }

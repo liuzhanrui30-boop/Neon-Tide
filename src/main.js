@@ -2012,14 +2012,13 @@ function startGame() {
 
 function pauseGame() {
   if (state.mode !== "playing") return;
-  if (transitionTo("paused")) clearEnvironmentAndProjectiles();
+  transitionTo("paused");
 }
 
 function resumeGame() {
   if (state.mode !== "paused") return;
   audio.unlock();
   if (!transitionTo("playing", { resumed: true })) return;
-  scheduleEnvironmentForStage();
   toast("信号恢复", "cyan");
 }
 
@@ -2131,7 +2130,7 @@ function transitionTo(nextMode, payload = {}) {
     input.keys.clear();
     input.dashBuffer = 0;
     input.laserBuffer = 0;
-    clearLaserState();
+    if (nextMode !== "paused") clearLaserState();
     resetJoystick();
     audio.suspendBeat();
   }
@@ -2553,8 +2552,23 @@ function clearLaserState() {
   return state.laserState;
 }
 
+function getLaserAvailability() {
+  if (state.mode === "paused") return { canStart: false, reason: "paused" };
+  if (state.mode !== "playing") return { canStart: false, reason: "locked" };
+  if (state.laserState === "charge") return { canStart: false, reason: "charge" };
+  if (state.laserState === "active") return { canStart: false, reason: "active" };
+  if (!canFireLaser(state.weaponEnergy)) return { canStart: false, reason: "charging" };
+  if (state.dashTimer > 0 || state.dashInvulnTimer > 0) return { canStart: false, reason: "dash" };
+  if (!["idle", "ready"].includes(state.laserState)) return { canStart: false, reason: "conflict" };
+  return { canStart: true, reason: "ready" };
+}
+
+function canStartLaser() {
+  return getLaserAvailability().canStart;
+}
+
 function startLaserCharge() {
-  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy) || state.dashTimer > 0 || state.dashInvulnTimer > 0 || ["charge", "active"].includes(state.laserState)) return false;
+  if (!canStartLaser()) return false;
   state.weaponEnergy = 0;
   state.laserElapsed = 0;
   state.laserSequence += 1;
@@ -2579,7 +2593,6 @@ function startLaserCharge() {
 
 function attemptLaser() {
   input.laserBuffer = 0;
-  if (state.mode !== "playing" || !canFireLaser(state.weaponEnergy)) return false;
   return startLaserCharge();
 }
 
@@ -3956,7 +3969,8 @@ function updateVisuals(dt) {
 function updateLaserHUD() {
   const energy = THREE.MathUtils.clamp(state.weaponEnergy, 0, LASER_RULES.maxEnergy);
   const energyPercent = (energy / LASER_RULES.maxEnergy) * 100;
-  const ready = state.laserState === "ready";
+  const availability = getLaserAvailability();
+  const ready = availability.canStart;
   const charging = state.laserState === "charge";
   const active = state.laserState === "active";
   const roundedEnergy = Math.round(energy);
@@ -3964,23 +3978,29 @@ function updateLaserHUD() {
   dom.weaponEnergyFill.style.width = `${energyPercent}%`;
   dom.laserStatus.classList.toggle("ready", ready);
   dom.laserStatus.classList.toggle("charging", charging || active || (!ready && energy > 0));
-  dom.laserStatus.textContent = ready
-    ? "光矛 // READY"
-    : charging
-      ? "光矛 // 蓄力"
-      : active
-        ? "光矛 // 发射"
-        : `光矛 // 充能中 ${roundedEnergy}%`;
+  const statusByReason = {
+    ready: "光矛 // READY",
+    charge: "光矛 // 蓄力",
+    active: "光矛 // 发射",
+    dash: "光矛 // 相位冲刺中",
+    conflict: "光矛 // 状态冲突",
+    paused: "光矛 // 已暂停",
+    locked: "光矛 // 不可用",
+  };
+  dom.laserStatus.textContent = statusByReason[availability.reason] ?? `光矛 // 充能中 ${roundedEnergy}%`;
   dom.laserButton.classList.toggle("ready", ready);
   dom.laserButton.classList.toggle("charging", charging || active || (!ready && energy > 0));
-  dom.laserButton.setAttribute("aria-disabled", String(!ready));
-  dom.laserButton.setAttribute("aria-label", ready
-    ? "潮汐光矛 READY，按 E 发射"
-    : charging
-      ? "潮汐光矛蓄力"
-      : active
-        ? "潮汐光矛发射"
-        : `潮汐光矛充能中，能量 ${roundedEnergy}`);
+  dom.laserButton.setAttribute("aria-disabled", String(!availability.canStart));
+  const labelByReason = {
+    ready: "潮汐光矛 READY，按 E 发射",
+    charge: "潮汐光矛蓄力",
+    active: "潮汐光矛发射",
+    dash: "潮汐光矛暂不可用，相位冲刺中",
+    conflict: "潮汐光矛暂不可用，状态冲突",
+    paused: "潮汐光矛已暂停，继续游戏后可发射",
+    locked: "潮汐光矛当前状态不可用",
+  };
+  dom.laserButton.setAttribute("aria-label", labelByReason[availability.reason] ?? `潮汐光矛充能中，能量 ${roundedEnergy}`);
   dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
 }
 
@@ -4144,7 +4164,7 @@ function requestDash() {
 }
 
 function requestLaser() {
-  if (state.mode === "playing") input.laserBuffer = 0.14;
+  if (canStartLaser()) input.laserBuffer = 0.14;
 }
 
 function isControlTarget(target) {
@@ -4282,7 +4302,7 @@ function animate() {
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
   const { wallDt, simDt } = computeFrameDeltas(rawWallDt, simulationScale);
   sanitizeRuntimeState();
-  if (state.slowMotionTimer > 0) {
+  if (state.mode !== "paused" && state.slowMotionTimer > 0) {
     state.slowMotionTimer = Math.max(0, state.slowMotionTimer - wallDt);
     if (state.slowMotionTimer <= 0) state.slowMotionScale = 1;
   }
@@ -4316,7 +4336,7 @@ function animate() {
       updateRipples(simDt);
       updateTrails(simDt);
     }
-  } else {
+  } else if (state.mode !== "paused") {
     const idleSimDt = Math.min(wallDt, 0.05);
     updateParticles(idleSimDt);
     updateRipples(idleSimDt);
@@ -4325,10 +4345,10 @@ function animate() {
   const energyIntensity = ["charge", "active"].includes(state.laserState) ? 1 : state.weaponEnergy / LASER_RULES.maxEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode, {
-    laserReady: state.weaponEnergy >= LASER_RULES.maxEnergy,
+    laserReady: canStartLaser(),
     bossPhase: state.stats.bossPhase,
   });
-  updateVisuals(wallDt);
+  updateVisuals(state.mode === "paused" ? 0 : wallDt);
   sanitizeRuntimeState();
   postProcessing?.render();
 }
