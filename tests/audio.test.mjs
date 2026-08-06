@@ -285,16 +285,34 @@ test('an active realm change waits for the next old-realm bar and crossfades at 
 
 test('late bar-boundary realm commit rephases from the actual schedule time', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext, random: () => 0.5 });
+  const stageTwoGrid = 60 / 132 / 4;
   audio.unlock();
   audio.setStage(2);
   audio.update(64, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
-  const boundary = audio.getDebugSnapshot().pendingBoundary;
+
+  // Establish active Stage 2 music and advance to its next real bar boundary.
+  for (let step = 1; step < 16; step += 1) {
+    audio.context.currentTime = stageTwoGrid * step;
+    audio.update(64 + audio.context.currentTime, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
+  }
   audio.setStage(3);
+  const queued = audio.getDebugSnapshot();
+  const boundary = queued.pendingBoundary;
+  assert.deepEqual({ stage: queued.stageIndex, pending: queued.pendingStageIndex, gridStep: audio._gridStep }, {
+    stage: 2,
+    pending: 3,
+    gridStep: 0,
+  });
+  assert.ok(queued.activeMusicSources > 0);
+  assert.ok(Math.abs(boundary - stageTwoGrid * 16) < 1e-12);
+
+  // 110 ms is late for the boundary but stays inside Stage 2's stale-clock window.
   audio.context.currentTime = boundary + 0.11;
-  audio.update(100, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
+  audio.update(64 + audio.context.currentTime, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
   const snapshot = audio.getDebugSnapshot();
   const newGrid = 60 / 140 / 4;
-  assert.ok(snapshot.nextBeatTime >= audio.context.currentTime + newGrid - 1e-9);
+  assert.equal(snapshot.stageIndex, 3);
+  assert.ok(Math.abs(snapshot.nextBeatTime - (audio.context.currentTime + newGrid)) < 1e-12);
 });
 
 test('look-ahead scheduling stays stable across consecutive pre-boundary frames', () => {
