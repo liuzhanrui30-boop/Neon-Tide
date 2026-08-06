@@ -5,6 +5,8 @@ import path from 'node:path';
 const APP_URL = process.env.APP_URL || 'http://127.0.0.1:4173/';
 const CDP_PORT = Number(process.env.CDP_PORT || 9333);
 const WALL_STALL_MS = Number(process.env.WALL_STALL_MS || 1200);
+const PAUSE_ONLY_STALL_MS = WALL_STALL_MS + 120;
+const POST_RESUME_STALL_MS = Number(process.env.POST_RESUME_STALL_MS || 140);
 const CDP_HTTP = `http://127.0.0.1:${CDP_PORT}`;
 const REALM_SCREENSHOT_DIR = process.env.REALM_SCREENSHOT_DIR || '';
 const REALM_SCREENSHOT_ONLY = process.env.REALM_SCREENSHOT_ONLY === '1';
@@ -363,6 +365,59 @@ class GamePage {
     if (this.names.player) aliases.push(`const $player=${this.names.player}`);
     if (this.names.renderer) aliases.push(`const $renderer=${this.names.renderer}`);
     return this.scopeEvaluate(`(()=>{${aliases.join(';')};${body}})()`, { stallMs });
+  }
+
+  async gameEvaluateAcrossFrames(setupBody, snapshotBody, frameCount = 2) {
+    this.requireDev('exact production-frame evaluation');
+    this.scopeEvaluationCount += 1;
+    const evaluationNumber = this.scopeEvaluationCount;
+    const aliases = [
+      `const $state=${this.names.state}`,
+      `const $enemies=${this.names.enemies}`,
+      `const $audio=${this.names.audio}`,
+      `const $player=${this.names.player}`,
+      `const $renderer=${this.names.renderer}`,
+    ];
+    const wrap = (body) => `(()=>{${aliases.join(';')};${body}})()`;
+    const evaluateFrame = async (paused, expression) => {
+      const frame = paused.callFrames.find((candidate) => candidate.functionName === 'animate') || paused.callFrames[0];
+      const result = await this.client.send('Debugger.evaluateOnCallFrame', {
+        callFrameId: frame.callFrameId,
+        expression,
+        returnByValue: true,
+        awaitPromise: true,
+      });
+      if (result.exceptionDetails) {
+        throw new Error(`${this.name}: ${result.exceptionDetails.exception?.description || result.exceptionDetails.text}`);
+      }
+      return result.result.value;
+    };
+
+    await this.client.send('Page.bringToFront');
+    let pauseWait = this.client.waitFor('Debugger.paused');
+    pauseWait.catch(() => {});
+    let breakpointId;
+    try {
+      const breakpoint = await this.client.send('Debugger.setBreakpoint', { location: this.breakpointLocation });
+      ({ breakpointId } = breakpoint);
+      let paused = await pauseWait;
+      const initial = await evaluateFrame(paused, wrap(setupBody));
+      const frames = [];
+      for (let index = 0; index < frameCount; index += 1) {
+        pauseWait = this.client.waitFor('Debugger.paused');
+        pauseWait.catch(() => {});
+        await this.client.send('Debugger.resume');
+        paused = await pauseWait;
+        frames.push(await evaluateFrame(paused, wrap(snapshotBody)));
+      }
+      return { initial, frames };
+    } catch (error) {
+      pauseWait.cancel();
+      throw new Error(`${this.name}: across-frame evaluation ${evaluationNumber} failed: ${error.message}`, { cause: error });
+    } finally {
+      if (breakpointId) await this.client.send('Debugger.removeBreakpoint', { breakpointId }, 3000).catch(() => {});
+      await this.client.send('Debugger.resume', {}, 3000).catch(() => {});
+    }
   }
 
   async waitForGame(body, predicate, timeoutMs = 1500) {
@@ -737,8 +792,8 @@ async function desktopCoreScenario() {
     assert.equal(await page.evaluate('document.activeElement?.tagName'), 'CANVAS');
     assert.equal(await page.evaluate(`document.activeElement?.matches('button')`), false);
 
-    page.requireDev('pause-accumulated wall-clock discard probe');
-    const stalledResume = await page.gameEvaluate(`
+    page.requireDev('pause clock baseline and exact first-frame probe');
+    const exactResumeFrames = await page.gameEvaluateAcrossFrames(`
       clearWorldEntities();
       clearLaserState();
       $state.stageIndex=0;
@@ -746,7 +801,7 @@ async function desktopCoreScenario() {
       $state.upgradeTriggered=[false,false];
       $state.bossTriggered=false;
       $state.bossDeadline=null;
-      $state.elapsed=GAME.stageBoundaries[1]-Math.max(0.45,(${WALL_STALL_MS}/1000)*0.65);
+      $state.elapsed=GAME.stageBoundaries[1]-0.65;
       $state.timeLeft=GAME.bossStart-$state.elapsed;
       $state.enemySpawnTimer=Infinity;
       $state.formationTimer=999;
@@ -776,17 +831,16 @@ async function desktopCoreScenario() {
       };
       const before=snapshot();
       pauseGame();
-      const stalledUntil=performance.now()+${WALL_STALL_MS};
-      while(performance.now()<stalledUntil){}
+      const pauseStarted=performance.now();
+      const pauseUntil=pauseStarted+${PAUSE_ONLY_STALL_MS};
+      while(performance.now()<pauseUntil){}
+      const pauseStallMs=performance.now()-pauseStarted;
       resumeGame();
-      return {before,resumed:snapshot()};
-    `);
-    assert.equal(stalledResume.resumed.mode, 'playing');
-    assert.deepEqual(stalledResume.resumed, stalledResume.before,
-      'pause/resume changed gameplay state before the production frame consumed its clock delta');
-
-    await sleep(90);
-    const firstResumeFrame = await page.gameEvaluate(`
+      const resumeAt=performance.now();
+      const firstFrameUntil=resumeAt+${POST_RESUME_STALL_MS};
+      while(performance.now()<firstFrameUntil){}
+      return {before,immediate:snapshot(),pauseStallMs,postResumeStallMs:performance.now()-resumeAt};
+    `, `
       const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
       return {
         mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
@@ -794,64 +848,54 @@ async function desktopCoreScenario() {
         projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
         laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
       };
-    `);
-    const firstElapsedAdvance = firstResumeFrame.elapsed - stalledResume.before.elapsed;
-    const firstEnvironmentAdvance = firstResumeFrame.environment.elapsed - stalledResume.before.environment.elapsed;
-    const firstProjectileAdvance = stalledResume.before.projectile.life - firstResumeFrame.projectile.life;
-    const firstProjectileTravel = firstResumeFrame.projectile.x - stalledResume.before.projectile.x;
-    const firstLaserAdvance = firstResumeFrame.laser.elapsed - stalledResume.before.laser.elapsed;
-    assert.equal(firstResumeFrame.mode, 'playing', `pause stall changed mode: ${JSON.stringify(firstResumeFrame)}`);
-    assert.equal(firstResumeFrame.stage, 0, `pause stall skipped into another stage: ${JSON.stringify(firstResumeFrame)}`);
-    assert.deepEqual(firstResumeFrame.stageQueue, [], `pause stall queued a stage: ${JSON.stringify(firstResumeFrame)}`);
-    assert.ok(firstResumeFrame.environment.active && firstResumeFrame.projectile.active && firstResumeFrame.laser.visible,
-      `pause stall cleared active systems: ${JSON.stringify(firstResumeFrame)}`);
-    for (const [label, advance] of Object.entries({
-      elapsed:firstElapsedAdvance,
-      environment:firstEnvironmentAdvance,
-      projectile:firstProjectileAdvance,
-      laser:firstLaserAdvance,
-    })) {
-      assert.ok(advance > 0 && advance < 0.3,
-        `first resumed production frames advanced ${label} by ${advance.toFixed(3)}s after a ${WALL_STALL_MS}ms pause stall`);
-    }
+    `, 2);
+    const { before:resumeBefore, immediate, pauseStallMs, postResumeStallMs } = exactResumeFrames.initial;
+    const [firstResumeFrame, secondResumeFrame] = exactResumeFrames.frames;
+    assert.ok(pauseStallMs > WALL_STALL_MS,
+      `pause probe stalled only ${pauseStallMs.toFixed(1)}ms`);
+    assert.ok(postResumeStallMs >= POST_RESUME_STALL_MS*0.95,
+      `post-resume probe stalled only ${postResumeStallMs.toFixed(1)}ms`);
+    assert.equal(immediate.mode, 'playing');
+    assert.deepEqual(immediate, resumeBefore,
+      'pause/resume changed gameplay state before the first production frame');
+
+    const firstElapsedAdvance = firstResumeFrame.elapsed-resumeBefore.elapsed;
+    const firstEnvironmentAdvance = firstResumeFrame.environment.elapsed-resumeBefore.environment.elapsed;
+    const firstProjectileAdvance = resumeBefore.projectile.life-firstResumeFrame.projectile.life;
+    const firstProjectileTravel = firstResumeFrame.projectile.x-resumeBefore.projectile.x;
+    const firstLaserAdvance = firstResumeFrame.laser.elapsed-resumeBefore.laser.elapsed;
+    assert.equal(firstResumeFrame.mode, 'playing', `first resumed frame changed mode: ${JSON.stringify(firstResumeFrame)}`);
+    assert.equal(firstResumeFrame.stage, 0, `pause time leaked into the first resumed frame: ${JSON.stringify(firstResumeFrame)}`);
+    assert.deepEqual(firstResumeFrame.stageQueue, []);
+    assert.ok(firstResumeFrame.environment.active&&firstResumeFrame.projectile.active&&firstResumeFrame.laser.visible,
+      `first resumed frame cleared active systems: ${JSON.stringify(firstResumeFrame)}`);
+    assert.ok(firstElapsedAdvance >= POST_RESUME_STALL_MS/1000*0.85&&firstElapsedAdvance<0.4,
+      `first resumed frame lost post-resume time or included pause time: ${firstElapsedAdvance.toFixed(3)}s`);
     assert.ok(Math.abs(firstEnvironmentAdvance-firstElapsedAdvance)<0.025,
-      `environment desynchronized from wall time: ${firstEnvironmentAdvance} vs ${firstElapsedAdvance}`);
-    assert.ok(Math.abs(firstProjectileAdvance-firstLaserAdvance)<0.025,
-      `projectile and laser simulation desynchronized after resume: ${firstProjectileAdvance} vs ${firstLaserAdvance}`);
+      `first-frame environment wall time mismatch: ${firstEnvironmentAdvance} vs ${firstElapsedAdvance}`);
+    assert.ok(firstProjectileAdvance>=0.045&&firstProjectileAdvance<=0.055,
+      `first-frame projectile simulation should cap at 0.05s, got ${firstProjectileAdvance}`);
+    assert.ok(Math.abs(firstLaserAdvance-firstProjectileAdvance)<0.01,
+      `first-frame laser/projectile simulation mismatch: ${firstLaserAdvance} vs ${firstProjectileAdvance}`);
     assert.ok(Math.abs(firstProjectileTravel-(firstResumeFrame.projectile.vx*firstProjectileAdvance))<0.025,
-      `projectile travel did not match resumed simulation time: ${firstProjectileTravel}`);
+      `first-frame projectile travel mismatch: ${firstProjectileTravel}`);
 
-    await sleep(80);
-    const nextResumeFrame = await page.gameEvaluate(`
-      const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
-      return {
-        mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
-        environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
-        projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
-        laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
-      };
-    `);
-    const nextElapsedAdvance = nextResumeFrame.elapsed-firstResumeFrame.elapsed;
-    const nextEnvironmentAdvance = nextResumeFrame.environment.elapsed-firstResumeFrame.environment.elapsed;
-    const nextProjectileAdvance = firstResumeFrame.projectile.life-nextResumeFrame.projectile.life;
-    const nextLaserAdvance = nextResumeFrame.laser.elapsed-firstResumeFrame.laser.elapsed;
-    assert.equal(nextResumeFrame.mode, 'playing');
-    assert.equal(nextResumeFrame.stage, 0);
-    assert.deepEqual(nextResumeFrame.stageQueue, []);
-    assert.ok(nextResumeFrame.environment.active && nextResumeFrame.projectile.active && nextResumeFrame.laser.visible,
-      `normal frame after resume did not keep advancing active systems: ${JSON.stringify(nextResumeFrame)}`);
-    for (const [label, advance] of Object.entries({
-      elapsed:nextElapsedAdvance,
-      environment:nextEnvironmentAdvance,
-      projectile:nextProjectileAdvance,
-      laser:nextLaserAdvance,
-    })) {
-      assert.ok(advance > 0 && advance < 0.25,
-        `next production frames advanced ${label} abnormally by ${advance.toFixed(3)}s`);
-    }
-    assert.ok(Math.abs(nextEnvironmentAdvance-nextElapsedAdvance)<0.025);
-    assert.ok(Math.abs(nextProjectileAdvance-nextLaserAdvance)<0.025,
-      `projectile and laser did not share the next simulation step: ${nextProjectileAdvance} vs ${nextLaserAdvance}`);
+    const secondElapsedAdvance = secondResumeFrame.elapsed-firstResumeFrame.elapsed;
+    const secondEnvironmentAdvance = secondResumeFrame.environment.elapsed-firstResumeFrame.environment.elapsed;
+    const secondProjectileAdvance = firstResumeFrame.projectile.life-secondResumeFrame.projectile.life;
+    const secondProjectileTravel = secondResumeFrame.projectile.x-firstResumeFrame.projectile.x;
+    const secondLaserAdvance = secondResumeFrame.laser.elapsed-firstResumeFrame.laser.elapsed;
+    assert.equal(secondResumeFrame.mode, 'playing');
+    assert.equal(secondResumeFrame.stage, 0);
+    assert.deepEqual(secondResumeFrame.stageQueue, []);
+    assert.ok(secondResumeFrame.environment.active&&secondResumeFrame.projectile.active&&secondResumeFrame.laser.visible);
+    assert.ok(secondElapsedAdvance>0&&secondElapsedAdvance<0.2,
+      `second resumed frame wall time was abnormal: ${secondElapsedAdvance}`);
+    assert.ok(Math.abs(secondEnvironmentAdvance-secondElapsedAdvance)<0.025);
+    assert.ok(secondProjectileAdvance>0&&secondProjectileAdvance<=0.055,
+      `second resumed frame simulation was abnormal: ${secondProjectileAdvance}`);
+    assert.ok(Math.abs(secondLaserAdvance-secondProjectileAdvance)<0.01);
+    assert.ok(Math.abs(secondProjectileTravel-(secondResumeFrame.projectile.vx*secondProjectileAdvance))<0.025);
 
     page.requireDev('dash repeat probe');
     await page.gameEvaluate(`

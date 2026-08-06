@@ -307,7 +307,6 @@ const state = {
   cameraLookAhead: new THREE.Vector2(),
   reducedMotion: reducedMotionPreference?.matches ?? false,
 };
-let discardNextWallDelta = false;
 
 const input = {
   keys: new Set(),
@@ -1875,7 +1874,6 @@ function randomShardPosition() {
 }
 
 function resetState() {
-  discardNextWallDelta = false;
   clearWorldEntities();
   clearCombo();
   state.toastTimer = 0;
@@ -2021,7 +2019,7 @@ function resumeGame() {
   if (state.mode !== "paused") return;
   audio.unlock();
   if (!transitionTo("playing", { resumed: true })) return;
-  discardNextWallDelta = true;
+  clock.getDelta();
   toast("信号恢复", "cyan");
 }
 
@@ -4303,9 +4301,7 @@ function resize() {
 function animate() {
   const rawWallDt = clock.getDelta();
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
-  const frameWallDt = discardNextWallDelta ? 0 : rawWallDt;
-  discardNextWallDelta = false;
-  const { wallDt, simDt } = computeFrameDeltas(frameWallDt, simulationScale);
+  const { wallDt, simDt } = computeFrameDeltas(rawWallDt, simulationScale);
   sanitizeRuntimeState();
   if (state.mode !== "paused" && state.slowMotionTimer > 0) {
     state.slowMotionTimer = Math.max(0, state.slowMotionTimer - wallDt);
