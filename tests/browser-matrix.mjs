@@ -8,10 +8,12 @@ import {
   captureNaturalRealmScreenshots,
 } from './browser/harness.mjs';
 import { v22RegressionScenarios } from './browser/v22-regressions.mjs';
+import { v3FoundationScenarios } from './browser/v3-foundation.mjs';
 
+const browserScenarios = [...v3FoundationScenarios, ...v22RegressionScenarios];
 const selectedScenarios = BROWSER_MATRIX_SCENARIO
-  ? v22RegressionScenarios.filter(([name]) => name.includes(BROWSER_MATRIX_SCENARIO))
-  : v22RegressionScenarios;
+  ? browserScenarios.filter(([name]) => name.includes(BROWSER_MATRIX_SCENARIO))
+  : browserScenarios;
 let passed = 0;
 
 try {

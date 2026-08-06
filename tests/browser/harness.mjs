@@ -241,10 +241,10 @@ export class GamePage {
     let scriptInfo = null;
     let kind = null;
     for (const [url, info] of this.scripts) {
-      if (/\/src\/main\.js(?:\?|$)/.test(url)) {
+      if (/\/src\/app\/legacy-runtime\.js(?:\?|$)/.test(url)) {
         scriptInfo = info;
         kind = 'dev';
-      } else if (/\/assets\/index-[^/]+\.js(?:\?|$)/.test(url)) {
+      } else if (!scriptInfo && /\/assets\/index-[^/]+\.js(?:\?|$)/.test(url)) {
         scriptInfo = info;
         kind = 'production';
       }
@@ -664,4 +664,3 @@ export async function breakpointCleanupFailurePathSelfTest() {
     'Debugger.resume',
   ]);
 }
-

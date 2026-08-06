@@ -1,0 +1,87 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createEventQueue } from '../src/game/events.js';
+import { createGameSession, GAME_SESSION_MODES } from '../src/game/session.js';
+
+const EXPECTED_MODES = ['menu', 'briefing', 'playing', 'upgrade', 'paused', 'chapterComplete', 'victory', 'defeat'];
+
+test('session locks the public mode vocabulary and valid campaign transitions', () => {
+  assert.deepEqual([...GAME_SESSION_MODES], EXPECTED_MODES);
+  const events = createEventQueue();
+  const transitions = [];
+  const session = createGameSession({
+    development: true,
+    events,
+    maxHull: 4,
+    onTransition: (transition) => transitions.push([transition.previous.mode, transition.current.mode]),
+  });
+  assert.equal(session.snapshot().mode, 'menu');
+  assert.equal(session.startRun('standard', 1234), true);
+  assert.equal(session.snapshot().mode, 'briefing');
+  assert.equal(session.startRoom({ id: 'abyss-01', chapterIndex: 0 }), true);
+  assert.equal(session.pause(), true);
+  assert.equal(session.resume(), true);
+  assert.equal(session.completeRoom({ nextMode: 'upgrade', score: 20 }), true);
+  assert.equal(session.startRoom({ id: 'abyss-02', chapterIndex: 0 }), true);
+  assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 0 }), true);
+  assert.equal(session.startRoom({ id: 'data-01', chapterIndex: 1 }), true);
+  assert.equal(session.completeRoom({ outcome: 'victory' }), true);
+  assert.deepEqual(transitions, [
+    ['menu', 'briefing'],
+    ['briefing', 'playing'],
+    ['playing', 'paused'],
+    ['paused', 'playing'],
+    ['playing', 'upgrade'],
+    ['upgrade', 'playing'],
+    ['playing', 'chapterComplete'],
+    ['chapterComplete', 'playing'],
+    ['playing', 'victory'],
+  ]);
+  const snapshot = session.snapshot();
+  assert.equal(snapshot.runMode, 'standard');
+  assert.equal(snapshot.seed, 1234);
+  assert.equal(snapshot.chapterIndex, 1);
+  assert.equal(snapshot.stats.roomsCompleted, 3);
+  assert.equal(events.getStats().emitted > 0, true);
+});
+
+test('invalid transitions throw in development and return false in production', () => {
+  const development = createGameSession({ development: true });
+  assert.throws(() => development.pause(), /Invalid GameSession transition menu -> paused/);
+  development.startRun('standard', 1);
+  assert.throws(() => development.resume(), /Invalid GameSession transition briefing -> playing/);
+
+  const production = createGameSession({ development: false });
+  assert.equal(production.pause(), false);
+  assert.equal(production.resume(), false);
+  assert.equal(production.snapshot().mode, 'menu');
+});
+
+test('damageHull owns defeat and reset produces a fresh immutable snapshot', () => {
+  const session = createGameSession({ development: true, maxHull: 3 });
+  session.startRun('abyss', 99);
+  session.startRoom({ id: 'abyss-01', chapterIndex: 0 });
+  assert.equal(session.damageHull(2), true);
+  assert.equal(session.snapshot().hull, 1);
+  assert.equal(session.damageHull(1), true);
+  const defeated = session.snapshot();
+  assert.equal(defeated.mode, 'defeat');
+  assert.equal(defeated.hull, 0);
+  assert.equal(defeated.stats.damageTaken, 3);
+  assert.equal(session.reset(), true);
+  const reset = session.snapshot();
+  assert.equal(reset.mode, 'menu');
+  assert.equal(reset.hull, 3);
+  assert.equal(reset.runMode, null);
+  assert.notEqual(reset, defeated);
+});
+
+test('session validates run modes, seeds, rooms and damage', () => {
+  const session = createGameSession({ development: true });
+  assert.throws(() => session.startRun('casual', 1), /standard or abyss/);
+  assert.throws(() => session.startRun('standard', Number.NaN), /finite seed/);
+  session.startRun('standard', 1);
+  assert.throws(() => session.startRoom(null), /room object/);
+  session.startRoom({ id: 'room' });
+  assert.throws(() => session.damageHull(-1), /non-negative finite/);
+});
