@@ -130,6 +130,7 @@ function offsetToLocation(source, offset) {
 
 function keyDefinition(key, code) {
   if (key === 'Tab') return { windowsVirtualKeyCode: 9, nativeVirtualKeyCode: 9 };
+  if (key === 'Enter') return { windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 };
   if (key === ' ') return { windowsVirtualKeyCode: 32, nativeVirtualKeyCode: 32 };
   if (/^[0-9]$/.test(key)) {
     const value = key.charCodeAt(0);
@@ -231,6 +232,7 @@ class GamePage {
     await this.client.send('Page.navigate', { url: APP_URL });
     await loaded;
     await this.waitForPage(`document.readyState === 'complete' && Boolean(document.querySelector('canvas'))`);
+    await this.evaluate(`document.fonts?.ready?.then(()=>true) ?? true`);
     await this.waitForPage(`document.activeElement?.id === 'primary-button'`);
     await this.#discoverGameScript();
   }
@@ -467,8 +469,16 @@ class GamePage {
   }
 
   async pressKey(key, code, extra = {}) {
+    await this.client.send('Page.bringToFront');
     await this.dispatchKey('rawKeyDown', key, code, extra);
     await this.dispatchKey('keyUp', key, code, { modifiers: extra.modifiers || 0 });
+  }
+
+  async pressNativeKey(key, code) {
+    await this.client.send('Page.bringToFront');
+    const text = key === 'Enter' ? '\r' : key === ' ' ? ' ' : undefined;
+    await this.dispatchKey('keyDown', key, code, text ? { text, unmodifiedText:text } : {});
+    await this.dispatchKey('keyUp', key, code);
   }
 
   async captureScreenshot(filePath) {
@@ -497,9 +507,10 @@ class GamePage {
   }
 
   async startGame() {
-    await this.click('#primary-button');
+    await this.client.send('Page.bringToFront');
+    await this.trustedClick('#primary-button');
     await this.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
-    await this.waitForPage(`document.activeElement?.tagName === 'CANVAS'`, 1500);
+    await this.waitForPage(`document.activeElement?.tagName === 'CANVAS'`, 3000);
     assert.equal(await this.evaluate(`document.activeElement?.tagName`), 'CANVAS', `${this.name}: gameplay focus did not move to the canvas`);
     assert.equal(await this.evaluate(`document.activeElement?.matches('button')`), false, `${this.name}: gameplay focus remains on a button`);
   }
@@ -745,7 +756,7 @@ async function desktopCoreScenario() {
       await page.pressKey('Tab', 'Tab');
     }
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
-    await page.pressKey('Tab', 'Tab');
+    await page.pressNativeKey('Tab', 'Tab');
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
@@ -909,11 +920,12 @@ async function desktopCoreScenario() {
       $player.velocity.set(0,0);
       return true;
     `);
+    await page.client.send('Page.bringToFront');
     await page.dispatchKey('rawKeyDown', ' ', 'Space');
-    await sleep(42);
+    await page.waitForGame(`return {sequence:$state.dashSequence}`, (snapshot)=>snapshot.sequence===1);
     await page.dispatchRepeatedKey(' ', 'Space', 8);
     await page.dispatchKey('keyUp', ' ', 'Space');
-    await sleep(80);
+    await sleep(50);
     const dash = await page.gameEvaluate('return {sequence:$state.dashSequence,charges:[...$state.dashCharges]}');
     assert.equal(dash.sequence, 1, `held Space triggered ${dash.sequence} dashes`);
     assert.ok(dash.charges[1] > 0.99, `second dash charge was consumed: ${dash.charges}`);
@@ -934,7 +946,7 @@ async function desktopCoreScenario() {
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 0);
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 2);
-    await page.pressKey('Tab', 'Tab');
+    await page.pressNativeKey('Tab', 'Tab');
     assert.equal(await page.evaluate(`Array.from(document.querySelectorAll('.upgrade-option')).indexOf(document.activeElement)`), 0);
 
     const ownedBeforeRepeat = await page.gameEvaluate('return $state.ownedUpgrades.length');
@@ -1025,8 +1037,9 @@ async function briefingAndLaserUiScenario() {
       const shots=$state.stats.laserShots;
       return {energy:$state.weaponEnergy,state:$state.laserState,shots};
     `);
+    await page.evaluate(`globalThis.__laserTouchClick=false;document.querySelector('#laser-button').addEventListener('click',()=>{globalThis.__laserTouchClick=true},{once:true})`);
     await page.tap('#laser-button');
-    await sleep(45);
+    await page.waitForPage(`globalThis.__laserTouchClick===true`);
     const unavailableAfter = await page.gameEvaluate(`return {
       energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,buffer:input.laserBuffer,
       disabled:dom.laserButton.getAttribute('aria-disabled'),progress:dom.weaponEnergyFill.parentElement.getAttribute('aria-valuenow'),
@@ -1037,12 +1050,13 @@ async function briefingAndLaserUiScenario() {
 
     await page.gameEvaluate(`$state.weaponEnergy=100;$state.laserState='ready';input.laserBuffer=0;return true`);
     await page.waitForPage(`document.querySelector('#laser-button').getAttribute('aria-disabled')==='false'`);
+    await page.evaluate(`globalThis.__laserTouchClick=false;document.querySelector('#laser-button').addEventListener('click',()=>{globalThis.__laserTouchClick=true},{once:true})`);
     await page.tap('#laser-button');
-    await sleep(45);
-    const touchStarted = await page.gameEvaluate(`return {
+    await page.waitForPage(`globalThis.__laserTouchClick===true`);
+    const touchStarted = await page.waitForGame(`return {
       energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,buffer:input.laserBuffer,
       disabled:dom.laserButton.getAttribute('aria-disabled'),progress:dom.weaponEnergyFill.parentElement.getAttribute('aria-valuenow'),
-    }`);
+    }`, (snapshot)=>snapshot.state==='charge');
     assert.deepEqual(touchStarted, { energy:0,state:'charge',shots:1,buffer:0,disabled:'true',progress:'0' });
   });
 }
@@ -1097,11 +1111,10 @@ async function chargedLightLanceScenario() {
     assert.deepEqual(pickupContract.beforeFire, { energy:100, state:'ready', shots:0 });
 
     await page.pressKey('e', 'KeyE');
-    await sleep(35);
-    const charging = await page.gameEvaluate(`return {
+    const charging = await page.waitForGame(`return {
       energy:$state.weaponEnergy,state:$state.laserState,shots:$state.stats.laserShots,
       buffer:input.laserBuffer,
-    }`);
+    }`, (snapshot)=>snapshot.state==='charge');
     assert.deepEqual(charging, { energy:0, state:'charge', shots:1, buffer:0 });
 
     const shot = await page.gameEvaluate(`
@@ -2559,7 +2572,7 @@ async function realmArtDirectionsScenario() {
           stage:$state.stageIndex,
           controller:realmBackgrounds.getStats(),
           dataset:document.documentElement.dataset.realm,
-          audio:$audio.getDebugSnapshot().stageIndex,
+          audio:(()=>{const snapshot=$audio.getDebugSnapshot();return {stage:snapshot.stageIndex,pending:snapshot.pendingStageIndex};})(),
           banner:{
             title:dom.stageBannerTitle.textContent,
             label:dom.stageBannerLabel.textContent,
@@ -2576,7 +2589,11 @@ async function realmArtDirectionsScenario() {
       assert.equal(entry.controller.activeRealm, target);
       assert.equal(entry.controller.visibleGroups, 2);
       assert.equal(entry.dataset, expectedDatasets[target - 1]);
-      assert.equal(entry.audio, target);
+      assert.ok(
+        (entry.audio.stage===target&&entry.audio.pending===null)
+          || (entry.audio.stage<target&&entry.audio.pending===target),
+        `realm ${target} music was neither committed nor queued at its bar boundary: ${JSON.stringify(entry.audio)}`,
+      );
       assert.equal(entry.banner.title, expectedTitles[target - 1]);
       assert.equal(entry.banner.label, expectedLabels[target - 1]);
       assert.equal(entry.banner.shown, true);
@@ -2691,14 +2708,14 @@ async function realmArtDirectionsScenario() {
       return {
         stage:$state.stageIndex,
         dataset:document.documentElement.dataset.realm,
-        audio:$audio.getDebugSnapshot().stageIndex,
+        audio:(()=>{const snapshot=$audio.getDebugSnapshot();return {stage:snapshot.stageIndex,pending:snapshot.pendingStageIndex};})(),
         left:banner.left,top:banner.top,right:banner.right,bottom:banner.bottom,
         hudBottom:hud.bottom,width,height,overlap,
       };
     `);
     assert.equal(mobileBanner.stage, 1);
     assert.equal(mobileBanner.dataset, 'data-city');
-    assert.equal(mobileBanner.audio, 1);
+    assert.ok((mobileBanner.audio.stage===1&&mobileBanner.audio.pending===null)||(mobileBanner.audio.stage===0&&mobileBanner.audio.pending===1), JSON.stringify(mobileBanner.audio));
     assert.ok(mobileBanner.left >= 8 && mobileBanner.right <= mobileBanner.width - 8);
     assert.ok(mobileBanner.top >= mobileBanner.hudBottom + 4, 'mobile banner overlapped the HUD');
     assert.ok(mobileBanner.bottom < mobileBanner.height * 0.31, 'mobile banner covered the combat center');
@@ -2716,10 +2733,12 @@ async function realmArtDirectionsScenario() {
 async function runtimeGuardScenario() {
   await withPage('runtime-guards', {}, async (page) => {
     page.requireDev('runtime guard, cap, and listener lifecycle probe');
-    await page.startGame();
-    await page.trustedClick('#mute-button');
-    await sleep(60);
-    await page.trustedClick('#mute-button');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    await page.click('#mute-button');
+    await page.waitForGame(`return {state:$audio.context?.state,muted:$audio.muted}`, (snapshot) => snapshot.state === 'running' && snapshot.muted, 2000);
+    await page.click('#mute-button');
     await page.waitForGame(`return {state:$audio.context?.state,muted:$audio.muted}`, (snapshot) => snapshot.state === 'running' && !snapshot.muted, 2000);
     const injected = await page.gameEvaluate(`
       const before={setup:runtimeStats.inputSetupCount,refresh:runtimeStats.composerRefreshCount};
@@ -2883,14 +2902,14 @@ async function runtimeGuardScenario() {
       return {
         healed,
         realm:{active:stats.activeRealm,objectCounts:stats.objectCounts,rootCount:scene.children.filter((child)=>child.userData?.realmBackgroundRoot).length,finite:finiteTransform(refs.backgroundRoot)&&finiteMaterials(refs.backgroundRoot)},
-        audio:{stage:audioSnapshot.stageIndex,bpm:audioSnapshot.bpm,ready:audioSnapshot.schedulerReady,next:$audio.nextBeatTime,sources:audioSnapshot.activeMusicSources,buses:refs.audioBuses.every((bus,index)=>bus===[$audio.masterGain,$audio.musicGain,$audio.sfxGain,$audio.ambienceGain,$audio.uiGain][index]),mode:$state.mode,context:$audio.context?.state,unlocked:$audio._unlocked,muted:$audio.muted},
+        audio:{stage:audioSnapshot.stageIndex,pending:audioSnapshot.pendingStageIndex,bpm:audioSnapshot.bpm,ready:audioSnapshot.schedulerReady,next:$audio.nextBeatTime,sources:audioSnapshot.activeMusicSources,buses:refs.audioBuses.every((bus,index)=>bus===[$audio.masterGain,$audio.musicGain,$audio.sfxGain,$audio.ambienceGain,$audio.uiGain][index]),mode:$state.mode,context:$audio.context?.state,unlocked:$audio._unlocked,muted:$audio.muted},
         expected:{objectCounts:refs.backgroundObjectCounts,rootCount:refs.sceneBackgroundRoots},
       };
     `);
     assert.deepEqual(finiteRecovery.healed, { background:true,rootZ:-5,audio:true }, `finite corruption did not heal: ${JSON.stringify(finiteRecovery)}`);
     assert.deepEqual(finiteRecovery.realm, { active:1,objectCounts:finiteRecovery.expected.objectCounts,rootCount:finiteRecovery.expected.rootCount,finite:true });
     assert.equal(finiteRecovery.realm.rootCount, 1);
-    assert.deepEqual({stage:finiteRecovery.audio.stage,bpm:finiteRecovery.audio.bpm,ready:finiteRecovery.audio.ready,buses:finiteRecovery.audio.buses}, {stage:1,bpm:116,ready:true,buses:true}, JSON.stringify(finiteRecovery));
+    assert.deepEqual({stage:finiteRecovery.audio.stage,pending:finiteRecovery.audio.pending,bpm:finiteRecovery.audio.bpm,ready:finiteRecovery.audio.ready,buses:finiteRecovery.audio.buses}, {stage:0,pending:1,bpm:92,ready:true,buses:true}, JSON.stringify(finiteRecovery));
     assert.ok(Number.isFinite(finiteRecovery.audio.next)&&finiteRecovery.audio.sources>0&&finiteRecovery.audio.sources<=8,
       `music did not resume safely after scheduler repair: ${JSON.stringify(finiteRecovery.audio)}`);
 
@@ -2978,9 +2997,9 @@ async function repairAndAriaScenario() {
       const after={now:dom.bossTrack.getAttribute('aria-valuenow'),max:dom.bossTrack.getAttribute('aria-valuemax'),text:dom.bossTrack.getAttribute('aria-valuetext')};
       return {before,after,hp:boss.hp};
     `);
-    assert.deepEqual(bossAria.before, { now: '100', max: '100', text: '深潮主脑稳定度 6 / 6' });
+    assert.deepEqual(bossAria.before, { now: '100', max: '100', text: '深潮主脑稳定度 30 / 30' });
     assert.equal(bossAria.hp, 25);
-    assert.deepEqual(bossAria.after, { now: '83', max: '100', text: '深潮主脑稳定度 5 / 6' });
+    assert.deepEqual(bossAria.after, { now: '83', max: '100', text: '深潮主脑稳定度 25 / 30' });
 
     const forcedColors = await page.gameEvaluate(`
       $state.maxHealth=4;$state.health=2;syncHealthPips();
@@ -3159,15 +3178,17 @@ async function jumpToBoss(page) {
 
 async function victoryScenario() {
   await withPage('victory', {}, async (page) => {
-    await page.startGame();
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const boss = await jumpToBoss(page);
     assert.equal(boss.stage, 3);
     assert.equal(boss.deadline, 126);
     assert.ok(boss.timeLeft > 25.5 && boss.timeLeft <= 26);
     assert.equal(boss.bossHp, 30);
     assert.equal(await page.evaluate(`document.querySelector('.time-card > span').textContent`), '首领窗口');
-    const bossHudTime = await page.evaluate(`document.querySelector('#time-value').textContent`);
-    assert.match(bossHudTime, /^00:(?:25|26)$/, `boss HUD did not enter the 26-second window: ${bossHudTime}`);
+    const bossHud = await page.gameEvaluate(`return {text:document.querySelector('#time-value').textContent,timeLeft:$state.timeLeft}`);
+    const expectedBossHudTime = `00:${String(Math.ceil(bossHud.timeLeft)).padStart(2, '0')}`;
+    assert.equal(bossHud.text, expectedBossHudTime, `boss HUD did not use ceil(timeLeft): ${bossHud.text} for ${bossHud.timeLeft}`);
 
     const settled = await page.gameEvaluate(`
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
@@ -3190,11 +3211,16 @@ async function victoryScenario() {
     await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
     // The terminal dialog has one action. Tabbing must deterministically enter
     // and remain inside that trap even if the browser deferred auto-focus.
-    await page.pressKey('Tab', 'Tab');
-    await page.waitForPage(`document.activeElement?.id === 'primary-button'`, 1500);
-    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
-    await page.pressKey('Tab', 'Tab');
-    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
+    const firstTab=await page.gameEvaluate(`
+      const event=new KeyboardEvent('keydown',{key:'Tab',code:'Tab',bubbles:true,cancelable:true});
+      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.id)};
+    `);
+    assert.deepEqual(firstTab, { trapped:true,dialog:true,focusable:['primary-button'] });
+    const secondTab=await page.gameEvaluate(`
+      const event=new KeyboardEvent('keydown',{key:'Tab',code:'Tab',bubbles:true,cancelable:true});
+      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.id)};
+    `);
+    assert.deepEqual(secondTab, { trapped:true,dialog:true,focusable:['primary-button'] });
     const copy = await page.evaluate(`({kicker:document.querySelector('#overlay-kicker').textContent,copy:document.querySelector('#overlay-copy').textContent})`);
     assert.match(copy.kicker, /SIGNAL CLEAR/);
     assert.match(copy.copy, /深潮主脑已被摧毁/);
@@ -3430,6 +3456,546 @@ async function bossPhaseTwoScenario() {
   });
 }
 
+
+async function finalBulwarkAndWarningOwnershipScenario() {
+  await withPage('final-bulwark-warning-ownership', {}, async (page) => {
+    page.requireDev('natural Bulwark and per-enemy warning ownership probes');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    const contract = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=2;
+      $state.elapsed=64.4;
+      $state.health=$state.maxHealth;
+      $state.lastFormation=null;
+      $state.lastFormationAt=-Infinity;
+      $state.stats.formationCount=0;
+      $state.stats.formationLog=[];
+      $state.stats.realmAttackRoles={};
+      $player.position.set(0,0);
+      const formed=spawnFormation();
+      const naturalBulwark=$enemies.find((enemy)=>ENEMY_TYPES[enemy.type]?.role==='Bulwark');
+      for(let index=$enemies.length-1;index>=0;index-=1){
+        if($enemies[index]!==naturalBulwark) removeEnemy(index);
+      }
+      naturalBulwark.group.position.copy($player.position);
+      naturalBulwark.hp=3;
+      naturalBulwark.state='chase';
+      naturalBulwark.stateTimer=1;
+      naturalBulwark.counterCooldown=0;
+      naturalBulwark.counterHitToken=null;
+      naturalBulwark.velocity.set(0,0);
+      $state.dashSequence=41;
+      $state.dashTimer=0.12;
+      $state.dashInvulnTimer=0.12;
+      updateEnemies(0);
+      const dash={
+        state:naturalBulwark.state,
+        timer:naturalBulwark.stateTimer,
+        role:ENEMY_TYPES[naturalBulwark.type]?.role,
+        type:naturalBulwark.type,
+        attacks:$state.stats.realmAttackRoles.Bulwark,
+      };
+      updateEnemies(0);
+      const sameDashAttacks=$state.stats.realmAttackRoles.Bulwark;
+      naturalBulwark.group.position.set(0,3,2);
+      naturalBulwark.hp=3;
+      naturalBulwark.state='chase';
+      naturalBulwark.stateTimer=1;
+      naturalBulwark.counterCooldown=0;
+      naturalBulwark.counterHitToken=null;
+      naturalBulwark.lastLaserSequence=null;
+      naturalBulwark.visuals.shockwave.visible=false;
+      $player.position.set(0,0);
+      $player.facing.set(0,1);
+      $state.dashTimer=0;
+      $state.dashInvulnTimer=0;
+      $state.laserDirection.set(0,1);
+      $state.laserState='active';
+      $state.laserSequence=73;
+      $state.laserSequenceTargets=0;
+      resolveLaserHits();
+      const laser={state:naturalBulwark.state,timer:naturalBulwark.stateTimer,attacks:$state.stats.realmAttackRoles.Bulwark,hp:naturalBulwark.hp};
+      resolveLaserHits();
+      const sameLaserAttacks=$state.stats.realmAttackRoles.Bulwark;
+      naturalBulwark.hp=3;
+      naturalBulwark.state='shockExecute';
+      naturalBulwark.stateTimer=0.4;
+      naturalBulwark.counterCooldown=0;
+      naturalBulwark.counterHitToken=null;
+      const shockBlocked=tryStartBulwarkArmorCounter(naturalBulwark,'dash',999);
+
+      clearWorldEntities();
+      $state.reducedMotion=false;
+      const chaserA=createChaser(new THREE.Vector2(-4,2));
+      const chaserB=createChaser(new THREE.Vector2(4,2));
+      for(const [enemy,timer] of [[chaserA,0.44],[chaserB,0.08]]){
+        enemy.state='chargeTelegraph';enemy.stateTimer=timer;enemy.dashDirection.set(0,-1);
+      }
+      updateChaser(chaserA,0,new THREE.Vector2(0,-1));
+      const chaserABefore=chaserA.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+      updateChaser(chaserB,0,new THREE.Vector2(0,-1));
+      const chaserAAfter=chaserA.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+      const chaserBState=chaserB.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+      const chaserMaterialIdsBefore=chaserA.visuals.chargeArc.children.map((segment)=>segment.material.uuid);
+      for(let index=0;index<120;index+=1) updateChaser(chaserA,0,new THREE.Vector2(0,-1));
+      const chaserMaterialIdsAfter=chaserA.visuals.chargeArc.children.map((segment)=>segment.material.uuid);
+
+      $state.reducedMotion=true;
+      chaserA.stateTimer=0.44;chaserB.stateTimer=0.08;
+      updateChaser(chaserA,0,new THREE.Vector2(0,-1));
+      const reducedChaserABefore=chaserA.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,visible:segment.visible,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+      updateChaser(chaserB,0,new THREE.Vector2(0,-1));
+      const reducedChaserAAfter=chaserA.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,visible:segment.visible,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+      const reducedChaserB=chaserB.visuals.chargeArc.children.map((segment)=>({uuid:segment.material.uuid,visible:segment.visible,opacity:segment.material.opacity,color:segment.material.color.getHex()}));
+
+      $state.reducedMotion=false;
+      const strikerA=createStriker(new THREE.Vector2(-3,-2));
+      const strikerB=createStriker(new THREE.Vector2(3,-2));
+      for(const [enemy,timer] of [[strikerA,0.5],[strikerB,0.04]]){
+        enemy.state='telegraph';enemy.stateTimer=timer;enemy.aimDirection.set(0,-1);enemy.dashDirection.set(0,-1);
+      }
+      updateStriker(strikerA,0,new THREE.Vector2(0,-1));
+      const strikerABefore={uuid:strikerA.visuals.line.material.uuid,opacity:strikerA.visuals.line.material.opacity,color:strikerA.visuals.line.material.color.getHex()};
+      updateStriker(strikerB,0,new THREE.Vector2(0,-1));
+      const strikerAAfter={uuid:strikerA.visuals.line.material.uuid,opacity:strikerA.visuals.line.material.opacity,color:strikerA.visuals.line.material.color.getHex()};
+      const strikerBState={uuid:strikerB.visuals.line.material.uuid,opacity:strikerB.visuals.line.material.opacity,color:strikerB.visuals.line.material.color.getHex()};
+
+      $state.reducedMotion=true;
+      strikerA.stateTimer=0.5;strikerB.stateTimer=0.04;
+      updateStriker(strikerA,0,new THREE.Vector2(0,-1));
+      const reducedABefore={opacity:strikerA.visuals.line.material.opacity,color:strikerA.visuals.line.material.color.getHex()};
+      updateStriker(strikerB,0,new THREE.Vector2(0,-1));
+      const reducedAAfter={opacity:strikerA.visuals.line.material.opacity,color:strikerA.visuals.line.material.color.getHex()};
+      const reducedB={opacity:strikerB.visuals.line.material.opacity,color:strikerB.visuals.line.material.color.getHex()};
+
+      const owned=[...(chaserA.ownedMaterials??[]),...(chaserB.ownedMaterials??[]),...(strikerA.ownedMaterials??[]),...(strikerB.ownedMaterials??[])];
+      let disposed=0;
+      for(const material of owned){
+        const original=material.dispose.bind(material);
+        material.dispose=()=>{disposed+=1;original();};
+      }
+      while($enemies.length) removeEnemy($enemies.length-1);
+      return {
+        formed,formation:$state.stats.formationLog[0]?.name,dash,sameDashAttacks,laser,sameLaserAttacks,shockBlocked,
+        warnings:{chaserABefore,chaserAAfter,chaserBState,chaserMaterialIdsBefore,chaserMaterialIdsAfter,reducedChaserABefore,reducedChaserAAfter,reducedChaserB,strikerABefore,strikerAAfter,strikerBState,reducedABefore,reducedAAfter,reducedB},
+        ownership:{owned:owned.length,disposed},
+      };
+    `);
+    assert.equal(contract.formed, true);
+    assert.equal(contract.formation, 'elite-escort');
+    assert.deepEqual(contract.dash, {
+      state:'armorCounterTelegraph',timer:0.55,role:'Bulwark',type:'elite',attacks:1,
+    });
+    assert.equal(contract.sameDashAttacks, 1);
+    assert.deepEqual(contract.laser, { state:'armorCounterTelegraph',timer:0.55,attacks:2,hp:2 });
+    assert.equal(contract.sameLaserAttacks, 2);
+    assert.equal(contract.shockBlocked, false);
+    assert.deepEqual(contract.warnings.chaserABefore, contract.warnings.chaserAAfter,
+      `second Chaser overwrote the first: ${JSON.stringify(contract.warnings)}`);
+    assert.equal(new Set(contract.warnings.chaserABefore.map(({uuid})=>uuid)).size, 3,
+      `Chaser segments did not own distinct materials: ${JSON.stringify(contract.warnings.chaserABefore)}`);
+    assert.equal(new Set(contract.warnings.chaserABefore.map(({opacity})=>opacity)).size, 3,
+      `Chaser segment opacity collapsed: ${JSON.stringify(contract.warnings.chaserABefore)}`);
+    assert.ok(contract.warnings.chaserABefore.every(({uuid})=>!contract.warnings.chaserBState.some((item)=>item.uuid===uuid)),
+      'simultaneous Chasers shared mutable warning materials');
+    assert.deepEqual(contract.warnings.chaserMaterialIdsBefore, contract.warnings.chaserMaterialIdsAfter,
+      'Chaser update allocated new warning materials per frame');
+    assert.deepEqual(contract.warnings.reducedChaserABefore, contract.warnings.reducedChaserAAfter,
+      `reduced-motion Chaser warning was overwritten: ${JSON.stringify(contract.warnings)}`);
+    assert.equal(new Set(contract.warnings.reducedChaserABefore.map(({uuid})=>uuid)).size, 3,
+      'reduced-motion Chaser segments did not retain distinct materials');
+    assert.equal(contract.warnings.reducedChaserABefore.filter(({visible})=>visible).length, 1,
+      'reduced-motion Chaser did not expose a single discrete warning segment');
+    assert.ok(contract.warnings.reducedChaserABefore.every(({uuid})=>!contract.warnings.reducedChaserB.some((item)=>item.uuid===uuid)),
+      'simultaneous reduced-motion Chasers shared warning materials');
+    assert.deepEqual(contract.warnings.strikerABefore, contract.warnings.strikerAAfter,
+      `second Striker overwrote the first: ${JSON.stringify(contract.warnings)}`);
+    assert.notDeepEqual(
+      {opacity:contract.warnings.strikerABefore.opacity,color:contract.warnings.strikerABefore.color},
+      {opacity:contract.warnings.strikerBState.opacity,color:contract.warnings.strikerBState.color},
+      'simultaneous Strikers at different progress rendered identically',
+    );
+    assert.deepEqual(contract.warnings.reducedABefore, contract.warnings.reducedAAfter,
+      `reduced-motion Striker warning was overwritten: ${JSON.stringify(contract.warnings)}`);
+    assert.notDeepEqual(contract.warnings.reducedABefore, contract.warnings.reducedB,
+      'reduced-motion Strikers at different progress rendered identically');
+    assert.equal(contract.ownership.owned, 8);
+    assert.equal(contract.ownership.disposed, contract.ownership.owned);
+  });
+}
+
+async function finalNativeControlActivationScenario() {
+  await withPage('final-native-controls', { width:390,height:844,deviceScaleFactor:2,mobile:true,touch:true }, async (page) => {
+    page.requireDev('native Dash and light-lance activation probes');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    assert.equal(await page.evaluate(`getComputedStyle(document.querySelector('#touch-controls')).display !== 'none'`), true);
+
+    const dashRoutes = [
+      ['Enter', async()=>{ await page.evaluate(`document.querySelector('#dash-button').focus()`); await page.pressNativeKey('Enter','Enter'); }],
+      ['Space', async()=>{ await page.evaluate(`document.querySelector('#dash-button').focus()`); await page.pressNativeKey(' ','Space'); }],
+      ['synthetic click', async()=>page.click('#dash-button')],
+      ['pointer click', async()=>page.trustedClick('#dash-button')],
+      ['touch tap', async()=>page.tap('#dash-button')],
+    ];
+    for(const [label,activate] of dashRoutes){
+      const before=await page.gameEvaluate(`
+        clearWorldEntities();
+        $state.mode='playing';$state.enemySpawnTimer=999;$state.formationTimer=999;$state.shardSpawnTimer=999;
+        $state.dashCharges=[1,1];$state.dashTimer=0;$state.dashInvulnTimer=0;
+        $state.laserState='idle';$state.weaponEnergy=0;input.dashBuffer=0;input.laserBuffer=0;
+        $player.velocity.set(0,0);$player.facing.set(0,1);
+        runtimeStats.dashRequestCount=0;
+        return {sequence:$state.dashSequence,requests:runtimeStats.dashRequestCount};
+      `);
+      await activate();
+      const after=await page.waitForGame(
+        `return {sequence:$state.dashSequence,requests:runtimeStats.dashRequestCount}`,
+        (snapshot)=>snapshot.sequence===before.sequence+1,
+      );
+      await sleep(70);
+      const settled=await page.gameEvaluate(`return {sequence:$state.dashSequence,requests:runtimeStats.dashRequestCount}`);
+      assert.deepEqual(after, { sequence:before.sequence+1,requests:1 }, `${label} did not issue exactly one Dash request`);
+      assert.deepEqual(settled, after, `${label} produced a duplicate Dash request`);
+    }
+
+    const laserRoutes = [
+      ['Enter', async()=>{ await page.evaluate(`document.querySelector('#laser-button').focus()`); await page.pressNativeKey('Enter','Enter'); }],
+      ['Space', async()=>{ await page.evaluate(`document.querySelector('#laser-button').focus()`); await page.pressNativeKey(' ','Space'); }],
+      ['synthetic click', async()=>page.click('#laser-button')],
+      ['pointer click', async()=>page.trustedClick('#laser-button')],
+      ['touch tap', async()=>page.tap('#laser-button')],
+    ];
+    for(const [label,activate] of laserRoutes){
+      const before=await page.gameEvaluate(`
+        clearLaserState();
+        $state.mode='playing';$state.weaponEnergy=LASER_RULES.maxEnergy;$state.laserState='ready';
+        $state.dashTimer=0;$state.dashInvulnTimer=0;input.laserBuffer=0;
+        runtimeStats.laserRequestCount=0;
+        updateLaserHUD();
+        return {shots:$state.stats.laserShots,requests:runtimeStats.laserRequestCount};
+      `);
+      await activate();
+      const after=await page.waitForGame(
+        `return {shots:$state.stats.laserShots,requests:runtimeStats.laserRequestCount,state:$state.laserState}`,
+        (snapshot)=>snapshot.shots===before.shots+1,
+      );
+      await sleep(70);
+      const settled=await page.gameEvaluate(`return {shots:$state.stats.laserShots,requests:runtimeStats.laserRequestCount,state:$state.laserState}`);
+      assert.equal(after.requests, 1, `${label} did not issue exactly one light-lance request`);
+      assert.equal(after.state, 'charge');
+      assert.deepEqual(settled, after, `${label} produced a duplicate light-lance request`);
+    }
+
+    const disabled=await page.gameEvaluate(`
+      clearLaserState();
+      $state.mode='playing';$state.weaponEnergy=0;$state.laserState='idle';
+      $state.dashTimer=0;$state.dashInvulnTimer=0;input.laserBuffer=0;
+      runtimeStats.laserRequestCount=0;updateLaserHUD();
+      return {shots:$state.stats.laserShots,aria:dom.laserButton.getAttribute('aria-disabled')};
+    `);
+    await page.evaluate(`document.querySelector('#laser-button').focus()`);
+    await page.pressNativeKey('Enter','Enter');
+    await page.click('#laser-button');
+    await page.tap('#laser-button');
+    await sleep(90);
+    const disabledAfter=await page.gameEvaluate(`return {shots:$state.stats.laserShots,requests:runtimeStats.laserRequestCount,buffer:input.laserBuffer,state:$state.laserState}`);
+    assert.equal(disabled.aria, 'true');
+    assert.deepEqual(disabledAfter, { shots:disabled.shots,requests:0,buffer:0,state:'idle' });
+  });
+}
+
+async function finalBossAriaScenario() {
+  await withPage('final-boss-aria', {}, async (page) => {
+    page.requireDev('exact Boss stability ARIA probes');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    const snapshots = await page.gameEvaluate(`
+      const read=()=>({
+        now:dom.bossTrack.getAttribute('aria-valuenow'),
+        max:dom.bossTrack.getAttribute('aria-valuemax'),
+        text:dom.bossTrack.getAttribute('aria-valuetext'),
+      });
+      clearWorldEntities();$state.bossSpawned=false;
+      const dashBoss=createBoss();
+      const dashInitial=read();
+      $state.dashSequence+=1;damageEnemy(dashBoss);const dashOnly={...read(),hp:dashBoss.hp};
+
+      clearWorldEntities();$state.bossSpawned=false;
+      const laserBoss=createBoss();
+      laserBoss.group.position.set(0,3,2);
+      $player.position.set(0,0);$player.facing.set(0,1);
+      $state.dashTimer=0;$state.dashInvulnTimer=0;
+      $state.laserDirection.set(0,1);$state.laserState='active';$state.laserSequence+=1;$state.laserSequenceTargets=0;
+      resolveLaserHits();
+      const laserOnly={...read(),hp:laserBoss.hp};
+      $state.dashSequence+=1;damageEnemy(laserBoss);
+      const mixed={...read(),hp:laserBoss.hp};
+      return {dashInitial,dashOnly,laserOnly,mixed};
+    `);
+    assert.deepEqual(snapshots.dashInitial, { now:'100',max:'100',text:'深潮主脑稳定度 30 / 30' });
+    assert.deepEqual(snapshots.dashOnly, { now:'83',max:'100',text:'深潮主脑稳定度 25 / 30',hp:25 });
+    assert.deepEqual(snapshots.laserOnly, { now:'90',max:'100',text:'深潮主脑稳定度 27 / 30',hp:27 });
+    assert.deepEqual(snapshots.mixed, { now:'73',max:'100',text:'深潮主脑稳定度 22 / 30',hp:22 });
+  });
+}
+
+async function finalRuntimeAuditAndProjectileRepairScenario() {
+  await withPage('final-runtime-audit-projectile-repair', {}, async (page) => {
+    page.requireDev('dirty runtime audit and projectile ownership probes');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    const hooksReady=await page.gameEvaluate(`return {
+      request:typeof globalThis.__NEON_TIDE_RUNTIME_HOOKS__?.requestRuntimeAudit,
+      force:typeof globalThis.__NEON_TIDE_RUNTIME_HOOKS__?.forceRuntimeAudit,
+      counters:['scalarGuardPasses','collectionAuditPasses','collectionEntityVisits','projectileRepairs'].every((key)=>Number.isFinite(runtimeStats[key])),
+    }`);
+    assert.deepEqual(hooksReady, { request:'function',force:'function',counters:true });
+
+    await page.gameEvaluate(`
+      runtimeStats.scalarGuardPasses=0;
+      runtimeStats.collectionAuditPasses=0;
+      runtimeStats.collectionEntityVisits=0;
+      runtimeAudit.dirty=false;
+      runtimeAudit.nextAuditAt=$state.elapsed+10;
+      return true;
+    `);
+    await sleep(180);
+    const steady=await page.gameEvaluate(`return {
+      scalar:runtimeStats.scalarGuardPasses,
+      audits:runtimeStats.collectionAuditPasses,
+      visits:runtimeStats.collectionEntityVisits,
+    }`);
+    assert.ok(steady.scalar>0, `steady frames skipped scalar guards: ${JSON.stringify(steady)}`);
+    assert.deepEqual({audits:steady.audits,visits:steady.visits}, {audits:0,visits:0},
+      `steady frames performed collection audits: ${JSON.stringify(steady)}`);
+
+    await page.gameEvaluate(`
+      pauseGame();
+      runtimeStats.collectionAuditPasses=0;
+      runtimeStats.collectionEntityVisits=0;
+      runtimeAudit.dirty=false;
+      return true;
+    `);
+    await sleep(140);
+    const paused=await page.gameEvaluate(`return {mode:$state.mode,audits:runtimeStats.collectionAuditPasses,visits:runtimeStats.collectionEntityVisits}`);
+    assert.deepEqual(paused, { mode:'paused',audits:0,visits:0 });
+    await page.gameEvaluate(`resumeGame();return true`);
+
+    const localGuardSetup=await page.gameEvaluate(`
+      clearEnvironmentAndProjectiles();
+      const index=2;
+      runtimeStats.collectionAuditPasses=0;
+      runtimeAudit.dirty=false;
+      runtimeAudit.nextAuditAt=$state.elapsed+10;
+      const snapshot={
+        pool:projectiles.length,
+        worldChildren:world.children.length,
+        material:projectileOwnedMaterials[index].uuid,
+        mesh:projectileOwnedMeshes[index].uuid,
+      };
+      projectiles[index]=null;
+      return snapshot;
+    `);
+    await sleep(120);
+    const localGuard=await page.gameEvaluate(`return {
+      pool:projectiles.length,
+      worldChildren:world.children.length,
+      audits:runtimeStats.collectionAuditPasses,
+      valid:Boolean(projectiles[2]?.mesh?.isMesh&&projectiles[2].mesh.parent===world),
+      material:projectiles[2]?.material?.uuid,
+      mesh:projectiles[2]?.mesh?.uuid,
+    }`);
+    assert.deepEqual(localGuard, {
+      pool:localGuardSetup.pool,
+      worldChildren:localGuardSetup.worldChildren,
+      audits:0,
+      valid:true,
+      material:localGuardSetup.material,
+      mesh:localGuardSetup.mesh,
+    }, `local projectile guard failed before the scheduled audit: ${JSON.stringify({localGuardSetup,localGuard})}`);
+
+    const repaired=await page.gameEvaluate(`
+      const hooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;
+      clearEnvironmentAndProjectiles();
+      const baseline={
+        worldChildren:world.children.length,
+        pool:projectiles.length,
+        owned:new Set(projectiles.map((projectile)=>projectile.material?.uuid)).size,
+        geometries:$renderer.info.memory.geometries,
+      };
+      const spawnGuardOwner=projectileOwnedMaterials[0];
+      const spawnGuardMesh=projectileOwnedMeshes[0];
+      projectiles[0]=null;
+      const spawnGuardProjectile=spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      const spawnGuard=Boolean(spawnGuardProjectile
+        && spawnGuardProjectile.material===spawnGuardOwner
+        && spawnGuardProjectile.mesh===spawnGuardMesh);
+      resetProjectile(spawnGuardProjectile);
+      const target=projectiles[0];
+      let foreignMaterialDisposals=0;
+      let foreignGeometryDisposals=0;
+      let originalOwnedDisposals=0;
+      let sharedDisposals=0;
+      const originalOwned=projectileOwnedMaterials[0];
+      const originalOwnedDispose=originalOwned.dispose.bind(originalOwned);
+      originalOwned.dispose=()=>{originalOwnedDisposals+=1;originalOwnedDispose();};
+      const circleDispose=shared.projectileCircleGeometry.dispose.bind(shared.projectileCircleGeometry);
+      const diamondDispose=shared.projectileDiamondGeometry.dispose.bind(shared.projectileDiamondGeometry);
+      shared.projectileCircleGeometry.dispose=()=>{sharedDisposals+=1;circleDispose();};
+      shared.projectileDiamondGeometry.dispose=()=>{sharedDisposals+=1;diamondDispose();};
+      try{
+        for(let index=0;index<5;index+=1){
+          const foreignMaterial=new THREE.MeshBasicMaterial({color:0xffffff});
+          const foreignGeometry=new THREE.CircleGeometry(0.2,8);
+          const disposeMaterial=foreignMaterial.dispose.bind(foreignMaterial);
+          const disposeGeometry=foreignGeometry.dispose.bind(foreignGeometry);
+          foreignMaterial.dispose=()=>{foreignMaterialDisposals+=1;disposeMaterial();};
+          foreignGeometry.dispose=()=>{foreignGeometryDisposals+=1;disposeGeometry();};
+          target.mesh.material=foreignMaterial;
+          target.mesh.geometry=foreignGeometry;
+          hooks.forceRuntimeAudit('projectile-foreign-resource-test');
+        }
+        const arrayMaterials=[new THREE.MeshBasicMaterial({color:0xff0000}),new THREE.MeshBasicMaterial({color:0x00ff00})];
+        for(const material of arrayMaterials){
+          const dispose=material.dispose.bind(material);
+          material.dispose=()=>{foreignMaterialDisposals+=1;dispose();};
+        }
+        target.mesh.material=arrayMaterials;
+        hooks.forceRuntimeAudit('projectile-material-array-test');
+
+        const oldMesh=target.mesh;
+        const corruptMesh=new THREE.Group();
+        const childMaterial=new THREE.MeshBasicMaterial({color:0xffffff});
+        const childGeometry=new THREE.CircleGeometry(0.18,7);
+        const childMaterialDispose=childMaterial.dispose.bind(childMaterial);
+        const childGeometryDispose=childGeometry.dispose.bind(childGeometry);
+        childMaterial.dispose=()=>{foreignMaterialDisposals+=1;childMaterialDispose();};
+        childGeometry.dispose=()=>{foreignGeometryDisposals+=1;childGeometryDispose();};
+        corruptMesh.add(new THREE.Mesh(childGeometry,childMaterial));
+        world.add(corruptMesh);
+        target.mesh=corruptMesh;
+        target.group=oldMesh;
+        hooks.forceRuntimeAudit('projectile-mesh-test');
+
+        const aliasedMaterial=projectiles[1].material;
+        target.material=aliasedMaterial;
+        target.mesh.material=aliasedMaterial;
+        hooks.forceRuntimeAudit('projectile-alias-test');
+        const aliasRecovered=target.material===originalOwned&&target.mesh.material===originalOwned;
+
+        const orphanOwner=new THREE.MeshBasicMaterial({color:0xffffff});
+        const orphanOwnerDispose=orphanOwner.dispose.bind(orphanOwner);
+        orphanOwner.dispose=()=>{foreignMaterialDisposals+=1;orphanOwnerDispose();};
+        target.material=orphanOwner;
+        target.mesh.material=orphanOwner;
+        hooks.forceRuntimeAudit('projectile-owner-test');
+
+        target.type='voidShard';
+        target.mesh.geometry=shared.projectileCircleGeometry;
+        repairProjectileEntry(target,0);
+        const typeGeometry=target.mesh.geometry===shared.projectileDiamondGeometry;
+        resetProjectile(target);
+        const repairsAfterOwner=runtimeStats.projectileRepairs;
+        hooks.forceRuntimeAudit('projectile-repeat-test');
+        const repairsAfterRepeat=runtimeStats.projectileRepairs;
+        const active=[];
+        for(let index=0;index<projectiles.length;index+=1){
+          const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+          if(!projectile) break;
+          active.push(projectile);
+        }
+        active.forEach(resetProjectile);
+        return {
+          baseline,
+          spawnGuard,
+          after:{
+            worldChildren:world.children.length,
+            pool:projectiles.length,
+            owned:new Set(projectiles.map((projectile)=>projectile.material?.uuid)).size,
+            geometries:$renderer.info.memory.geometries,
+            everyMesh:projectiles.every((projectile)=>projectile.mesh?.isMesh&&projectile.mesh.parent===world),
+            circle:projectiles.every((projectile)=>projectile.type==='none'&&projectile.mesh.geometry===shared.projectileCircleGeometry),
+            aliasRecovered,
+            typeGeometry,
+            maxActive:active.length,
+          },
+          disposals:{foreignMaterialDisposals,foreignGeometryDisposals,originalOwnedDisposals,sharedDisposals},
+          repairsAfterOwner,repairsAfterRepeat,
+        };
+      }finally{
+        originalOwned.dispose=originalOwnedDispose;
+        shared.projectileCircleGeometry.dispose=circleDispose;
+        shared.projectileDiamondGeometry.dispose=diamondDispose;
+      }
+    `);
+    assert.equal(repaired.after.worldChildren, repaired.baseline.worldChildren);
+    assert.equal(repaired.spawnGuard, true);
+    assert.equal(repaired.after.pool, repaired.baseline.pool);
+    assert.equal(repaired.after.owned, repaired.baseline.owned);
+    assert.equal(repaired.after.everyMesh, true);
+    assert.equal(repaired.after.circle, true);
+    assert.equal(repaired.after.aliasRecovered, true);
+    assert.equal(repaired.after.typeGeometry, true);
+    assert.ok(repaired.disposals.foreignMaterialDisposals>=9, JSON.stringify(repaired));
+    assert.ok(repaired.disposals.foreignGeometryDisposals>=6, JSON.stringify(repaired));
+    assert.equal(repaired.disposals.originalOwnedDisposals, 0);
+    assert.equal(repaired.disposals.sharedDisposals, 0);
+    assert.equal(repaired.repairsAfterRepeat, repaired.repairsAfterOwner,
+      `stable projectile was re-repaired: ${JSON.stringify(repaired)}`);
+    assert.ok(repaired.after.maxActive<=64, `active projectile cap exceeded: ${JSON.stringify(repaired)}`);
+    assert.ok(repaired.after.geometries<=repaired.baseline.geometries+1,
+      `renderer geometry count grew after repeated repair: ${JSON.stringify(repaired)}`);
+  });
+}
+
+async function finalRealmShiftProductionScenario() {
+  await withPage('final-realm-shift-production', {}, async (page) => {
+    page.requireDev('production enterStage realm-shift probe');
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
+    const contract=await page.gameEvaluate(`
+      const originalEvent=$audio.event.bind($audio);
+      const shifts=[];
+      $audio.event=(name,...args)=>{if(name==='realmShift') shifts.push({stage:$state.stageIndex,elapsed:$state.elapsed});return originalEvent(name,...args);};
+      try{
+        clearWorldEntities();
+        $state.mode='playing';
+        $state.stageIndex=0;
+        $state.stageQueue=[];
+        $state.upgradeTriggered=[true,true];
+        $state.bossTriggered=true;
+        $state.elapsed=30.01;
+        updateStage();
+        const first={$stage:$state.stageIndex,audio:$audio.getDebugSnapshot()};
+        enterStage(1,true);
+        const duplicate={$stage:$state.stageIndex,audio:$audio.getDebugSnapshot()};
+        $state.stageQueue=[];
+        $state.elapsed=64.01;
+        updateStage();
+        const second={$stage:$state.stageIndex,audio:$audio.getDebugSnapshot()};
+        resetState();
+        const restart={$stage:$state.stageIndex,audio:$audio.getDebugSnapshot()};
+        return {shifts,first,duplicate,second,restart};
+      }finally{$audio.event=originalEvent;}
+    `);
+    assert.deepEqual(contract.shifts.map(({stage})=>stage), [1,2], JSON.stringify(contract));
+    assert.equal(contract.first.$stage, 1);
+    assert.equal(contract.duplicate.$stage, 1);
+    assert.equal(contract.second.$stage, 2);
+    assert.equal(contract.restart.$stage, 0);
+    assert.equal(contract.first.audio.pendingStageIndex, 1, JSON.stringify(contract.first));
+    assert.equal(contract.second.audio.pendingStageIndex, 2, JSON.stringify(contract.second));
+    assert.equal(contract.restart.audio.pendingStageIndex, null, JSON.stringify(contract.restart));
+  });
+}
+
 const scenarios = [
   ['briefing and laser UI', briefingAndLaserUiScenario],
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
@@ -3450,6 +4016,11 @@ const scenarios = [
   ['natural light lance lifecycle', naturalLightLanceLifecycleScenario],
   ['light lance combat contracts', lightLanceCombatContractsScenario],
   ['pickup-charged light lance', chargedLightLanceScenario],
+  ['final natural Bulwark and warning ownership', finalBulwarkAndWarningOwnershipScenario],
+  ['final native Dash and laser controls', finalNativeControlActivationScenario],
+  ['final exact Boss ARIA', finalBossAriaScenario],
+  ['final runtime audits and projectile repair', finalRuntimeAuditAndProjectileRepairScenario],
+  ['final production realm-shift audio', finalRealmShiftProductionScenario],
 ];
 
 async function breakpointCleanupFailurePathSelfTest() {

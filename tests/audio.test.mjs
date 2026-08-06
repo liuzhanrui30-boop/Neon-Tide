@@ -201,10 +201,12 @@ test('audio creates four buses, audible music layers and safe master headroom', 
   assert.ok(audio.context.starts.length >= 2);
 });
 
-test('stage changes rephase at a bar and strong sfx ducks then releases music', () => {
+test('initial stage setup is immediate and strong sfx ducks then releases music', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
   audio.setStage(1);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, null);
   audio.update(30, 0.7, 'playing', { laserReady: true, bossPhase: 1 });
   assert.equal(audio.getDebugSnapshot().gridStep, 0);
   audio.event('laserFire', 1);
@@ -216,13 +218,18 @@ test('stage changes rephase at a bar and strong sfx ducks then releases music', 
   assert.ok(duckEvents[1].time > duckEvents[0].time);
 });
 
-test('stage changes fade and stop every old music source without stopping UI cues', () => {
+test('an active realm change waits for the next old-realm bar and crossfades at the boundary', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
   audio.update(0, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
   audio.event('laserReady', 1);
   audio.event('pickup', 1);
+  const oldGridInterval = 60 / 92 / 4;
+  const oldBarDuration = oldGridInterval * 16;
   const oldMusic = sourcesRoutedTo(audio.context, audio.musicGain);
+  const oldPad = oldMusic.reduce((longest, source) => (
+    !longest || source.stopTime > longest.stopTime ? source : longest
+  ), null);
   const nonMusicSources = [
     ...sourcesRoutedTo(audio.context, audio.uiGain),
     ...sourcesRoutedTo(audio.context, audio.sfxGain),
@@ -234,16 +241,77 @@ test('stage changes fade and stop every old music source without stopping UI cue
   audio.setStage(1);
 
   assert.ok(oldMusic.length >= 2);
-  oldMusic.forEach((source, index) => {
-    assert.equal(source.stopCalls.length, oldMusicStopCounts[index] + 1);
-    assert.ok(source.stopTime <= 0.1);
-    assert.ok(source.connections[0].gain.events.some((event) => event.method === 'setTargetAtTime' && event.value === 0.0001));
-  });
+  oldMusic.forEach((source, index) => assert.equal(source.stopCalls.length, oldMusicStopCounts[index]));
+  assert.equal(audio.getDebugSnapshot().stageIndex, 0);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, 1);
+
+  for (let step = 1; step < 16; step += 1) {
+    audio.context.currentTime = oldGridInterval * step;
+    audio.update(audio.context.currentTime, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  }
+  assert.equal(audio.getDebugSnapshot().stageIndex, 0);
+
+  const startsBeforeBoundary = audio.context.starts.length;
+  audio.context.currentTime = oldBarDuration;
+  audio.update(oldBarDuration, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  const boundaryStarts = audio.context.starts.slice(startsBeforeBoundary);
+
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, null);
+  assert.ok(boundaryStarts.length >= 2);
+  assert.ok(boundaryStarts.length <= 8);
+  assert.ok(boundaryStarts.every((time) => Math.abs(time - oldBarDuration) < 1e-9));
+  assert.ok(oldPad.stopTime > oldBarDuration);
+  assert.ok(oldPad.connections[0].gain.events.some((event) => (
+    event.method === 'setTargetAtTime'
+    && event.value === 0.0001
+    && Math.abs(event.time - oldBarDuration) < 1e-9
+  )));
+  assert.ok(oldPad.stopTime <= oldBarDuration + 0.031);
+
+  const newMusic = sourcesRoutedTo(audio.context, audio.musicGain).filter((source) => (
+    Math.abs(source.startTime - oldBarDuration) < 1e-9
+  ));
+  assert.ok(newMusic.length >= 2);
+  for (const source of newMusic) {
+    const fadeIn = source.connections[0].gain.events.find((event) => event.method === 'exponentialRampToValueAtTime' && event.value > 0.0001);
+    assert.ok(fadeIn);
+    assert.ok(fadeIn.time >= oldBarDuration + 0.029);
+  }
   nonMusicSources.forEach((source, index) => assert.equal(source.stopCalls.length, nonMusicStopCounts[index]));
-  assert.equal(audio.getDebugSnapshot().activeMusicSources, 0);
+  const newGridInterval = 60 / 116 / 4;
+  assert.ok(Math.abs(audio.nextBeatTime - (oldBarDuration + newGridInterval)) < 1e-12);
 });
 
-test('stage change silences future music at its scheduled start without an illegal pre-start stop', () => {
+test('look-ahead scheduling stays stable across consecutive pre-boundary frames', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext });
+  audio.unlock();
+  audio.update(0, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  audio.setStage(1);
+
+  const boundary = 1;
+  audio._gridStep = 0;
+  audio.nextBeatTime = boundary;
+  audio._lastRealTime = boundary - 0.02;
+  audio.context.currentTime = boundary - 0.013;
+  audio.update(boundary - 0.013, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+
+  const startsAfterLookAhead = audio.context.starts.length;
+  const nextBeatAfterLookAhead = audio.nextBeatTime;
+  const boundarySources = audio.context.startedSources.filter((source) => source.startTime === boundary);
+  const boundaryStopCounts = boundarySources.map((source) => source.stopCalls.length);
+  assert.ok(boundarySources.length >= 2);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+
+  audio.context.currentTime = boundary - 0.008;
+  audio.update(boundary - 0.008, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+
+  assert.equal(audio.context.starts.length, startsAfterLookAhead);
+  assert.equal(audio.nextBeatTime, nextBeatAfterLookAhead);
+  boundarySources.forEach((source, index) => assert.equal(source.stopCalls.length, boundaryStopCounts[index]));
+});
+
+test('a queued realm change survives pause and safely retires future music before resume', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
   audio.event('pickup', 1);
@@ -264,6 +332,11 @@ test('stage change silences future music at its scheduled start without an illeg
 
   audio.context.currentTime = 0.005;
   assert.doesNotThrow(() => audio.setStage(1));
+  for (const source of futureMusic) assert.equal(source.stopCalls.length, 1);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 0);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, 1);
+
+  audio.update(0.005, 0.8, 'paused', { laserReady: true, bossPhase: 1 });
 
   for (const source of futureMusic) {
     const envelope = source.connections[0];
@@ -277,9 +350,19 @@ test('stage change silences future music at its scheduled start without an illeg
   }
   nonMusicSources.forEach((source, index) => assert.equal(source.stopCalls.length, nonMusicStopCounts[index]));
   assert.equal(audio.getDebugSnapshot().activeMusicSources, 0);
+
+  audio.context.currentTime = 4;
+  const beforeResume = audio.context.starts.length;
+  audio.update(4, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  const resumedStarts = audio.context.starts.slice(beforeResume);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, null);
+  assert.ok(resumedStarts.length >= 2);
+  assert.ok(resumedStarts.length <= 8);
+  assert.ok(resumedStarts.every((time) => time >= audio.context.currentTime));
 });
 
-test('short mute and resume replaces the old music voices instead of overlapping them', () => {
+test('short mute preserves a queued realm and resumes without overlapping old voices', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
   audio.update(0, 0.5, 'playing', { laserReady: false, bossPhase: 1 });
@@ -287,30 +370,39 @@ test('short mute and resume replaces the old music voices instead of overlapping
   const oldStopCounts = oldMusic.map((source) => source.stopCalls.length);
 
   audio.context.currentTime = 0.04;
+  audio.setStage(1);
   audio.setMuted(true);
   oldMusic.forEach((source, index) => assert.equal(source.stopCalls.length, oldStopCounts[index] + 1));
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, 1);
   audio.setMuted(false);
   audio.context.currentTime = 0.08;
   audio.update(0.08, 0.5, 'playing', { laserReady: false, bossPhase: 1 });
 
   const resumedMusic = sourcesRoutedTo(audio.context, audio.musicGain).filter((source) => !oldMusic.includes(source));
   assert.ok(resumedMusic.length >= 2);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, null);
   assert.equal(audio.getDebugSnapshot().activeMusicSources, resumedMusic.length);
 });
 
-test('stale clocks stop old music voices before scheduling the rephased bar', () => {
+test('a stale clock retires old voices and commits a queued realm without catch-up', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
   audio.update(0, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
   const oldMusic = sourcesRoutedTo(audio.context, audio.musicGain);
   const oldStopCounts = oldMusic.map((source) => source.stopCalls.length);
+  audio.setStage(1);
 
   audio.context.currentTime = 0.5;
+  const startsBeforeRephase = audio.context.starts.length;
   audio.update(0.5, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
 
   oldMusic.forEach((source, index) => assert.equal(source.stopCalls.length, oldStopCounts[index] + 1));
   const rephasedMusic = sourcesRoutedTo(audio.context, audio.musicGain).filter((source) => !oldMusic.includes(source));
   assert.ok(rephasedMusic.length >= 2);
+  assert.ok(audio.context.starts.length - startsBeforeRephase <= 8);
+  assert.equal(audio.getDebugSnapshot().stageIndex, 1);
+  assert.equal(audio.getDebugSnapshot().pendingStageIndex, null);
   assert.equal(audio.getDebugSnapshot().activeMusicSources, rephasedMusic.length);
 });
 

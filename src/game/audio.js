@@ -9,6 +9,8 @@ const MAX_LAYER_GAIN = 0.12;
 const GRID_STEPS_PER_BAR = 16;
 const MAX_STARTS_PER_UPDATE = 8;
 const MUSIC_REPHASE_FADE = 0.03;
+const SCHEDULER_LOOKAHEAD = 0.02;
+const SCHEDULER_EPSILON = 0.001;
 const DUCK_EVENTS = new Set(['dash', 'hurt', 'laserFire', 'bossHit', 'victory', 'defeat']);
 
 const EVENT_RECIPES = Object.freeze({
@@ -89,6 +91,7 @@ export class NeonAudio {
     this.compressor = null;
     this.muted = false;
     this.stageIndex = 0;
+    this._pendingStageIndex = null;
     this.nextBeatTime = 0;
     this._gridStep = 0;
     this._lastScheduledStep = 0;
@@ -98,6 +101,7 @@ export class NeonAudio {
     this._unlocked = false;
     this._noiseBuffer = null;
     this._musicSources = new Set();
+    this._hasScheduledMusic = false;
     this._musicBase = MUSIC_LEVEL;
     this._musicTarget = MUSIC_LEVEL;
     this._duckActiveUntil = 0;
@@ -178,8 +182,16 @@ export class NeonAudio {
 
   setStage(index) {
     const nextStageIndex = Math.round(clamp(index, 0, REALMS.length - 1));
-    if (nextStageIndex !== this.stageIndex) this.suspendBeat();
-    this.stageIndex = nextStageIndex;
+    if (!this._hasScheduledMusic) {
+      this.stageIndex = nextStageIndex;
+      this._pendingStageIndex = null;
+      return;
+    }
+    if (nextStageIndex === this.stageIndex) {
+      this._pendingStageIndex = null;
+      return;
+    }
+    this._pendingStageIndex = nextStageIndex;
   }
 
   update(realTime = 0, intensity = 0, mode = 'playing', context = {}) {
@@ -196,12 +208,16 @@ export class NeonAudio {
     }
 
     const gameTime = Number(realTime);
-    const realm = REALMS[this.stageIndex] || REALMS[0];
-    const gridInterval = 60 / realm.music.bpm / 4;
+    const activeRealm = REALMS[this.stageIndex] || REALMS[0];
+    const activeGridInterval = 60 / activeRealm.music.bpm / 4;
     const staleGameClock = this._lastRealTime !== null
       && (!Number.isFinite(gameTime) || gameTime < this._lastRealTime - 0.001 || gameTime - this._lastRealTime > 1);
     const staleAudioClock = this._beatInitialized
-      && (!Number.isFinite(this.nextBeatTime) || this.nextBeatTime < now - gridInterval);
+      && (
+        !Number.isFinite(this.nextBeatTime)
+        || this.nextBeatTime < now - activeGridInterval
+        || this.nextBeatTime > now + activeGridInterval + SCHEDULER_LOOKAHEAD + SCHEDULER_EPSILON
+      );
     if (staleGameClock || staleAudioClock) this.suspendBeat();
 
     if (!this._beatInitialized) {
@@ -209,14 +225,23 @@ export class NeonAudio {
       this._gridStep = 0;
       this._barIndex = 0;
       this._beatInitialized = true;
+      this._commitPendingStage();
     }
     this._lastRealTime = Number.isFinite(gameTime) ? gameTime : null;
 
-    if (this.nextBeatTime <= now + 0.02) {
+    if (this.nextBeatTime <= now + SCHEDULER_LOOKAHEAD) {
       const gridTime = this.nextBeatTime;
       const scheduleTime = Math.max(now, gridTime);
+      const realmTransition = this._gridStep === 0 && this._pendingStageIndex !== null;
+      if (realmTransition) {
+        this._crossfadeMusicSources(scheduleTime);
+        this._commitPendingStage();
+      }
+      const realm = REALMS[this.stageIndex] || REALMS[0];
+      const gridInterval = 60 / realm.music.bpm / 4;
       this._lastScheduledStep = this._gridStep;
-      this._scheduleGridEvent(scheduleTime, intensity, context, realm, gridInterval);
+      this._scheduleGridEvent(scheduleTime, intensity, context, realm, gridInterval, realmTransition);
+      this._hasScheduledMusic = true;
       this.nextBeatTime = gridTime + gridInterval;
       this._gridStep = (this._gridStep + 1) % GRID_STEPS_PER_BAR;
       if (this._gridStep === 0) this._barIndex += 1;
@@ -272,6 +297,7 @@ export class NeonAudio {
       musicBase: this._musicBase,
       musicTarget: this._musicTarget,
       stageIndex: this.stageIndex,
+      pendingStageIndex: this._pendingStageIndex,
       bpm: REALMS[this.stageIndex]?.music.bpm ?? REALMS[0].music.bpm,
       gridStep: this._lastScheduledStep,
       schedulerReady: this._beatInitialized,
@@ -304,6 +330,13 @@ export class NeonAudio {
 
   _sanitizeSchedulerState() {
     this.stageIndex = Math.round(clamp(this.stageIndex, 0, REALMS.length - 1));
+    if (this._pendingStageIndex !== null) {
+      const pendingStageIndex = Number(this._pendingStageIndex);
+      this._pendingStageIndex = Number.isFinite(pendingStageIndex)
+        ? Math.round(clamp(pendingStageIndex, 0, REALMS.length - 1))
+        : null;
+      if (this._pendingStageIndex === this.stageIndex) this._pendingStageIndex = null;
+    }
     if (!Number.isFinite(this._musicBase)) this._musicBase = MUSIC_LEVEL;
     if (!Number.isFinite(this._musicTarget)) this._musicTarget = this._musicBase;
     if (!Number.isFinite(this._duckActiveUntil)) this._duckActiveUntil = 0;
@@ -336,6 +369,14 @@ export class NeonAudio {
     if (busName === 'ambience') return this.ambienceGain;
     if (busName === 'ui') return this.uiGain;
     return this.sfxGain;
+  }
+
+  _commitPendingStage() {
+    if (this._pendingStageIndex === null) return false;
+    this.stageIndex = this._pendingStageIndex;
+    this._pendingStageIndex = null;
+    this._barIndex = 0;
+    return true;
   }
 
   _stopMusicSources() {
@@ -380,6 +421,43 @@ export class NeonAudio {
     this._musicSources.clear();
   }
 
+  _crossfadeMusicSources(time) {
+    if (!this.context || this._musicSources.size === 0) return;
+    const now = Number(this.context.currentTime) || 0;
+    const fadeTime = Math.max(now, Number(time) || now);
+    for (const voice of this._musicSources) {
+      if (voice.stopTime <= fadeTime) continue;
+      const futureAtFade = voice.startTime >= fadeTime;
+      try {
+        if (futureAtFade) {
+          if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
+            voice.envelope.gain.cancelScheduledValues(now);
+          }
+          setParam(voice.envelope.gain, 'setValueAtTime', 0.0001, now);
+        } else {
+          if (typeof voice.envelope.gain.cancelAndHoldAtTime === 'function') {
+            voice.envelope.gain.cancelAndHoldAtTime(fadeTime);
+          } else {
+            const heldGain = clamp(voice.envelope.gain.value, 0.0001, MAX_LAYER_GAIN);
+            if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
+              voice.envelope.gain.cancelScheduledValues(fadeTime);
+            }
+            setParam(voice.envelope.gain, 'setValueAtTime', heldGain, fadeTime);
+          }
+          setParam(voice.envelope.gain, 'setTargetAtTime', 0.0001, fadeTime, MUSIC_REPHASE_FADE / 3);
+        }
+      } catch {
+        // A failed envelope update must not leave a stale old-realm voice tracked.
+      }
+      try {
+        voice.source.stop(futureAtFade ? voice.startTime : Math.min(voice.stopTime, fadeTime + MUSIC_REPHASE_FADE));
+      } catch {
+        // A source may already have ended while its boundary automation was queued.
+      }
+    }
+    this._musicSources.clear();
+  }
+
   _trackMusicSource(source, envelope, startTime, stopTime, bus) {
     if (bus !== this.musicGain) return null;
     const voice = { source, envelope, startTime, stopTime };
@@ -387,7 +465,7 @@ export class NeonAudio {
     return voice;
   }
 
-  _scheduleGridEvent(time, intensity, context, realm, gridInterval) {
+  _scheduleGridEvent(time, intensity, context, realm, gridInterval, realmTransition = false) {
     const level = clamp(intensity, 0, 1);
     const { root, scale } = realm.music;
     const step = this._gridStep;
@@ -400,28 +478,29 @@ export class NeonAudio {
     };
 
     if (step === 0) {
-      const padDuration = gridInterval * GRID_STEPS_PER_BAR * 0.95;
-      startTone(midiToFrequency(root), padDuration, 0.052 + level * 0.02, this._barIndex % 2 === 0 ? 'sine' : 'triangle', time, this.musicGain, 0, 0.08);
+      const padDuration = gridInterval * GRID_STEPS_PER_BAR + MUSIC_REPHASE_FADE;
+      const padAttack = Math.max(0.08, realmTransition ? MUSIC_REPHASE_FADE : 0);
+      startTone(midiToFrequency(root), padDuration, 0.052 + level * 0.02, this._barIndex % 2 === 0 ? 'sine' : 'triangle', time, this.musicGain, 0, padAttack);
       if (this.stageIndex === 3 && Number(context?.bossPhase) === 2) {
-        startTone(midiToFrequency(root + 7), padDuration, 0.036 + level * 0.014, 'triangle', time, this.musicGain, -7, 0.08);
+        startTone(midiToFrequency(root + 7), padDuration, 0.036 + level * 0.014, 'triangle', time, this.musicGain, -7, padAttack);
       }
     }
 
     if (step === 0 || step === 8) {
-      startTone(midiToFrequency(root - 12), gridInterval * 1.8, 0.055 + level * 0.025, 'triangle', time, this.musicGain, 0, 0.012);
+      startTone(midiToFrequency(root - 12), gridInterval * 1.8, 0.055 + level * 0.025, 'triangle', time, this.musicGain, 0, Math.max(0.012, realmTransition ? MUSIC_REPHASE_FADE : 0));
     }
 
     if (level > 0.25 && step % 4 === 0) {
-      startTone(70 + this.stageIndex * 9, 0.11, 0.045 + level * 0.025, 'sine', time, this.musicGain, 0, 0.003);
+      startTone(70 + this.stageIndex * 9, 0.11, 0.045 + level * 0.025, 'sine', time, this.musicGain, 0, Math.max(0.003, realmTransition ? MUSIC_REPHASE_FADE : 0));
       if (canStart()) {
-        this._noise(0.075, 0.026 + level * 0.022, time, this.musicGain, 0.92 + this.stageIndex * 0.06);
+        this._noise(0.075, 0.026 + level * 0.022, time, this.musicGain, 0.92 + this.stageIndex * 0.06, realmTransition ? MUSIC_REPHASE_FADE : 0);
         starts += 1;
       }
     }
 
     if ((level > 0.55 || Boolean(context?.laserReady)) && step % 2 === 0) {
       const scaleIndex = (Math.floor(step / 2) + this._barIndex) % scale.length;
-      startTone(midiToFrequency(root + 12 + scale[scaleIndex]), gridInterval * 0.72, 0.032 + level * 0.022, 'square', time, this.musicGain, 0, 0.006);
+      startTone(midiToFrequency(root + 12 + scale[scaleIndex]), gridInterval * 0.72, 0.032 + level * 0.022, 'square', time, this.musicGain, 0, Math.max(0.006, realmTransition ? MUSIC_REPHASE_FADE : 0));
     }
   }
 
@@ -460,7 +539,7 @@ export class NeonAudio {
     }
   }
 
-  _noise(duration, gainAmount, time, bus, playbackRate = 1) {
+  _noise(duration, gainAmount, time, bus, playbackRate = 1, attack = 0) {
     if (!this._ready() || !bus || typeof this.context.createBufferSource !== 'function') return;
     let source = null;
     let gain = null;
@@ -473,7 +552,8 @@ export class NeonAudio {
       source.buffer = this._noiseBuffer;
       setParam(source.playbackRate, 'setValueAtTime', playbackRate, time);
       const peak = Math.min(MAX_LAYER_GAIN, Math.max(0.0001, gainAmount));
-      setParam(gain.gain, 'setValueAtTime', peak, time);
+      setParam(gain.gain, 'setValueAtTime', attack > 0 ? 0.0001 : peak, time);
+      if (attack > 0) setParam(gain.gain, 'exponentialRampToValueAtTime', peak, time + Math.min(attack, duration * 0.4));
       setParam(gain.gain, 'exponentialRampToValueAtTime', 0.0001, time + duration);
       source.connect(gain);
       gain.connect(bus);

@@ -5,6 +5,8 @@ const BASE_HALF_HEIGHT = 7;
 const BASE_HALF_WIDTH = 10;
 const BACKDROP_Z = -4;
 const REALM_TRANSITION_DURATION = 0.9;
+const REALM_AUDIT_INTERVAL = 1;
+const DEVELOPMENT_AUDITS = Boolean(import.meta.env?.DEV);
 
 const clampRealm = (index) => Math.min(3, Math.max(0, Math.trunc(Number(index) || 0)));
 const positiveModulo = (value, divisor = 1) => ((value % divisor) + divisor) % divisor;
@@ -106,12 +108,27 @@ function createBackdrop(materials, color) {
   return backdrop;
 }
 
-function countRenderable(group) {
-  let count = 0;
+function captureOwnership(group, materials) {
+  const objects = [];
+  const renderables = [];
+  const geometries = [];
+  const geometrySet = new Set();
   group.traverse((object) => {
-    if (object.isMesh || object.isLine || object.isLineSegments || object.isPoints) count += 1;
+    objects.push(object);
+    if (object.isMesh || object.isLine || object.isLineSegments || object.isPoints) renderables.push(object);
+    if (object.geometry && !geometrySet.has(object.geometry)) {
+      geometrySet.add(object.geometry);
+      geometries.push(object.geometry);
+    }
   });
-  return count;
+  const materialList = [...materials];
+  return {
+    objects,
+    renderables,
+    geometries,
+    materials: materialList,
+    materialSet: new Set(materialList),
+  };
 }
 
 function createAbyss({ quality, width, height }) {
@@ -290,7 +307,8 @@ function createAbyss({ quality, width, height }) {
 
   resize(width, height);
   update(0, 0, true);
-  return { group, materials: [...materials], update, resize, objectCount: countRenderable(group) };
+  const ownership = captureOwnership(group, materials);
+  return { group, update, resize, objectCount: ownership.renderables.length, ...ownership };
 }
 
 function createSkylineGeometry(layer) {
@@ -436,7 +454,8 @@ function createDataCity({ quality, width, height }) {
 
   resize(width, height);
   update(0, 0, true);
-  return { group, materials: [...materials], update, resize, objectCount: countRenderable(group) };
+  const ownership = captureOwnership(group, materials);
+  return { group, update, resize, objectCount: ownership.renderables.length, ...ownership };
 }
 
 function createRadialCrackGeometry(layer) {
@@ -618,7 +637,8 @@ function createStarForge({ quality, width, height }) {
 
   resize(width, height);
   update(0, 0, true);
-  return { group, materials: [...materials], update, resize, objectCount: countRenderable(group) };
+  const ownership = captureOwnership(group, materials);
+  return { group, update, resize, objectCount: ownership.renderables.length, ...ownership };
 }
 
 function createVoidCathedral({ quality, width, height }) {
@@ -753,7 +773,8 @@ function createVoidCathedral({ quality, width, height }) {
 
   resize(width, height);
   update(0, 0, true);
-  return { group, materials: [...materials], update, resize, objectCount: countRenderable(group) };
+  const ownership = captureOwnership(group, materials);
+  return { group, update, resize, objectCount: ownership.renderables.length, ...ownership };
 }
 
 /**
@@ -783,45 +804,113 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
   let transition = null;
   let queuedRealm = null;
   let disposed = false;
+  let lastElapsed = 0;
+  let lastReducedMotion = true;
+  let animationDirtyMask = 0;
+  let auditDirtyMask = 0;
+  let nextRealmAuditAt = REALM_AUDIT_INTERVAL;
   const realmWeights = [1, 0, 0, 0];
   const updateCounts = [0, 0, 0, 0];
   const objectCounts = builders.map((builder) => builder.objectCount);
+  const debug = {
+    updateCalls: 0,
+    stableSkips: 0,
+    rootGuards: 0,
+    realmAudits: 0,
+    allRealmAudits: 0,
+    objectChecks: 0,
+    materialChecks: 0,
+    corrections: 0,
+  };
 
-  function sanitizeRuntime() {
-    if (disposed) return false;
+  function sanitizeObjectTransform(object, rootObject = false) {
     let corrected = false;
-    root.traverse((object) => {
-      const vectors = [object.position, object.rotation, object.scale];
-      vectors.forEach((vector, vectorIndex) => {
-        if (!vector) return;
-        for (const axis of ['x', 'y', 'z']) {
-          if (Number.isFinite(vector[axis])) continue;
-          vector[axis] = object === root && vectorIndex === 0 && axis === 'z'
-            ? -5
-            : vectorIndex === 2 ? 1 : 0;
-          corrected = true;
-        }
-      });
-      const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of objectMaterials) {
-        if (!material) continue;
-        let baseOpacity = material.userData.realmBaseOpacity;
-        if (!Number.isFinite(baseOpacity)) {
-          baseOpacity = Number.isFinite(material.opacity) ? material.opacity : 1;
-          material.userData.realmBaseOpacity = THREE.MathUtils.clamp(baseOpacity, 0, 1);
-          corrected = true;
-        }
-        if (!Number.isFinite(material.opacity)) {
-          material.opacity = material.userData.realmBaseOpacity;
-          corrected = true;
-        } else {
-          const opacity = THREE.MathUtils.clamp(material.opacity, 0, 1);
-          if (opacity !== material.opacity) corrected = true;
-          material.opacity = opacity;
-        }
-      }
-    });
+    const position = object.position;
+    if (!Number.isFinite(position.x)) { position.x = 0; corrected = true; }
+    if (!Number.isFinite(position.y)) { position.y = 0; corrected = true; }
+    if (!Number.isFinite(position.z)) { position.z = rootObject ? -5 : 0; corrected = true; }
+    const rotation = object.rotation;
+    if (!Number.isFinite(rotation.x)) { rotation.x = 0; corrected = true; }
+    if (!Number.isFinite(rotation.y)) { rotation.y = 0; corrected = true; }
+    if (!Number.isFinite(rotation.z)) { rotation.z = 0; corrected = true; }
+    const scale = object.scale;
+    if (!Number.isFinite(scale.x)) { scale.x = 1; corrected = true; }
+    if (!Number.isFinite(scale.y)) { scale.y = 1; corrected = true; }
+    if (!Number.isFinite(scale.z)) { scale.z = 1; corrected = true; }
     return corrected;
+  }
+
+  function sanitizeMaterial(material) {
+    if (!material) return false;
+    debug.materialChecks += 1;
+    let corrected = false;
+    let baseOpacity = material.userData.realmBaseOpacity;
+    if (!Number.isFinite(baseOpacity)) {
+      baseOpacity = Number.isFinite(material.opacity) ? material.opacity : 1;
+      material.userData.realmBaseOpacity = THREE.MathUtils.clamp(baseOpacity, 0, 1);
+      corrected = true;
+    }
+    if (!Number.isFinite(material.opacity)) {
+      material.opacity = material.userData.realmBaseOpacity;
+      corrected = true;
+    } else {
+      const opacity = THREE.MathUtils.clamp(material.opacity, 0, 1);
+      if (opacity !== material.opacity) corrected = true;
+      material.opacity = opacity;
+    }
+    return corrected;
+  }
+
+  function sanitizeRoot() {
+    debug.rootGuards += 1;
+    const corrected = sanitizeObjectTransform(root, true);
+    if (corrected) debug.corrections += 1;
+    return corrected;
+  }
+
+  function sanitizeBuilder(builder) {
+    debug.realmAudits += 1;
+    let corrected = false;
+    for (const object of builder.objects) {
+      debug.objectChecks += 1;
+      if (sanitizeObjectTransform(object)) corrected = true;
+    }
+    for (const material of builder.materials) {
+      if (sanitizeMaterial(material)) corrected = true;
+    }
+    for (const renderable of builder.renderables) {
+      const currentMaterials = renderable.material;
+      if (Array.isArray(currentMaterials)) {
+        for (const material of currentMaterials) {
+          if (!builder.materialSet.has(material) && sanitizeMaterial(material)) corrected = true;
+        }
+      } else if (!builder.materialSet.has(currentMaterials) && sanitizeMaterial(currentMaterials)) {
+        corrected = true;
+      }
+    }
+    if (corrected) debug.corrections += 1;
+    return corrected;
+  }
+
+  function auditAllRealms() {
+    if (disposed) return false;
+    debug.allRealmAudits += 1;
+    let corrected = sanitizeRoot();
+    for (const builder of builders) {
+      if (sanitizeBuilder(builder)) corrected = true;
+    }
+    auditDirtyMask = 0;
+    nextRealmAuditAt = Number.isFinite(lastElapsed)
+      ? lastElapsed + REALM_AUDIT_INTERVAL
+      : REALM_AUDIT_INTERVAL;
+    return corrected;
+  }
+
+  function shouldAuditRealms(safeElapsed, animationChanged, relevantDirty) {
+    if (relevantDirty) return true;
+    if (!animationChanged) return false;
+    if (DEVELOPMENT_AUDITS) return true;
+    return safeElapsed < lastElapsed || safeElapsed >= nextRealmAuditAt;
   }
 
   function setTransparent(material, transparent) {
@@ -883,6 +972,8 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     const outgoingRealm = activeRealm;
     activeRealm = clampRealm(nextRealm);
     queuedRealm = null;
+    animationDirtyMask |= (1 << outgoingRealm) | (1 << activeRealm);
+    auditDirtyMask |= (1 << outgoingRealm) | (1 << activeRealm);
     builders.forEach((builder, builderIndex) => {
       normalizeBuilder(builder, builderIndex === outgoingRealm || builderIndex === activeRealm);
     });
@@ -912,6 +1003,9 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
       finishTransition(nextRealm);
       builders[activeRealm].update(0, 0, true);
       restoreBuilderMaterials(builders[activeRealm]);
+      auditDirtyMask |= 1 << activeRealm;
+      lastElapsed = Number.NaN;
+      lastReducedMotion = true;
       return activeRealm;
     }
     if (transition) {
@@ -925,24 +1019,52 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
 
   function update({ elapsed = 0, dt = 0, reducedMotion = false } = {}) {
     if (disposed) return false;
-    sanitizeRuntime();
+    debug.updateCalls += 1;
+    sanitizeRoot();
     const safeElapsed = Number.isFinite(elapsed) ? elapsed : 0;
     const safeDt = Math.max(0, Number.isFinite(dt) ? dt : 0);
+    const motionReduced = Boolean(reducedMotion);
+    const animationChanged = safeElapsed !== lastElapsed || motionReduced !== lastReducedMotion;
 
-    if (transition && reducedMotion) finishTransition(queuedRealm ?? activeRealm);
+    if (transition && motionReduced) finishTransition(queuedRealm ?? activeRealm);
     if (!transition) {
+      const realmDirty = (animationDirtyMask & (1 << activeRealm)) !== 0;
+      if (!animationChanged && !realmDirty) {
+        debug.stableSkips += 1;
+        return true;
+      }
       const builder = builders[activeRealm];
-      builder.update(safeElapsed, safeDt, Boolean(reducedMotion));
+      builder.update(safeElapsed, safeDt, motionReduced);
       restoreBuilderMaterials(builder);
+      animationDirtyMask &= ~(1 << activeRealm);
       updateCounts[activeRealm] += 1;
-      sanitizeRuntime();
+      if (shouldAuditRealms(safeElapsed, animationChanged, (auditDirtyMask & (1 << activeRealm)) !== 0)) {
+        sanitizeBuilder(builder);
+        auditDirtyMask &= ~(1 << activeRealm);
+        nextRealmAuditAt = safeElapsed + REALM_AUDIT_INTERVAL;
+      }
+      lastElapsed = safeElapsed;
+      lastReducedMotion = motionReduced;
       return true;
     }
 
     const { outgoingRealm, incomingRealm } = transition;
-    for (const realm of [outgoingRealm, incomingRealm]) {
-      builders[realm].update(safeElapsed, safeDt, false);
-      updateCounts[realm] += 1;
+    const outgoingDirty = (animationDirtyMask & (1 << outgoingRealm)) !== 0;
+    const incomingDirty = (animationDirtyMask & (1 << incomingRealm)) !== 0;
+    const transitionAdvances = safeDt > 0;
+    if (!animationChanged && !outgoingDirty && !incomingDirty && !transitionAdvances) {
+      debug.stableSkips += 1;
+      return true;
+    }
+    if (animationChanged || outgoingDirty) {
+      builders[outgoingRealm].update(safeElapsed, safeDt, false);
+      animationDirtyMask &= ~(1 << outgoingRealm);
+      updateCounts[outgoingRealm] += 1;
+    }
+    if (animationChanged || incomingDirty) {
+      builders[incomingRealm].update(safeElapsed, safeDt, false);
+      animationDirtyMask &= ~(1 << incomingRealm);
+      updateCounts[incomingRealm] += 1;
     }
     transition.elapsed = Math.min(REALM_TRANSITION_DURATION, transition.elapsed + safeDt);
     const progress = transition.elapsed / REALM_TRANSITION_DURATION;
@@ -952,14 +1074,25 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     applyBuilderPresentation(builders[outgoingRealm], realmWeights[outgoingRealm], outgoingRealm);
     applyBuilderPresentation(builders[incomingRealm], realmWeights[incomingRealm], incomingRealm);
     applyBackdropPresentation(outgoingRealm, incomingRealm, realmWeights[incomingRealm]);
+    const relevantAuditDirty = (auditDirtyMask & ((1 << outgoingRealm) | (1 << incomingRealm))) !== 0;
+    if (shouldAuditRealms(safeElapsed, animationChanged, relevantAuditDirty)) {
+      sanitizeBuilder(builders[outgoingRealm]);
+      sanitizeBuilder(builders[incomingRealm]);
+      auditDirtyMask &= ~((1 << outgoingRealm) | (1 << incomingRealm));
+      nextRealmAuditAt = safeElapsed + REALM_AUDIT_INTERVAL;
+    }
     if (transition.elapsed >= REALM_TRANSITION_DURATION) completeTransition();
-    sanitizeRuntime();
+    lastElapsed = safeElapsed;
+    lastReducedMotion = motionReduced;
     return true;
   }
 
   function resize(nextWidth, nextHeight) {
     if (disposed) return false;
     for (const builder of builders) builder.resize(nextWidth, nextHeight);
+    animationDirtyMask = (1 << builders.length) - 1;
+    auditDirtyMask = animationDirtyMask;
+    auditAllRealms();
     return true;
   }
 
@@ -973,24 +1106,40 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     activeRealm = 0;
     transition = null;
     queuedRealm = null;
+    lastElapsed = 0;
+    lastReducedMotion = true;
+    animationDirtyMask = 0;
+    auditDirtyMask = 0;
+    nextRealmAuditAt = REALM_AUDIT_INTERVAL;
     updateCounts.fill(0);
+    auditAllRealms();
     return true;
   }
 
   function dispose() {
     if (disposed) return false;
+    auditAllRealms();
     disposed = true;
-    const geometries = new Set();
-    const materials = new Set();
-    root.traverse((object) => {
-      if (object.geometry) geometries.add(object.geometry);
-      const objectMaterials = Array.isArray(object.material) ? object.material : [object.material];
-      for (const material of objectMaterials) if (material) materials.add(material);
-    });
     scene.remove(root);
-    for (const geometry of geometries) geometry.dispose();
-    for (const material of materials) material.dispose();
+    const disposedGeometries = new Set();
+    const disposedMaterials = new Set();
+    for (const builder of builders) {
+      for (const geometry of builder.geometries) {
+        if (disposedGeometries.has(geometry)) continue;
+        disposedGeometries.add(geometry);
+        geometry.dispose();
+      }
+      for (const material of builder.materials) {
+        if (disposedMaterials.has(material)) continue;
+        disposedMaterials.add(material);
+        material.dispose();
+      }
+    }
     return true;
+  }
+
+  function recoverCorruption() {
+    return auditAllRealms();
   }
 
   function getStats() {
@@ -999,9 +1148,16 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
       visibleGroups: builders.reduce((count, builder) => count + (builder.group.visible ? 1 : 0), 0),
       updateCounts: [...updateCounts],
       objectCounts: [...objectCounts],
+      ownership: {
+        objectCounts: builders.map((builder) => builder.objects.length),
+        renderableCounts: builders.map((builder) => builder.renderables.length),
+        materialCounts: builders.map((builder) => builder.materials.length),
+        geometryCounts: builders.map((builder) => builder.geometries.length),
+      },
+      debug: { ...debug },
       disposed,
     };
   }
 
-  return Object.freeze({ setRealm, update, resize, reset, dispose, getStats });
+  return Object.freeze({ setRealm, update, resize, reset, recoverCorruption, dispose, getStats });
 }

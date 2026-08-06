@@ -104,6 +104,8 @@ const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_IDLE_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_HIT_COLOR = new THREE.Color(0xffffff);
+const STRIKER_WARNING_EARLY_COLOR = new THREE.Color(0xa56bff);
+const STRIKER_WARNING_LATE_COLOR = new THREE.Color(0xff4fba);
 const REALM_PRESENTATION = Object.freeze([
   { title: "第一境 · 深渊潮界", environment: "ABYSS // 沟壑水母与焦散暗流" },
   { title: "第二境 · 数据都市", environment: "DATA CITY // 透视车道与封包天际线" },
@@ -335,6 +337,8 @@ const FOCUSABLE_SELECTOR = [
 const shards = [];
 const enemies = [];
 const projectiles = [];
+const projectileOwnedMaterials = [];
+const projectileOwnedMeshes = [];
 const particles = [];
 const particlePool = [];
 const ripples = [];
@@ -349,6 +353,20 @@ const runtimeStats = {
   composerDisposeCount: 0,
   finiteGuards: 0,
   orphanGuards: 0,
+  dashRequestCount: 0,
+  laserRequestCount: 0,
+  scalarGuardPasses: 0,
+  collectionAuditPasses: 0,
+  collectionEntityVisits: 0,
+  projectileRepairs: 0,
+  projectileResourceDisposals: 0,
+};
+const RUNTIME_COLLECTION_AUDIT_INTERVAL = 2;
+const runtimeAudit = {
+  dirty: true,
+  reason: "startup",
+  nextAuditAt: 0,
+  scalarCorrected: false,
 };
 
 const paletteState = {
@@ -802,17 +820,158 @@ function getProjectileActiveCap() {
     : COMBAT.desktopProjectileActiveCap;
 }
 
-function repairProjectileEntry(projectile) {
-  if (!projectile?.material?.isMaterial) return false;
-  if (!projectile.velocity?.isVector2) projectile.velocity = new THREE.Vector2();
-  if (!projectile.mesh?.isMesh) {
-    projectile.mesh = new THREE.Mesh(shared.projectileCircleGeometry, projectile.material);
-    projectile.mesh.position.z = 3.4;
-    world.add(projectile.mesh);
+function createProjectileMaterial() {
+  return new THREE.MeshBasicMaterial({
+    color: 0xffd166,
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+function projectileObjectUsesResource(object, resource) {
+  if (!object || !resource) return false;
+  if (object.geometry === resource) return true;
+  const materials = Array.isArray(object.material) ? object.material : [object.material];
+  return materials.includes(resource);
+}
+
+function collectProjectileMaterial(resources, material) {
+  const materials = Array.isArray(material) ? material : [material];
+  for (const candidate of materials) {
+    if (candidate?.isMaterial) resources.add(candidate);
   }
-  projectile.mesh.material = projectile.material;
-  if (!projectile.mesh.geometry?.isBufferGeometry) projectile.mesh.geometry = shared.projectileCircleGeometry;
-  projectile.group = projectile.mesh;
+}
+
+function collectProjectileObjectResources(object, materials, geometries) {
+  if (!object?.isObject3D) return;
+  object.traverse((child) => {
+    if (child.geometry?.isBufferGeometry) geometries.add(child.geometry);
+    collectProjectileMaterial(materials, child.material);
+  });
+}
+
+function ensureProjectileOwnedMaterial(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= projectiles.length) return null;
+  let material = projectileOwnedMaterials[index];
+  if (!material?.isMaterial) {
+    material = createProjectileMaterial();
+    projectileOwnedMaterials[index] = material;
+  }
+  return material;
+}
+
+function ensureProjectileOwnedMesh(index, material) {
+  if (!material?.isMaterial || !Number.isInteger(index) || index < 0 || index >= projectiles.length) return null;
+  let mesh = projectileOwnedMeshes[index];
+  if (!mesh?.isMesh) {
+    mesh = new THREE.Mesh(shared.projectileCircleGeometry, material);
+    mesh.visible = false;
+    mesh.position.z = 3.4;
+    projectileOwnedMeshes[index] = mesh;
+  }
+  return mesh;
+}
+
+function projectileResourceStillReferenced(resource, ignoredProjectile = null, ignoredObject = null) {
+  if (!resource) return false;
+  if (projectileOwnedMaterials.includes(resource)) return true;
+  for (const projectile of projectiles) {
+    if (projectile === ignoredProjectile) continue;
+    const ownerMaterials = Array.isArray(projectile?.material) ? projectile.material : [projectile?.material];
+    if (ownerMaterials.includes(resource) || projectileObjectUsesResource(projectile?.mesh, resource)) return true;
+  }
+  let referenced = false;
+  scene.traverse((object) => {
+    if (!referenced && object !== ignoredObject && projectileObjectUsesResource(object, resource)) referenced = true;
+  });
+  return referenced;
+}
+
+function disposeForeignProjectileResource(resource, kind, projectile, ignoredObject = null) {
+  const expected = kind === "geometry" ? resource?.isBufferGeometry : resource?.isMaterial;
+  if (!expected) return false;
+  if (kind === "geometry" && (resource === shared.projectileCircleGeometry || resource === shared.projectileDiamondGeometry)) return false;
+  if (projectileResourceStillReferenced(resource, projectile, ignoredObject)) return false;
+  resource.dispose();
+  runtimeStats.projectileResourceDisposals += 1;
+  return true;
+}
+
+function removeProjectileObject(object) {
+  if (!object?.isObject3D) return false;
+  object.parent?.remove(object);
+  return true;
+}
+
+function repairProjectileEntry(projectile, index = projectiles.indexOf(projectile)) {
+  if (!projectile || typeof projectile !== "object") return false;
+  const ownedMaterial = ensureProjectileOwnedMaterial(index);
+  const ownedMesh = ensureProjectileOwnedMesh(index, ownedMaterial);
+  if (!ownedMaterial || !ownedMesh) return false;
+  const expectedGeometry = projectile.type === "voidShard"
+    ? shared.projectileDiamondGeometry
+    : shared.projectileCircleGeometry;
+  if (projectile.material === ownedMaterial
+    && projectile.velocity?.isVector2
+    && projectile.mesh === ownedMesh
+    && projectile.group === ownedMesh
+    && ownedMesh.material === ownedMaterial
+    && ownedMesh.geometry === expectedGeometry
+    && ownedMesh.parent === world) {
+    return true;
+  }
+  let repaired = false;
+  const foreignMaterials = new Set();
+  const foreignGeometries = new Set();
+  if (projectile.material !== ownedMaterial) {
+    collectProjectileMaterial(foreignMaterials, projectile.material);
+    projectile.material = ownedMaterial;
+    repaired = true;
+  }
+  if (!projectile.velocity?.isVector2) {
+    projectile.velocity = new THREE.Vector2();
+    repaired = true;
+  }
+  if (projectile.mesh !== ownedMesh) {
+    collectProjectileObjectResources(projectile.mesh, foreignMaterials, foreignGeometries);
+    if (!projectileOwnedMeshes.includes(projectile.mesh)) removeProjectileObject(projectile.mesh);
+    projectile.mesh = ownedMesh;
+    repaired = true;
+  }
+  if (projectile.group?.isObject3D && projectile.group !== ownedMesh && projectile.group !== projectile.mesh) {
+    collectProjectileObjectResources(projectile.group, foreignMaterials, foreignGeometries);
+    if (!projectileOwnedMeshes.includes(projectile.group)) removeProjectileObject(projectile.group);
+    repaired = true;
+  }
+  if (ownedMesh.material !== ownedMaterial) {
+    collectProjectileMaterial(foreignMaterials, ownedMesh.material);
+    ownedMesh.material = ownedMaterial;
+    repaired = true;
+  }
+  if (ownedMesh.geometry !== expectedGeometry) {
+    if (ownedMesh.geometry?.isBufferGeometry) foreignGeometries.add(ownedMesh.geometry);
+    ownedMesh.geometry = expectedGeometry;
+    repaired = true;
+  }
+  if (ownedMesh.parent !== world) {
+    removeProjectileObject(ownedMesh);
+    world.add(ownedMesh);
+    repaired = true;
+  }
+  projectile.mesh = ownedMesh;
+  projectile.group = ownedMesh;
+  for (const material of foreignMaterials) {
+    if (material !== ownedMaterial) disposeForeignProjectileResource(material, "material", projectile);
+  }
+  for (const geometry of foreignGeometries) {
+    if (geometry !== expectedGeometry) disposeForeignProjectileResource(geometry, "geometry", projectile);
+  }
+  if (repaired) {
+    projectile.repairVersion = Math.max(0, Math.trunc(projectile.repairVersion || 0)) + 1;
+    runtimeStats.projectileRepairs += 1;
+  }
   return true;
 }
 
@@ -826,6 +985,7 @@ function resetProjectile(projectile) {
   projectile.radius = 0;
   projectile.velocity.set(0, 0);
   projectile.mesh.visible = false;
+  projectile.mesh.geometry = shared.projectileCircleGeometry;
   projectile.mesh.position.set(0, 0, 3.4);
   projectile.mesh.rotation.set(0, 0, 0);
   projectile.mesh.scale.set(1, 1, 1);
@@ -835,18 +995,16 @@ function resetProjectile(projectile) {
 
 function createProjectilePool() {
   if (projectiles.length > 0) return projectiles.length;
+  projectileOwnedMaterials.length = 0;
+  projectileOwnedMeshes.length = 0;
   for (let index = 0; index < PROJECTILE_POOL_SIZE; index += 1) {
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xffd166,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    });
+    const material = createProjectileMaterial();
     const mesh = new THREE.Mesh(shared.projectileCircleGeometry, material);
     mesh.visible = false;
     mesh.position.z = 3.4;
     world.add(mesh);
+    projectileOwnedMaterials.push(material);
+    projectileOwnedMeshes.push(mesh);
     projectiles.push({
       active: false,
       type: "none",
@@ -865,10 +1023,18 @@ function createProjectilePool() {
 
 function spawnProjectile(type, origin, direction, overrides = {}) {
   if (!origin || !direction || ![origin.x, origin.y, direction.x, direction.y].every(Number.isFinite)) return null;
-  const activeCount = projectiles.reduce((count, projectile) => count + Number(projectile.active), 0);
+  let activeCount = 0;
+  let availableIndex = -1;
+  for (let index = 0; index < projectiles.length; index += 1) {
+    const candidate = projectiles[index];
+    if (candidate?.active) activeCount += 1;
+    else if (availableIndex < 0) availableIndex = index;
+  }
   if (activeCount >= getProjectileActiveCap()) return null;
-  const projectile = projectiles.find((candidate) => !candidate.active);
-  if (!projectile || !repairProjectileEntry(projectile)) return null;
+  if (availableIndex < 0) return null;
+  let projectile = projectiles[availableIndex];
+  if (!projectile || typeof projectile !== "object") projectile = replaceProjectileEntryAt(availableIndex);
+  if (!repairProjectileEntry(projectile, availableIndex)) return null;
   const normalizedDirection = projectile.velocity.set(direction.x, direction.y);
   if (normalizedDirection.lengthSq() <= 0) return null;
   normalizedDirection.normalize();
@@ -900,8 +1066,15 @@ function spawnProjectile(type, origin, direction, overrides = {}) {
 function updateProjectiles(dt) {
   const step = Math.max(0, finiteOr(dt, 0));
   let activeCount = 0;
-  for (const projectile of projectiles) {
+  for (let index = 0; index < projectiles.length; index += 1) {
+    let projectile = projectiles[index];
+    if (!projectile || typeof projectile !== "object") {
+      replaceProjectileEntryAt(index);
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
     if (!projectile.active) continue;
+    if (!repairProjectileForRuntime(projectile, { index })) continue;
     activeCount += 1;
     projectile.life -= step;
     projectile.mesh.position.x += projectile.velocity.x * step;
@@ -1062,7 +1235,10 @@ function applyEnvironment(dt, simulationDt = Math.min(Math.max(0, finiteOr(dt, 0
   if (environmentFrame.phase === "active") {
     state.stats.environmentActiveFrames += 1;
     applyEnvironmentForce(environmentFrame, player, forceDt);
-    for (const enemy of enemies) applyEnemyEnvironmentMotion(environmentFrame, enemy, forceDt);
+    for (let index = enemies.length - 1; index >= 0; index -= 1) {
+      const enemy = enemies[index];
+      if (repairEnemyRuntime(enemy, index)) applyEnemyEnvironmentMotion(environmentFrame, enemy, forceDt);
+    }
     for (const shard of shards) applyEnvironmentForce(environmentFrame, { position: shard.group.position, velocity: shard.velocity }, forceDt);
   } else clearEnemyEnvironmentMotion();
   return environmentFrame;
@@ -1080,11 +1256,26 @@ function clearEnvironmentAndProjectiles() {
 }
 
 function disposeCombatAssets() {
+  const materials = new Set(projectileOwnedMaterials.filter((material) => material?.isMaterial));
+  const geometries = new Set();
+  for (const mesh of projectileOwnedMeshes) {
+    collectProjectileObjectResources(mesh, materials, geometries);
+    removeProjectileObject(mesh);
+  }
   for (const projectile of projectiles) {
-    world.remove(projectile.mesh);
-    projectile.material.dispose();
+    collectProjectileMaterial(materials, projectile?.material);
+    collectProjectileObjectResources(projectile?.mesh, materials, geometries);
+    if (projectile?.group !== projectile?.mesh) collectProjectileObjectResources(projectile?.group, materials, geometries);
+    removeProjectileObject(projectile?.mesh);
+    if (projectile?.group !== projectile?.mesh) removeProjectileObject(projectile?.group);
   }
   projectiles.length = 0;
+  projectileOwnedMaterials.length = 0;
+  projectileOwnedMeshes.length = 0;
+  materials.forEach((material) => material.dispose());
+  geometries.forEach((geometry) => {
+    if (geometry !== shared.projectileCircleGeometry && geometry !== shared.projectileDiamondGeometry) geometry.dispose();
+  });
   shared.projectileCircleGeometry.dispose();
   shared.projectileDiamondGeometry.dispose();
   for (const visual of Object.values(environmentVisual)) {
@@ -1301,15 +1492,15 @@ function syncHealthPips() {
 }
 
 function syncBossProgress(boss = enemies.find((enemy) => enemy.type === "boss" && !enemy.dead)) {
-  const percent = boss ? THREE.MathUtils.clamp((boss.hp / boss.maxHp) * 100, 0, 100) : 0;
-  const totalHits = boss ? Math.ceil(boss.maxHp / BOSS_DASH_DAMAGE) : Math.ceil(ENEMY_TYPES.boss.hp / BOSS_DASH_DAMAGE);
-  const remainingHits = boss ? Math.max(0, Math.ceil(boss.hp / BOSS_DASH_DAMAGE)) : 0;
+  const maxStability = Math.max(1, Number(boss?.maxHp) || ENEMY_TYPES.boss.hp);
+  const currentStability = boss ? THREE.MathUtils.clamp(Number(boss.hp) || 0, 0, maxStability) : 0;
+  const percent = THREE.MathUtils.clamp((currentStability / maxStability) * 100, 0, 100);
   dom.bossPanel.hidden = !boss;
   dom.bossFill.style.width = `${percent}%`;
   dom.bossTrack.setAttribute("aria-valuemin", "0");
   dom.bossTrack.setAttribute("aria-valuemax", "100");
   dom.bossTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
-  dom.bossTrack.setAttribute("aria-valuetext", `深潮主脑稳定度 ${remainingHits} / ${totalHits}`);
+  dom.bossTrack.setAttribute("aria-valuetext", `深潮主脑稳定度 ${currentStability} / ${maxStability}`);
 }
 
 function showFloatingText(text, position, tone = "cyan", tier = "small") {
@@ -1463,8 +1654,11 @@ function createChaser(position = randomEdgePosition()) {
   eye.scale.setScalar(0.095);
   eye.position.set(0, 0.1, 0.06);
   const chargeArc = new THREE.Group();
+  const chargeMaterials = [];
   for (let index = 0; index < 3; index += 1) {
-    const segment = new THREE.Line(shared.telegraphLineGeometry, shared.hunterTrailMaterial);
+    const segmentMaterial = shared.hunterTrailMaterial.clone();
+    chargeMaterials.push(segmentMaterial);
+    const segment = new THREE.Line(shared.telegraphLineGeometry, segmentMaterial);
     segment.position.set(0, 0.78 + index * 0.62, -0.04);
     segment.scale.set(0.26 + index * 0.14, 0.34 + index * 0.18, 1);
     segment.visible = false;
@@ -1480,6 +1674,7 @@ function createChaser(position = randomEdgePosition()) {
     intentIndex: Math.floor(Math.random() * 3),
     dashDirection: new THREE.Vector2(),
     visuals: { glow, body, leftFin, rightFin, chargeArc },
+    ownedMaterials: chargeMaterials,
   });
 }
 
@@ -1491,8 +1686,9 @@ function createStriker(position = randomEdgePosition()) {
   const stabilizer = new THREE.Mesh(shared.strikerStabilizerGeometry, shared.strikerMaterial);
   stabilizer.position.set(0, -0.2, -0.02);
   stabilizer.rotation.z = Math.PI / 4;
+  const warningMaterial = shared.telegraphMaterial.clone();
   const lines = [-0.18, 0, 0.18].map((angle) => {
-    const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+    const line = new THREE.Line(shared.telegraphLineGeometry, warningMaterial);
     line.position.z = -0.08;
     line.rotation.z = angle;
     line.visible = false;
@@ -1507,6 +1703,7 @@ function createStriker(position = randomEdgePosition()) {
     aimDirection: new THREE.Vector2(),
     dashDirection: new THREE.Vector2(),
     visuals: { glow, body, stabilizer, line: lines[1], lines },
+    ownedMaterials: [warningMaterial],
     priority: 2,
   });
 }
@@ -1526,7 +1723,7 @@ function createLancer(position = randomEdgePosition(1.2)) {
   const lineMaterial = shared.lancerTelegraphMaterial.clone();
   const beamMaterial = shared.lancerBeamMaterial.clone();
   const line = new THREE.Mesh(shared.beamGeometry, lineMaterial);
-  line.visible = true;
+  line.visible = false;
   line.scale.set(0.06, 1, 1);
   const beam = new THREE.Mesh(shared.beamGeometry, beamMaterial);
   beam.visible = false;
@@ -2000,6 +2197,7 @@ function resetState() {
   seedShards();
   audio.suspendBeat();
   enterStage(0, false);
+  requestRuntimeAudit("reset");
 }
 
 function startGame() {
@@ -2603,6 +2801,7 @@ function interruptLaserTarget(enemy) {
     .some((stateName) => enemy.state.includes(stateName));
   if (!interruptible) return false;
   enemy.visuals?.line && (enemy.visuals.line.visible = false);
+  enemy.visuals?.lines?.forEach((line) => { line.visible = false; });
   enemy.visuals?.chargeArc && (enemy.visuals.chargeArc.visible = false);
   enemy.visuals?.chargeArc?.children.forEach((segment) => { segment.visible = false; });
   enemy.visuals?.shockwave && (enemy.visuals.shockwave.visible = false);
@@ -2807,10 +3006,9 @@ function updateStriker(enemy, dt, toPlayer) {
     enemy.group.rotation.z = Math.atan2(enemy.aimDirection.y, enemy.aimDirection.x) - Math.PI / 2;
     if (state.reducedMotion) enemy.visuals.lines.forEach((line) => applyDiscreteWarning(line.material, enemy.telegraph, 0.55));
     else {
-      enemy.visuals.lines.forEach((line) => {
-        line.material.color.set(0xff7ae6);
-        line.material.opacity = 0.72;
-      });
+      const progress = 1 - THREE.MathUtils.clamp(enemy.telegraph / 0.55, 0, 1);
+      enemy.visuals.line.material.color.copy(STRIKER_WARNING_EARLY_COLOR).lerp(STRIKER_WARNING_LATE_COLOR, progress);
+      enemy.visuals.line.material.opacity = 0.42 + progress * 0.38;
     }
     const telegraphScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 32) * 0.12;
     enemy.visuals.body.scale.setScalar(telegraphScale);
@@ -3079,8 +3277,12 @@ function updateElite(enemy, dt, toPlayer) {
   enemy.visuals.shield.scale.setScalar(shieldScale);
 }
 
+function isBulwarkEnemy(enemy) {
+  return Boolean(enemy && ENEMY_TYPES[enemy.type]?.role === "Bulwark");
+}
+
 function tryStartBulwarkArmorCounter(enemy, source, attackId) {
-  if (!enemy || enemy.type !== "bulwark" || enemy.hp <= 0) return false;
+  if (!isBulwarkEnemy(enemy) || enemy.hp <= 0) return false;
   const token = `${source}:${attackId}`;
   if (enemy.counterHitToken === token || enemy.counterCooldown > 0) return false;
   if (["shockExecute", "armorCounterTelegraph", "armorCounterExecute"].includes(enemy.state)) return false;
@@ -3488,7 +3690,7 @@ function updateEnemies(dt) {
   const initialCount = enemies.length;
   for (let index = initialCount - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
-    if (!enemy || enemy.dead) continue;
+    if (!repairEnemyRuntime(enemy, index)) continue;
     const toPlayer = enemyScratch.toPlayer.subVectors(player.position, enemy.group.position);
     const distance = Math.max(toPlayer.length(), 0.001);
     toPlayer.multiplyScalar(1 / distance);
@@ -3642,6 +3844,7 @@ function updateSpawning(dt) {
 function updateParticles(dt) {
   for (let i = particles.length - 1; i >= 0; i -= 1) {
     const particle = particles[i];
+    if (!repairParticleRuntime(particle, i)) continue;
     particle.life -= dt;
     particle.mesh.position.x += particle.velocity.x * dt;
     particle.mesh.position.y += particle.velocity.y * dt;
@@ -3660,6 +3863,7 @@ function updateParticles(dt) {
 function updateTrails(dt) {
   for (let i = trails.length - 1; i >= 0; i -= 1) {
     const trail = trails[i];
+    if (!repairTrailRuntime(trail, i)) continue;
     trail.life -= dt;
     const ratio = Math.max(0, trail.life / trail.maxLife);
     trail.meshes.forEach((mesh, index) => {
@@ -3736,84 +3940,254 @@ function retireTrailAt(index, { discard = false } = {}) {
   trail.meshes?.forEach((mesh) => mesh?.material?.dispose?.());
 }
 
-function sanitizeRuntimeState() {
-  let corrected = false;
-  const finite = (value, fallback) => {
-    if (Number.isFinite(value)) return value;
-    corrected = true;
-    return fallback;
-  };
-  const finiteOrInfinity = (value, fallback) => {
-    if (value === Infinity) return value;
-    return finite(value, fallback);
-  };
-  state.elapsed = Math.max(0, finite(state.elapsed, 0));
-  state.timeLeft = Math.max(0, finite(state.timeLeft, GAME.bossStart));
-  // Infinity is an intentional sentinel during the boss window.
-  state.enemySpawnTimer = finiteOrInfinity(state.enemySpawnTimer, 0);
-  state.formationTimer = finite(state.formationTimer, 0);
-  state.shardSpawnTimer = finite(state.shardSpawnTimer, 0);
-  state.environmentTimer = finiteOrInfinity(state.environmentTimer, Infinity);
-  state.environmentElapsed = Math.max(0, finite(state.environmentElapsed, 0));
-  state.environmentSeed = Math.trunc(finite(state.environmentSeed, 0x4e544944));
-  state.environmentSequence = Math.max(0, Math.trunc(finite(state.environmentSequence, 0)));
-  state.combatFrame = Math.max(0, Math.trunc(finite(state.combatFrame, 0)));
-  state.dashTimer = Math.max(0, finite(state.dashTimer, 0));
-  state.dashInvulnTimer = Math.max(0, finite(state.dashInvulnTimer, 0));
-  state.hurtInvuln = Math.max(0, finite(state.hurtInvuln, 0));
+function runtimeFinite(value, fallback) {
+  if (Number.isFinite(value)) return value;
+  runtimeAudit.scalarCorrected = true;
+  return fallback;
+}
+
+function runtimeFiniteOrInfinity(value, fallback) {
+  if (value === Infinity) return value;
+  return runtimeFinite(value, fallback);
+}
+
+function sanitizeRuntimeVector(vector, fallbackX = 0, fallbackY = 0) {
+  if (!vector) return false;
+  const nextX = runtimeFinite(vector.x, fallbackX);
+  const nextY = runtimeFinite(vector.y, fallbackY);
+  vector.x = nextX;
+  vector.y = nextY;
+  return true;
+}
+
+function sanitizeRuntimeScalars() {
+  runtimeStats.scalarGuardPasses += 1;
+  runtimeAudit.scalarCorrected = false;
+  state.elapsed = Math.max(0, runtimeFinite(state.elapsed, 0));
+  state.timeLeft = Math.max(0, runtimeFinite(state.timeLeft, GAME.bossStart));
+  // Infinity is an intentional sentinel while spawning and environment events are suspended.
+  state.enemySpawnTimer = runtimeFiniteOrInfinity(state.enemySpawnTimer, 0);
+  state.formationTimer = runtimeFinite(state.formationTimer, 0);
+  state.shardSpawnTimer = runtimeFinite(state.shardSpawnTimer, 0);
+  state.environmentTimer = runtimeFiniteOrInfinity(state.environmentTimer, Infinity);
+  state.environmentElapsed = Math.max(0, runtimeFinite(state.environmentElapsed, 0));
+  state.environmentSeed = Math.trunc(runtimeFinite(state.environmentSeed, 0x4e544944));
+  state.environmentSequence = Math.max(0, Math.trunc(runtimeFinite(state.environmentSequence, 0)));
+  state.combatFrame = Math.max(0, Math.trunc(runtimeFinite(state.combatFrame, 0)));
+  state.dashTimer = Math.max(0, runtimeFinite(state.dashTimer, 0));
+  state.dashInvulnTimer = Math.max(0, runtimeFinite(state.dashInvulnTimer, 0));
+  state.hurtInvuln = Math.max(0, runtimeFinite(state.hurtInvuln, 0));
   state.weaponEnergy = clampFinite(state.weaponEnergy, 0, LASER_RULES.maxEnergy, 0);
-  state.laserElapsed = Math.max(0, finite(state.laserElapsed, 0));
-  state.laserSequence = Math.max(0, Math.trunc(finite(state.laserSequence, 0)));
+  state.laserElapsed = Math.max(0, runtimeFinite(state.laserElapsed, 0));
+  state.laserSequence = Math.max(0, Math.trunc(runtimeFinite(state.laserSequence, 0)));
   state.laserSequenceTargets = clampFinite(state.laserSequenceTargets, 0, LASER_RULES.maxTargets, 0);
   state.trauma = clampFinite(state.trauma, 0, 1, 0);
   state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
-  state.slowMotionTimer = Math.max(0, finite(state.slowMotionTimer, 0));
-  state.zoomPunch = Math.max(0, finite(state.zoomPunch, 0));
-  state.dashCharges.forEach((charge, index) => {
-    state.dashCharges[index] = clampFinite(charge, 0, 1, 0);
-  });
-  [player.position, player.velocity, player.facing, state.laserDirection].forEach((vector) => {
-    vector.x = finite(vector.x, 0);
-    vector.y = finite(vector.y, 0);
-  });
+  state.slowMotionTimer = Math.max(0, runtimeFinite(state.slowMotionTimer, 0));
+  state.zoomPunch = Math.max(0, runtimeFinite(state.zoomPunch, 0));
+  if (!Array.isArray(state.dashCharges)) {
+    state.dashCharges = [1, 1];
+    runtimeAudit.scalarCorrected = true;
+  }
+  state.dashCharges.length = 2;
+  for (let index = 0; index < 2; index += 1) {
+    state.dashCharges[index] = clampFinite(state.dashCharges[index], 0, 1, 0);
+  }
+  sanitizeRuntimeVector(player.position);
+  sanitizeRuntimeVector(player.velocity);
+  sanitizeRuntimeVector(player.facing, 0, 1);
+  sanitizeRuntimeVector(state.laserDirection, 0, 1);
+  state.stats.activeHazards = Math.max(0, runtimeFinite(state.stats.activeHazards, 0));
+  state.stats.enemyPeak = Math.max(0, runtimeFinite(state.stats.enemyPeak, enemies.length));
+  state.stats.projectilePeak = Math.max(0, runtimeFinite(state.stats.projectilePeak, 0));
+  state.stats.environmentEvents = Math.max(0, runtimeFinite(state.stats.environmentEvents, 0));
+  state.stats.environmentActiveFrames = Math.max(0, runtimeFinite(state.stats.environmentActiveFrames, 0));
+  if (runtimeAudit.scalarCorrected) runtimeStats.finiteGuards += 1;
+  return runtimeAudit.scalarCorrected;
+}
 
+function requestRuntimeAudit(reason = "dirty") {
+  runtimeAudit.dirty = true;
+  runtimeAudit.reason = String(reason || "dirty");
+  return runtimeAudit.reason;
+}
+
+function repairEnemyRuntime(enemy, index = enemies.indexOf(enemy)) {
+  if (!enemy || enemy.dead || !enemy.group?.isObject3D || !enemy.velocity?.isVector2) {
+    if (index >= 0) removeEnemy(index);
+    runtimeStats.orphanGuards += 1;
+    return false;
+  }
+  if (!enemy.environmentVelocity?.isVector2) {
+    enemy.environmentVelocity = new THREE.Vector2();
+    runtimeStats.orphanGuards += 1;
+  }
+  const position = enemy.group.position;
+  const velocity = enemy.velocity;
+  const environmentVelocity = enemy.environmentVelocity;
+  const valid = Number.isFinite(position.x) && Number.isFinite(position.y)
+    && Number.isFinite(velocity.x) && Number.isFinite(velocity.y)
+    && Number.isFinite(enemy.hp) && Number.isFinite(enemy.stateTimer);
+  if (!valid) {
+    enemy.dead = true;
+    if (index >= 0) removeEnemy(index);
+    runtimeStats.orphanGuards += 1;
+    return false;
+  }
+  if (!Number.isFinite(position.z)) position.z = 2;
+  if (!Number.isFinite(environmentVelocity.x) || !Number.isFinite(environmentVelocity.y)) {
+    environmentVelocity.set(0, 0);
+    runtimeStats.orphanGuards += 1;
+  }
+  return true;
+}
+
+function replaceProjectileEntryAt(index) {
+  const previous = projectiles[index];
+  const previousMesh = previous?.mesh;
+  const previousGroup = previous?.group;
+  const foreignMaterials = new Set();
+  const foreignGeometries = new Set();
+  collectProjectileMaterial(foreignMaterials, previous?.material);
+  collectProjectileObjectResources(previousMesh, foreignMaterials, foreignGeometries);
+  if (previousGroup !== previousMesh) collectProjectileObjectResources(previousGroup, foreignMaterials, foreignGeometries);
+  const material = ensureProjectileOwnedMaterial(index);
+  const mesh = ensureProjectileOwnedMesh(index, material);
+  if (!material || !mesh) return null;
+  if (previousMesh !== mesh && !projectileOwnedMeshes.includes(previousMesh)) removeProjectileObject(previousMesh);
+  if (previousGroup !== mesh && previousGroup !== previousMesh && !projectileOwnedMeshes.includes(previousGroup)) {
+    removeProjectileObject(previousGroup);
+  }
+  collectProjectileMaterial(foreignMaterials, mesh.material);
+  if (mesh.geometry?.isBufferGeometry) foreignGeometries.add(mesh.geometry);
+  mesh.material = material;
+  mesh.geometry = shared.projectileCircleGeometry;
+  mesh.visible = false;
+  mesh.position.z = 3.4;
+  mesh.rotation.set(0, 0, 0);
+  mesh.scale.set(1, 1, 1);
+  material.opacity = 0;
+  if (mesh.parent !== world) {
+    removeProjectileObject(mesh);
+    world.add(mesh);
+  }
+  const replacement = {
+    active: false,
+    type: "none",
+    mesh,
+    material,
+    group: mesh,
+    velocity: new THREE.Vector2(),
+    life: 0,
+    maxLife: 0,
+    damage: 0,
+    radius: 0,
+    repairVersion: 1,
+  };
+  projectiles[index] = replacement;
+  for (const foreignMaterial of foreignMaterials) {
+    if (foreignMaterial !== material) disposeForeignProjectileResource(foreignMaterial, "material", replacement);
+  }
+  for (const foreignGeometry of foreignGeometries) {
+    if (foreignGeometry !== shared.projectileCircleGeometry) {
+      disposeForeignProjectileResource(foreignGeometry, "geometry", replacement);
+    }
+  }
+  runtimeStats.projectileRepairs += 1;
+  return replacement;
+}
+
+function repairProjectileForRuntime(projectile, { resetAfterRepair = true, index = projectiles.indexOf(projectile) } = {}) {
+  const beforeVersion = Math.max(0, Math.trunc(projectile?.repairVersion || 0));
+  if (!repairProjectileEntry(projectile, index)) return false;
+  const repaired = Math.max(0, Math.trunc(projectile.repairVersion || 0)) !== beforeVersion;
+  const material = projectile.mesh.material;
+  const runtimeValid = material?.isMaterial
+    && Number.isFinite(projectile.life) && Number.isFinite(projectile.maxLife)
+    && Number.isFinite(projectile.damage) && Number.isFinite(projectile.radius)
+    && Number.isFinite(projectile.velocity.x) && Number.isFinite(projectile.velocity.y)
+    && Number.isFinite(projectile.mesh.position.x) && Number.isFinite(projectile.mesh.position.y)
+    && Number.isFinite(material.opacity);
+  if (!runtimeValid || (repaired && resetAfterRepair)) {
+    resetProjectile(projectile);
+    runtimeStats.orphanGuards += 1;
+    return false;
+  }
+  return true;
+}
+
+function discardParticleAt(index) {
+  const particle = particles[index];
+  const mesh = particle?.mesh;
+  if (mesh?.isObject3D) {
+    mesh.visible = false;
+    world.remove(mesh);
+    mesh.material?.dispose?.();
+  }
+  const poolIndex = particlePool.indexOf(particle);
+  if (poolIndex >= 0) particlePool.splice(poolIndex, 1);
+  particles.splice(index, 1);
+  runtimeStats.orphanGuards += 1;
+  return true;
+}
+
+function repairParticleRuntime(particle, index = particles.indexOf(particle)) {
+  const mesh = particle?.mesh;
+  const velocity = particle?.velocity;
+  if (!particle || !mesh?.isObject3D || !mesh.material?.isMaterial || !velocity?.isVector2
+    || !Number.isFinite(particle.life) || !Number.isFinite(particle.maxLife)
+    || !Number.isFinite(velocity.x) || !Number.isFinite(velocity.y)) {
+    if (index >= 0) discardParticleAt(index);
+    return false;
+  }
+  const invalidTransform = !Number.isFinite(mesh.position.x) || !Number.isFinite(mesh.position.y)
+    || !Number.isFinite(mesh.position.z) || !Number.isFinite(mesh.scale.x)
+    || !Number.isFinite(mesh.scale.y) || !Number.isFinite(mesh.scale.z);
+  if (invalidTransform) {
+    mesh.position.set(0, 0, 4.2);
+    mesh.scale.setScalar(1);
+    runtimeStats.orphanGuards += 1;
+  }
+  if (!Number.isFinite(mesh.material.opacity)) {
+    mesh.material.opacity = 0;
+    runtimeStats.orphanGuards += 1;
+  } else {
+    mesh.material.opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
+  }
+  return true;
+}
+
+function repairTrailRuntime(trail, index = trails.indexOf(trail)) {
+  const group = trail?.group;
+  const meshes = trail?.meshes;
+  const structurallyValid = Boolean(trail && group?.isObject3D && Array.isArray(meshes) && meshes.length > 0
+    && meshes.every((mesh) => mesh?.isMesh && mesh.material?.isMaterial));
+  if (!structurallyValid) {
+    if (index >= 0) retireTrailAt(index, { discard: true });
+    runtimeStats.orphanGuards += 1;
+    return false;
+  }
+  const validRuntime = Number.isFinite(trail.life) && Number.isFinite(trail.maxLife) && trail.maxLife > 0
+    && Number.isFinite(group.position.x) && Number.isFinite(group.position.y) && Number.isFinite(group.position.z)
+    && Number.isFinite(group.rotation.x) && Number.isFinite(group.rotation.y) && Number.isFinite(group.rotation.z)
+    && Number.isFinite(group.scale.x) && Number.isFinite(group.scale.y) && Number.isFinite(group.scale.z)
+    && meshes.every((mesh) => Number.isFinite(mesh.material.opacity));
+  if (!validRuntime) {
+    if (index >= 0) retireTrailAt(index);
+    runtimeStats.orphanGuards += 1;
+    return false;
+  }
+  for (const mesh of meshes) mesh.material.opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
+  return true;
+}
+
+function auditRuntimeCollections(reason = runtimeAudit.reason) {
+  let corrected = false;
+  runtimeStats.collectionAuditPasses += 1;
+  runtimeStats.lastCollectionAuditReason = String(reason || "scheduled");
   for (let index = enemies.length - 1; index >= 0; index -= 1) {
-    const enemy = enemies[index];
-    if (!enemy || enemy.dead || !enemy.group?.isObject3D || !enemy.velocity?.isVector2) {
-      removeEnemy(index);
-      runtimeStats.orphanGuards += 1;
-      corrected = true;
-      continue;
-    }
-    const position = enemy.group.position;
-    const velocity = enemy.velocity;
-    if (!enemy.environmentVelocity?.isVector2) {
-      enemy.environmentVelocity = new THREE.Vector2();
-      runtimeStats.orphanGuards += 1;
-      corrected = true;
-    }
-    const environmentVelocity = enemy.environmentVelocity;
-    if (!Number.isFinite(environmentVelocity.x) || !Number.isFinite(environmentVelocity.y)) {
-      environmentVelocity.set(0, 0);
-      runtimeStats.orphanGuards += 1;
-      corrected = true;
-    }
-    const valid = Number.isFinite(position.x) && Number.isFinite(position.y)
-      && Number.isFinite(velocity.x) && Number.isFinite(velocity.y)
-      && Number.isFinite(enemy.hp) && Number.isFinite(enemy.stateTimer);
-    if (!valid) {
-      enemy.dead = true;
-      runtimeStats.orphanGuards += 1;
-      removeEnemy(index);
-      corrected = true;
-      continue;
-    }
-    position.x = finite(position.x, 0);
-    position.y = finite(position.y, 0);
-    velocity.x = finite(velocity.x, 0);
-    velocity.y = finite(velocity.y, 0);
-    enemy.hp = finite(enemy.hp, 0);
-    enemy.stateTimer = finite(enemy.stateTimer, 0);
+    runtimeStats.collectionEntityVisits += 1;
+    if (!repairEnemyRuntime(enemies[index], index)) corrected = true;
   }
   const cap = getEnemyCap();
   while (enemies.length > cap) {
@@ -3823,24 +4197,27 @@ function sanitizeRuntimeState() {
   }
   let activeProjectiles = 0;
   const projectileCap = getProjectileActiveCap();
-  for (const projectile of projectiles) {
-    const needsRepair = !projectile?.mesh?.isMesh || projectile.mesh.material !== projectile.material || !projectile.velocity?.isVector2;
-    if (needsRepair) {
-      if (repairProjectileEntry(projectile)) resetProjectile(projectile);
+  for (let index = 0; index < projectiles.length; index += 1) {
+    runtimeStats.collectionEntityVisits += 1;
+    let projectile = projectiles[index];
+    if (!projectile || typeof projectile !== "object") {
+      projectile = replaceProjectileEntryAt(index);
       corrected = true;
-      runtimeStats.orphanGuards += 1;
+    }
+    const beforeVersion = Math.max(0, Math.trunc(projectile.repairVersion || 0));
+    if (!repairProjectileEntry(projectile, index)) {
+      replaceProjectileEntryAt(index);
+      corrected = true;
       continue;
     }
-    const structurallyValid = Boolean(projectile.mesh.material?.isMaterial);
-    const runtimeValid = structurallyValid && Number.isFinite(projectile.life) && Number.isFinite(projectile.maxLife)
-      && Number.isFinite(projectile.damage) && Number.isFinite(projectile.radius)
-      && Number.isFinite(projectile.velocity.x) && Number.isFinite(projectile.velocity.y)
-      && Number.isFinite(projectile.mesh.position.x) && Number.isFinite(projectile.mesh.position.y)
-      && Number.isFinite(projectile.mesh.material.opacity);
-    if (!runtimeValid) {
-      if (structurallyValid) resetProjectile(projectile);
-      corrected = true;
+    if (Math.max(0, Math.trunc(projectile.repairVersion || 0)) !== beforeVersion) {
+      resetProjectile(projectile);
       runtimeStats.orphanGuards += 1;
+      corrected = true;
+      continue;
+    }
+    if (!repairProjectileForRuntime(projectile, { resetAfterRepair: false, index })) {
+      corrected = true;
       continue;
     }
     if (!projectile.active) continue;
@@ -3851,40 +4228,8 @@ function sanitizeRuntimeState() {
     }
   }
   for (let index = particles.length - 1; index >= 0; index -= 1) {
-    const particle = particles[index];
-    const mesh = particle?.mesh;
-    const velocity = particle?.velocity;
-    if (!particle || !mesh?.isObject3D || !mesh.material?.isMaterial || !velocity?.isVector2 || !Number.isFinite(particle.life)
-      || !Number.isFinite(particle.maxLife) || !Number.isFinite(velocity.x) || !Number.isFinite(velocity.y)) {
-      if (mesh?.isObject3D) {
-        mesh.visible = false;
-        world.remove(mesh);
-        mesh.material?.dispose?.();
-      }
-      const poolIndex = particlePool.indexOf(particle);
-      if (poolIndex >= 0) particlePool.splice(poolIndex, 1);
-      particles.splice(index, 1);
-      corrected = true;
-      runtimeStats.orphanGuards += 1;
-      continue;
-    }
-    const invalidTransform = !Number.isFinite(mesh.position.x) || !Number.isFinite(mesh.position.y)
-      || !Number.isFinite(mesh.position.z) || !Number.isFinite(mesh.scale.x)
-      || !Number.isFinite(mesh.scale.y) || !Number.isFinite(mesh.scale.z);
-    const invalidOpacity = !Number.isFinite(mesh.material?.opacity);
-    if (invalidTransform) {
-      mesh.position.set(0, 0, 4.2);
-      mesh.scale.setScalar(1);
-      corrected = true;
-    }
-    if (invalidOpacity) {
-      if (mesh.material) mesh.material.opacity = 0;
-      corrected = true;
-    } else if (mesh.material) {
-      const opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
-      if (opacity !== mesh.material.opacity) corrected = true;
-      mesh.material.opacity = opacity;
-    }
+    runtimeStats.collectionEntityVisits += 1;
+    if (!repairParticleRuntime(particles[index], index)) corrected = true;
   }
   while (particles.length > MAX_PARTICLES) {
     const particle = particles.pop();
@@ -3892,48 +4237,36 @@ function sanitizeRuntimeState() {
     corrected = true;
   }
   for (let index = trails.length - 1; index >= 0; index -= 1) {
-    const trail = trails[index];
-    const group = trail?.group;
-    const meshes = trail?.meshes;
-    const structurallyValid = Boolean(trail && group?.isObject3D && Array.isArray(meshes) && meshes.length > 0
-      && meshes.every((mesh) => mesh?.isMesh && mesh.material?.isMaterial));
-    if (!structurallyValid) {
-      retireTrailAt(index, { discard: true });
-      corrected = true;
-      runtimeStats.orphanGuards += 1;
-      continue;
-    }
-    const transformValues = [
-      group.position.x, group.position.y, group.position.z,
-      group.rotation.x, group.rotation.y, group.rotation.z,
-      group.scale.x, group.scale.y, group.scale.z,
-    ];
-    const validRuntime = Number.isFinite(trail.life) && Number.isFinite(trail.maxLife)
-      && trail.maxLife > 0 && transformValues.every(Number.isFinite)
-      && meshes.every((mesh) => Number.isFinite(mesh.material.opacity));
-    if (!validRuntime) {
-      retireTrailAt(index);
-      corrected = true;
-      runtimeStats.orphanGuards += 1;
-      continue;
-    }
-    meshes.forEach((mesh) => {
-      const opacity = THREE.MathUtils.clamp(mesh.material.opacity, 0, 1);
-      if (opacity !== mesh.material.opacity) corrected = true;
-      mesh.material.opacity = opacity;
-    });
+    runtimeStats.collectionEntityVisits += 1;
+    if (!repairTrailRuntime(trails[index], index)) corrected = true;
   }
   while (trails.length > MAX_TRAIL_NODES) {
     retireTrailAt(trails.length - 1);
     corrected = true;
   }
-  state.stats.activeHazards = Math.max(0, finite(state.stats.activeHazards, 0));
-  state.stats.enemyPeak = Math.max(0, finite(state.stats.enemyPeak, enemies.length));
-  state.stats.projectilePeak = Math.max(0, finite(state.stats.projectilePeak, 0));
-  state.stats.environmentEvents = Math.max(0, finite(state.stats.environmentEvents, 0));
-  state.stats.environmentActiveFrames = Math.max(0, finite(state.stats.environmentActiveFrames, 0));
+  runtimeAudit.dirty = false;
+  runtimeAudit.reason = "scheduled";
+  runtimeAudit.nextAuditAt = state.elapsed + RUNTIME_COLLECTION_AUDIT_INTERVAL;
   if (corrected) runtimeStats.finiteGuards += 1;
   return corrected;
+}
+
+function shouldAuditRuntimeCollections() {
+  if (runtimeAudit.dirty) return true;
+  return state.mode === "playing" && state.elapsed >= runtimeAudit.nextAuditAt;
+}
+
+function forceRuntimeAudit(reason = "explicit") {
+  sanitizeRuntimeScalars();
+  return auditRuntimeCollections(reason);
+}
+
+function sanitizeRuntimeState() {
+  const scalarCorrected = sanitizeRuntimeScalars();
+  const collectionsCorrected = shouldAuditRuntimeCollections()
+    ? auditRuntimeCollections(runtimeAudit.reason)
+    : false;
+  return scalarCorrected || collectionsCorrected;
 }
 
 function sampleShakeAxis(seed, time) {
@@ -4067,6 +4400,8 @@ function updateHUD(dt) {
 
 function enterStage(nextStageIndex, showBanner = true) {
   const realmIndex = THREE.MathUtils.clamp(Math.trunc(Number(nextStageIndex) || 0), 0, REALMS.length - 1);
+  const previousRealmIndex = state.stageIndex;
+  const naturalRealmEntry = showBanner && realmIndex > 0 && realmIndex !== previousRealmIndex;
   const realm = REALMS[realmIndex] ?? REALMS[0];
   const presentation = REALM_PRESENTATION[realmIndex];
   clearEnvironmentAndProjectiles();
@@ -4075,6 +4410,7 @@ function enterStage(nextStageIndex, showBanner = true) {
   realmBackgrounds.setRealm(realmIndex, state.reducedMotion);
   document.documentElement.dataset.realm = realm.cssTheme;
   audio.setStage(realmIndex);
+  if (naturalRealmEntry) audio.event("realmShift");
   setPalette(realmIndex, state.reducedMotion || !showBanner);
   if (showBanner) {
     showStageBanner(
@@ -4161,11 +4497,17 @@ function updateBounds() {
 }
 
 function requestDash() {
-  if (state.mode === "playing") input.dashBuffer = DASH_BUFFER_WINDOW;
+  if (state.mode !== "playing") return false;
+  input.dashBuffer = DASH_BUFFER_WINDOW;
+  runtimeStats.dashRequestCount += 1;
+  return true;
 }
 
 function requestLaser() {
-  if (canStartLaser()) input.laserBuffer = 0.14;
+  if (!canStartLaser()) return false;
+  input.laserBuffer = 0.14;
+  runtimeStats.laserRequestCount += 1;
+  return true;
 }
 
 function isControlTarget(target) {
@@ -4265,13 +4607,11 @@ function setupInput() {
     const button = event.target.closest("button[data-upgrade-id]");
     if (button) chooseUpgrade(button.dataset.upgradeId);
   });
-  bindInputListener(dom.dashButton, "pointerdown", (event) => {
-    event.preventDefault();
+  bindInputListener(dom.dashButton, "click", () => {
     audio.unlock();
     requestDash();
   });
-  bindInputListener(dom.laserButton, "pointerdown", (event) => {
-    event.preventDefault();
+  bindInputListener(dom.laserButton, "click", () => {
     audio.unlock();
     requestLaser();
   });
@@ -4296,6 +4636,7 @@ function resize() {
   postProcessing?.resize(window.innerWidth, window.innerHeight, renderQuality.pixelRatio);
   updateBounds();
   realmBackgrounds.resize(window.innerWidth, window.innerHeight);
+  requestRuntimeAudit("resize");
 }
 
 function animate() {
@@ -4350,7 +4691,6 @@ function animate() {
     bossPhase: state.stats.bossPhase,
   });
   updateVisuals(state.mode === "paused" ? 0 : wallDt);
-  sanitizeRuntimeState();
   postProcessing?.render();
 }
 
@@ -4363,6 +4703,8 @@ if (import.meta.env.DEV) {
       setupInput,
       applyReducedMotionPreference,
       resize,
+      requestRuntimeAudit,
+      forceRuntimeAudit,
     }),
   });
 }
