@@ -19,6 +19,298 @@
   --safe-left: max(18px, env(safe-area-inset-left));
 }
 
+html[data-realm="abyss"] {
+  --realm-panel: rgba(2, 17, 31, 0.86);
+  --realm-line: rgba(93, 247, 244, 0.28);
+  --realm-accent: #5df7f4;
+  --realm-button-ink: #03151d;
+}
+
+html[data-realm="abyss"] #game-shell {
+  background:
+    radial-gradient(ellipse at 50% 118%, rgba(20, 183, 193, 0.18), transparent 52%),
+    linear-gradient(180deg, #020b17, #031321 70%, #02060f);
+}
+
+html[data-realm="abyss"] .brand-panel {
+  border: 0;
+  border-left: 3px solid var(--realm-accent);
+  border-bottom: 1px solid rgba(93, 247, 244, 0.22);
+  border-radius: 0 0 22px 0;
+  background: linear-gradient(95deg, rgba(3, 28, 43, 0.94), rgba(2, 15, 29, 0.2));
+}
+
+html[data-realm="abyss"] .stage-panel,
+html[data-realm="abyss"] .hud-cluster {
+  border-color: var(--realm-line);
+  background:
+    repeating-linear-gradient(172deg, transparent 0 11px, rgba(93, 247, 244, 0.026) 11px 12px),
+    linear-gradient(120deg, var(--realm-panel), rgba(3, 31, 44, 0.52));
+  clip-path: polygon(14px 0, calc(100% - 26px) 0, 100% 18px, calc(100% - 12px) 100%, 18px calc(100% - 5px), 0 calc(100% - 18px), 0 14px);
+}
+
+html[data-realm="abyss"] #mission-panel {
+  border: 1px solid rgba(93, 247, 244, 0.22);
+  border-left: 3px solid var(--realm-accent);
+  border-radius: 0 24px 8px 0;
+  background:
+    repeating-linear-gradient(168deg, transparent 0 13px, rgba(93, 247, 244, 0.03) 13px 14px),
+    linear-gradient(100deg, rgba(2, 22, 37, 0.94), rgba(3, 25, 38, 0.5));
+}
+
+html[data-realm="abyss"] .stage-track {
+  height: 5px;
+  border: 1px solid rgba(93, 247, 244, 0.18);
+  border-radius: 999px;
+  background: rgba(41, 111, 124, 0.16);
+}
+
+html[data-realm="abyss"] #stage-progress {
+  border-radius: inherit;
+  background: linear-gradient(90deg, #315ca8, #5df7f4 62%, #c7ffff);
+}
+
+html[data-realm="abyss"] .primary-button {
+  color: var(--realm-button-ink);
+  background: linear-gradient(96deg, #36c9d1, #9afff2 64%, #d7ffff);
+  box-shadow: 0 0 34px rgba(93, 247, 244, 0.28);
+  clip-path: polygon(0 0, calc(100% - 26px) 0, 100% 15px, calc(100% - 10px) 100%, 0 calc(100% - 8px));
+}
+
+html[data-realm="abyss"] .icon-button:hover,
+html[data-realm="abyss"] .upgrade-option:hover,
+html[data-realm="abyss"] .upgrade-option:focus-visible {
+  border-color: var(--realm-accent);
+  box-shadow: inset 0 0 24px rgba(93, 247, 244, 0.1), 0 0 18px rgba(93, 247, 244, 0.14);
+}
+
+html[data-realm="abyss"] #vignette {
+  background:
+    repeating-linear-gradient(rgba(93, 247, 244, 0.012) 0 1px, transparent 1px 5px),
+    radial-gradient(ellipse at center, transparent 38%, rgba(0, 13, 25, 0.78) 112%);
+}
+
+html[data-realm="data-city"] {
+  --realm-panel: rgba(7, 8, 31, 0.9);
+  --realm-line: rgba(83, 255, 196, 0.32);
+  --realm-accent: #53ffc4;
+  --realm-button-ink: #06151a;
+}
+
+html[data-realm="data-city"] #game-shell {
+  background:
+    linear-gradient(rgba(83, 255, 196, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(133, 81, 255, 0.026) 1px, transparent 1px),
+    radial-gradient(circle at 50% 12%, rgba(111, 76, 255, 0.19), transparent 46%),
+    #060418;
+  background-size: 32px 32px, 32px 32px, 100% 100%, auto;
+}
+
+html[data-realm="data-city"] .brand-panel {
+  border: 1px solid rgba(83, 255, 196, 0.2);
+  border-left: 4px solid var(--realm-accent);
+  background:
+    repeating-linear-gradient(90deg, rgba(83, 255, 196, 0.05) 0 1px, transparent 1px 12px),
+    rgba(7, 8, 31, 0.88);
+  clip-path: polygon(0 0, 88% 0, 100% 18%, 100% 100%, 8% 100%, 0 82%);
+}
+
+html[data-realm="data-city"] .stage-panel,
+html[data-realm="data-city"] .hud-cluster {
+  border-color: var(--realm-line);
+  background:
+    repeating-linear-gradient(0deg, transparent 0 8px, rgba(83, 255, 196, 0.03) 8px 9px),
+    repeating-linear-gradient(90deg, transparent 0 24px, rgba(145, 86, 255, 0.035) 24px 25px),
+    linear-gradient(115deg, var(--realm-panel), rgba(19, 11, 54, 0.62));
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% calc(100% - 8px), calc(100% - 34px) calc(100% - 8px), calc(100% - 42px) 100%, 0 100%);
+}
+
+html[data-realm="data-city"] #mission-panel {
+  border: 1px solid rgba(83, 255, 196, 0.24);
+  border-left: 4px double var(--realm-accent);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 20px, rgba(83, 255, 196, 0.04) 20px 21px),
+    linear-gradient(100deg, rgba(7, 9, 33, 0.96), rgba(21, 11, 54, 0.58));
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 28px 100%, 20px calc(100% - 8px), 0 calc(100% - 8px));
+}
+
+html[data-realm="data-city"] .stage-track {
+  height: 6px;
+  border: 1px solid rgba(83, 255, 196, 0.24);
+  background: repeating-linear-gradient(90deg, rgba(83, 255, 196, 0.09) 0 18px, transparent 18px 22px);
+}
+
+html[data-realm="data-city"] #stage-progress {
+  background: repeating-linear-gradient(90deg, #925bff 0 15px, #53ffc4 15px 18px, transparent 18px 20px);
+}
+
+html[data-realm="data-city"] .primary-button {
+  color: var(--realm-button-ink);
+  background: linear-gradient(90deg, #53ffc4 0 72%, #a68aff 72% 100%);
+  box-shadow: 7px 7px 0 rgba(145, 86, 255, 0.16), 0 0 28px rgba(83, 255, 196, 0.22);
+  clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% calc(100% - 9px), 28px calc(100% - 9px), 19px 100%, 0 100%);
+}
+
+html[data-realm="data-city"] .icon-button:hover,
+html[data-realm="data-city"] .upgrade-option:hover,
+html[data-realm="data-city"] .upgrade-option:focus-visible {
+  border-color: var(--realm-accent);
+  background: repeating-linear-gradient(90deg, rgba(83, 255, 196, 0.14) 0 2px, rgba(12, 11, 42, 0.9) 2px 7px);
+}
+
+html[data-realm="data-city"] #vignette {
+  background:
+    repeating-linear-gradient(0deg, transparent 0 3px, rgba(83, 255, 196, 0.025) 3px 4px),
+    radial-gradient(circle, transparent 44%, rgba(5, 2, 24, 0.78) 112%);
+}
+
+html[data-realm="star-forge"] {
+  --realm-panel: rgba(29, 7, 10, 0.9);
+  --realm-line: rgba(255, 153, 64, 0.34);
+  --realm-accent: #ff9940;
+  --realm-button-ink: #1b0705;
+}
+
+html[data-realm="star-forge"] #game-shell {
+  background:
+    radial-gradient(circle at 78% 24%, rgba(255, 122, 45, 0.28), transparent 29%),
+    radial-gradient(circle at 18% 84%, rgba(168, 24, 51, 0.19), transparent 37%),
+    linear-gradient(145deg, #170609, #09050a 68%);
+}
+
+html[data-realm="star-forge"] .brand-panel {
+  border: 1px solid rgba(255, 153, 64, 0.22);
+  border-left: 5px solid var(--realm-accent);
+  background: linear-gradient(105deg, rgba(48, 11, 12, 0.94), rgba(19, 7, 12, 0.28));
+  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 15px), calc(100% - 18px) 100%, 0 100%, 0 8px);
+}
+
+html[data-realm="star-forge"] .stage-panel,
+html[data-realm="star-forge"] .hud-cluster {
+  border-color: var(--realm-line);
+  background:
+    repeating-linear-gradient(155deg, transparent 0 17px, rgba(255, 153, 64, 0.034) 17px 19px),
+    radial-gradient(circle at 78% 18%, rgba(255, 91, 43, 0.12), transparent 38%),
+    linear-gradient(120deg, var(--realm-panel), rgba(38, 7, 18, 0.58));
+  clip-path: polygon(12px 0, calc(100% - 34px) 0, 100% 22px, 100% calc(100% - 12px), calc(100% - 12px) 100%, 28px 100%, 0 calc(100% - 20px), 0 12px);
+}
+
+html[data-realm="star-forge"] #mission-panel {
+  border: 1px solid rgba(255, 153, 64, 0.25);
+  border-left: 4px solid #ff5b2b;
+  background:
+    repeating-linear-gradient(155deg, transparent 0 15px, rgba(255, 153, 64, 0.04) 15px 16px),
+    linear-gradient(100deg, rgba(38, 8, 11, 0.96), rgba(31, 7, 20, 0.5));
+  clip-path: polygon(0 0, calc(100% - 28px) 0, 100% 18px, calc(100% - 12px) 100%, 0 100%);
+}
+
+html[data-realm="star-forge"] .stage-track {
+  height: 5px;
+  border: 1px solid rgba(255, 153, 64, 0.26);
+  transform: skewX(-16deg);
+  background: rgba(103, 19, 23, 0.24);
+}
+
+html[data-realm="star-forge"] #stage-progress {
+  background: linear-gradient(90deg, #8e1730, #ff5b2b 48%, #ffd066);
+  box-shadow: 0 0 16px #ff6f3f;
+}
+
+html[data-realm="star-forge"] .primary-button {
+  color: var(--realm-button-ink);
+  background: linear-gradient(94deg, #ff5b2b, #ff9b42 58%, #ffd066);
+  box-shadow: 0 0 36px rgba(255, 91, 43, 0.32);
+  clip-path: polygon(14px 0, calc(100% - 28px) 0, 100% 18px, calc(100% - 12px) 100%, 0 100%, 0 14px);
+}
+
+html[data-realm="star-forge"] .icon-button:hover,
+html[data-realm="star-forge"] .upgrade-option:hover,
+html[data-realm="star-forge"] .upgrade-option:focus-visible {
+  border-color: var(--realm-accent);
+  background: radial-gradient(circle at center, rgba(255, 91, 43, 0.2), rgba(27, 7, 12, 0.92));
+  box-shadow: inset 0 0 22px rgba(255, 153, 64, 0.12), 0 0 18px rgba(255, 91, 43, 0.15);
+}
+
+html[data-realm="star-forge"] #vignette {
+  background:
+    repeating-linear-gradient(160deg, transparent 0 7px, rgba(255, 153, 64, 0.016) 7px 8px),
+    radial-gradient(circle at 72% 26%, transparent 25%, rgba(20, 3, 7, 0.76) 112%);
+}
+
+html[data-realm="void-cathedral"] {
+  --realm-panel: rgba(10, 8, 23, 0.91);
+  --realm-line: rgba(222, 235, 255, 0.28);
+  --realm-accent: #dedfff;
+  --realm-button-ink: #0c0917;
+}
+
+html[data-realm="void-cathedral"] #game-shell {
+  background:
+    linear-gradient(120deg, transparent 0 48%, rgba(183, 133, 255, 0.035) 48% 49%, transparent 49%),
+    radial-gradient(ellipse at 50% 34%, rgba(174, 132, 255, 0.17), transparent 44%),
+    linear-gradient(180deg, #080710, #05050b);
+}
+
+html[data-realm="void-cathedral"] .brand-panel {
+  justify-items: center;
+  border: 1px solid rgba(222, 235, 255, 0.22);
+  border-top: 3px solid var(--realm-accent);
+  background: linear-gradient(180deg, rgba(19, 14, 39, 0.94), rgba(8, 8, 20, 0.34));
+  clip-path: polygon(50% 0, 100% 16px, 100% 100%, 0 100%, 0 16px);
+}
+
+html[data-realm="void-cathedral"] .stage-panel,
+html[data-realm="void-cathedral"] .hud-cluster {
+  border-color: var(--realm-line);
+  background:
+    repeating-linear-gradient(90deg, transparent 0 31px, rgba(222, 235, 255, 0.028) 31px 32px),
+    linear-gradient(180deg, rgba(24, 17, 47, 0.92), var(--realm-panel));
+  clip-path: polygon(50% 0, calc(100% - 12px) 10px, 100% 28px, 100% 100%, 18px 100%, 0 calc(100% - 18px), 0 28px, 12px 10px);
+}
+
+html[data-realm="void-cathedral"] #mission-panel {
+  border: 1px solid rgba(222, 235, 255, 0.24);
+  border-left: 2px solid #b98aff;
+  border-right: 2px solid #b98aff;
+  background:
+    repeating-linear-gradient(90deg, transparent 0 25px, rgba(222, 235, 255, 0.035) 25px 26px),
+    linear-gradient(180deg, rgba(22, 15, 43, 0.95), rgba(7, 7, 18, 0.7));
+  clip-path: polygon(50% 0, 100% 16px, calc(100% - 9px) 100%, 9px 100%, 0 16px);
+}
+
+html[data-realm="void-cathedral"] .stage-track {
+  height: 6px;
+  border: 1px solid rgba(222, 235, 255, 0.24);
+  background: repeating-linear-gradient(90deg, rgba(185, 138, 255, 0.12) 0 11px, transparent 11px 15px);
+  clip-path: polygon(4px 0, calc(100% - 4px) 0, 100% 50%, calc(100% - 4px) 100%, 4px 100%, 0 50%);
+}
+
+html[data-realm="void-cathedral"] #stage-progress {
+  background: linear-gradient(90deg, #7654ac, #dedfff 52%, #b98aff);
+  box-shadow: 0 0 15px rgba(222, 223, 255, 0.68);
+}
+
+html[data-realm="void-cathedral"] .primary-button {
+  color: var(--realm-button-ink);
+  background: linear-gradient(90deg, #a985df, #eef6ff 50%, #a985df);
+  box-shadow: 0 0 34px rgba(185, 138, 255, 0.28);
+  clip-path: polygon(50% 0, 100% 14px, calc(100% - 10px) 100%, 10px 100%, 0 14px);
+}
+
+html[data-realm="void-cathedral"] .icon-button:hover,
+html[data-realm="void-cathedral"] .upgrade-option:hover,
+html[data-realm="void-cathedral"] .upgrade-option:focus-visible {
+  border-color: var(--realm-accent);
+  background: linear-gradient(180deg, rgba(185, 138, 255, 0.2), rgba(8, 7, 20, 0.94));
+  box-shadow: inset 0 0 24px rgba(222, 235, 255, 0.08), 0 0 18px rgba(185, 138, 255, 0.15);
+}
+
+html[data-realm="void-cathedral"] #vignette {
+  background:
+    repeating-linear-gradient(90deg, transparent 0 41px, rgba(222, 235, 255, 0.018) 41px 42px),
+    radial-gradient(ellipse at 50% 38%, transparent 35%, rgba(3, 3, 10, 0.8) 112%);
+}
+
 * {
   box-sizing: border-box;
 }

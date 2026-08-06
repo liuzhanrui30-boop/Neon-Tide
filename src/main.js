@@ -36,6 +36,7 @@ import {
   getStageIndex,
 } from "./game/director.js";
 import { createPostProcessing, selectRenderQuality } from "./game/render-quality.js";
+import { createRealmBackgrounds } from "./game/realm-backgrounds.js";
 
 const TAU = Math.PI * 2;
 const WORLD_HEIGHT = 14;
@@ -91,7 +92,13 @@ const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_IDLE_COLOR = new THREE.Color(0xe7ffff);
 const PLAYER_CORE_HIT_COLOR = new THREE.Color(0xffffff);
-const STAGE_LABELS = ["第一幕 · 深潮接入", "第二幕 · 信号涌升", "第三幕 · 交叉流", "终幕 · 事件视界"];
+const REALM_PRESENTATION = Object.freeze([
+  { title: "第一境 · 深渊潮界", environment: "ABYSS // 沟壑水母与焦散暗流" },
+  { title: "第二境 · 数据都市", environment: "DATA CITY // 透视车道与封包天际线" },
+  { title: "第三境 · 星铸熔炉", environment: "STAR FORGE // 日冕裂隙与灼热碎片" },
+  { title: "终境 · 虚空圣堂", environment: "VOID CATHEDRAL // 八角棱镜与逆流光束" },
+]);
+const STAGE_LABELS = REALM_PRESENTATION.map((realm) => realm.title);
 const MODES = new Set(["menu", "playing", "upgrade", "paused", "gameover", "victory"]);
 const ALLOWED_TRANSITIONS = Object.freeze({
   menu: new Set(["playing"]),
@@ -125,6 +132,7 @@ const dom = {
   stageTrack: document.querySelector(".stage-track"),
   formationLabel: document.querySelector("#formation-label"),
   stageBanner: document.querySelector("#stage-banner"),
+  stageBannerLabel: document.querySelector("#stage-banner span"),
   stageBannerTitle: document.querySelector("#stage-banner strong"),
   dashPips: Array.from(document.querySelectorAll("#dash-pips i")),
   muteButton: document.querySelector("#mute-button"),
@@ -180,18 +188,6 @@ let postProcessing = null;
 const world = new THREE.Group();
 scene.add(world);
 
-const backgroundGroup = new THREE.Group();
-backgroundGroup.position.z = -3;
-scene.add(backgroundGroup);
-
-const starsGroup = new THREE.Group();
-starsGroup.position.z = -2.4;
-scene.add(starsGroup);
-
-const decorGroup = new THREE.Group();
-decorGroup.position.z = -1.8;
-scene.add(decorGroup);
-
 const view = {
   halfWidth: 10,
   halfHeight: WORLD_HEIGHT / 2,
@@ -206,6 +202,13 @@ renderQuality = selectRenderQuality({
 });
 renderer.setPixelRatio(renderQuality.pixelRatio);
 document.documentElement.dataset.renderQuality = renderQuality.tier;
+
+const realmBackgrounds = createRealmBackgrounds({
+  scene,
+  quality: renderQuality,
+  width: window.innerWidth,
+  height: window.innerHeight,
+});
 
 const state = {
   mode: "menu",
@@ -315,7 +318,6 @@ const ripples = [];
 const trails = [];
 const trailPool = [];
 const floatingTexts = [];
-const flowLines = [];
 const inputListeners = [];
 let inputBound = false;
 const runtimeStats = {
@@ -326,28 +328,13 @@ const runtimeStats = {
   orphanGuards: 0,
 };
 
-const scenery = {
-  backdrop: null,
-  grid: null,
-  glow: null,
-  boundary: null,
-  fogGlows: [],
-  decorMaterials: [],
-};
-
 const paletteState = {
   background: new THREE.Color(STAGE_PALETTES[0].background),
-  grid: new THREE.Color(STAGE_PALETTES[0].grid),
-  fog: new THREE.Color(STAGE_PALETTES[0].fog),
-  ring: new THREE.Color(STAGE_PALETTES[0].ring),
   primary: new THREE.Color(STAGE_PALETTES[0].primary),
   secondary: new THREE.Color(STAGE_PALETTES[0].secondary),
   target: STAGE_PALETTES[0],
   targetColors: {
     background: new THREE.Color(STAGE_PALETTES[0].background),
-    grid: new THREE.Color(STAGE_PALETTES[0].grid),
-    fog: new THREE.Color(STAGE_PALETTES[0].fog),
-    ring: new THREE.Color(STAGE_PALETTES[0].ring),
     primary: new THREE.Color(STAGE_PALETTES[0].primary),
     secondary: new THREE.Color(STAGE_PALETTES[0].secondary),
   },
@@ -548,149 +535,6 @@ shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
 shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
 shared.swarmWingGeometry = createWingGeometry();
 shared.bossTriangleGeometry = createTrianglePulseGeometry();
-
-function createBackground() {
-  const backdrop = new THREE.Mesh(
-    new THREE.PlaneGeometry(100, 100),
-    new THREE.MeshBasicMaterial({ color: 0x050816 })
-  );
-  backdrop.position.z = -8;
-  backgroundGroup.add(backdrop);
-  scenery.backdrop = backdrop;
-
-  const linePositions = [];
-  const extent = 45;
-  for (let x = -extent; x <= extent; x += 1) {
-    linePositions.push(x, -extent, 0, x, extent, 0);
-  }
-  for (let y = -extent; y <= extent; y += 1) {
-    linePositions.push(-extent, y, 0, extent, y, 0);
-  }
-  const gridGeometry = new THREE.BufferGeometry();
-  gridGeometry.setAttribute("position", new THREE.Float32BufferAttribute(linePositions, 3));
-  const grid = new THREE.LineSegments(
-    gridGeometry,
-    new THREE.LineBasicMaterial({ color: 0x15304c, transparent: true, opacity: 0.24 })
-  );
-  grid.position.z = -4;
-  backgroundGroup.add(grid);
-  scenery.grid = grid;
-
-  const glow = new THREE.Mesh(
-    new THREE.CircleGeometry(7.5, 48),
-    new THREE.MeshBasicMaterial({
-      color: 0x102b55,
-      transparent: true,
-      opacity: 0.2,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-  );
-  glow.position.set(7, 2.5, -3.7);
-  backgroundGroup.add(glow);
-  scenery.glow = glow;
-
-  for (const [x, y, radius, color, opacity] of [
-    [-6.6, 3.5, 5.8, 0x173b78, 0.105],
-    [6.8, -3.1, 4.9, 0x702653, 0.085],
-  ]) {
-    const fogGlow = new THREE.Mesh(
-      new THREE.CircleGeometry(radius, 48),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, blending: THREE.AdditiveBlending }),
-    );
-    fogGlow.position.set(x, y, -3.72);
-    backgroundGroup.add(fogGlow);
-    scenery.fogGlows.push(fogGlow);
-  }
-
-  for (let layer = 0; layer < 3; layer += 1) {
-    for (let lineIndex = 0; lineIndex < 5; lineIndex += 1) {
-      const points = [];
-      const phase = lineIndex * 0.83 + layer * 1.7;
-      for (let pointIndex = 0; pointIndex <= 48; pointIndex += 1) {
-        const x = -18 + (pointIndex / 48) * 36;
-        const y = Math.sin(pointIndex * 0.22 + phase) * (0.58 + layer * 0.22);
-        points.push(new THREE.Vector3(x, y, 0));
-      }
-      const material = new THREE.LineBasicMaterial({
-        color: layer === 0 ? 0x36e0ff : layer === 1 ? 0x6677ff : 0xff4fd8,
-        transparent: true,
-        opacity: layer === 0 ? 0.075 : layer === 1 ? 0.12 : 0.065,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      });
-      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), material);
-      line.position.set((lineIndex - 2) * 6.8, -5.2 + lineIndex * 2.55 + layer * 0.7, -3.45 + layer * 0.08);
-      line.rotation.z = layer === 0 ? -0.08 : layer === 1 ? 0.11 : -0.16;
-      backgroundGroup.add(line);
-      flowLines.push({ line, material, layer, phase, baseX: line.position.x, baseY: line.position.y });
-    }
-  }
-
-  const boundaryPoints = [
-    new THREE.Vector3(-9, -6.25, 0),
-    new THREE.Vector3(9, -6.25, 0),
-    new THREE.Vector3(9, 6.25, 0),
-    new THREE.Vector3(-9, 6.25, 0),
-  ];
-  const boundary = new THREE.LineLoop(
-    new THREE.BufferGeometry().setFromPoints(boundaryPoints),
-    new THREE.LineBasicMaterial({
-      color: 0x36e0ff,
-      transparent: true,
-      opacity: 0.08,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-  );
-  boundary.position.z = -3.25;
-  backgroundGroup.add(boundary);
-  scenery.boundary = boundary;
-
-  const starPositions = [];
-  const starColors = [];
-  const palette = [new THREE.Color(0x64f5ff), new THREE.Color(0x9e9cff), new THREE.Color(0xff70df)];
-  for (let i = 0; i < 150; i += 1) {
-    starPositions.push((Math.random() - 0.5) * 70, (Math.random() - 0.5) * 36, 0);
-    const color = palette[i % palette.length];
-    starColors.push(color.r, color.g, color.b);
-  }
-  const starGeometry = new THREE.BufferGeometry();
-  starGeometry.setAttribute("position", new THREE.Float32BufferAttribute(starPositions, 3));
-  starGeometry.setAttribute("color", new THREE.Float32BufferAttribute(starColors, 3));
-  const stars = new THREE.Points(
-    starGeometry,
-    new THREE.PointsMaterial({
-      size: 0.065,
-      vertexColors: true,
-      transparent: true,
-      opacity: 0.72,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    })
-  );
-  starsGroup.add(stars);
-
-  for (const [x, y, radius, color, opacity] of [
-    [-10, 4.8, 1.6, 0x64f5ff, 0.12],
-    [9.2, -3.7, 2.2, 0xff4fd8, 0.1],
-    [4.4, 4.8, 0.9, 0xffd166, 0.12],
-  ]) {
-    const ring = new THREE.Mesh(
-      new THREE.RingGeometry(radius, radius + 0.012, 64),
-      new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-      })
-    );
-    ring.position.set(x, y, 0);
-    decorGroup.add(ring);
-    scenery.decorMaterials.push(ring.material);
-  }
-}
 
 function createPlayer() {
   const group = new THREE.Group();
@@ -977,6 +821,7 @@ function triggerSlowMotion(scale, duration) {
 function applyReducedMotionPreference(matches) {
   state.reducedMotion = Boolean(matches);
   refreshRenderQuality();
+  realmBackgrounds.setRealm(state.stageIndex, state.reducedMotion);
   if (!state.reducedMotion) return;
   state.trauma = 0;
   state.slowMotionScale = 1;
@@ -1088,7 +933,8 @@ function showFloatingText(text, position, tone = "cyan", tier = "small") {
   return item;
 }
 
-function showStageBanner(title, duration = 1.6, tone = "stage") {
+function showStageBanner(title, duration = 1.6, tone = "stage", label = "PHASE SHIFT") {
+  dom.stageBannerLabel.textContent = label;
   dom.stageBannerTitle.textContent = title;
   dom.stageBanner.dataset.tone = tone;
   dom.stageBanner.classList.remove("show");
@@ -1103,9 +949,6 @@ function setPalette(stageIndex, immediate = false) {
   Object.entries(paletteState.targetColors).forEach(([key, color]) => color.set(palette[key]));
   if (immediate) {
     paletteState.background.set(palette.background);
-    paletteState.grid.set(palette.grid);
-    paletteState.fog.set(palette.fog);
-    paletteState.ring.set(palette.ring);
     paletteState.primary.set(palette.primary);
     paletteState.secondary.set(palette.secondary);
     applyPalette();
@@ -1115,16 +958,6 @@ function setPalette(stageIndex, immediate = false) {
 
 function applyPalette() {
   scene.background.copy(paletteState.background);
-  scenery.backdrop?.material.color.copy(paletteState.background);
-  scenery.grid?.material.color.copy(paletteState.grid);
-  scenery.glow?.material.color.copy(paletteState.fog);
-  scenery.boundary?.material.color.copy(paletteState.ring);
-  scenery.decorMaterials.forEach((material, index) => {
-    material.color.copy(index % 2 ? paletteState.secondary : paletteState.ring);
-  });
-  flowLines.forEach(({ material, layer }) => {
-    material.color.copy(layer === 0 ? paletteState.primary : paletteState.secondary);
-  });
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--stage-primary", `#${paletteState.primary.getHexString()}`);
   rootStyle.setProperty("--stage-secondary", `#${paletteState.secondary.getHexString()}`);
@@ -1133,9 +966,6 @@ function applyPalette() {
 function updatePalette(dt) {
   const blend = 1 - Math.exp(-2.6 * dt);
   paletteState.background.lerp(paletteState.targetColors.background, blend);
-  paletteState.grid.lerp(paletteState.targetColors.grid, blend);
-  paletteState.fog.lerp(paletteState.targetColors.fog, blend);
-  paletteState.ring.lerp(paletteState.targetColors.ring, blend);
   paletteState.primary.lerp(paletteState.targetColors.primary, blend);
   paletteState.secondary.lerp(paletteState.targetColors.secondary, blend);
   applyPalette();
@@ -1612,6 +1442,7 @@ function resetState() {
   dom.toast.removeAttribute("style");
   state.stageBannerTimer = 0;
   dom.stageBanner.classList.remove("show");
+  dom.stageBannerLabel.textContent = "PHASE SHIFT";
   dom.stageBannerTitle.textContent = "";
   delete dom.stageBanner.dataset.tone;
   dom.upgradeOptions.replaceChildren();
@@ -1712,16 +1543,13 @@ function resetState() {
   camera.rotation.z = 0;
   camera.zoom = 1;
   camera.updateProjectionMatrix();
-  backgroundGroup.position.x = 0;
-  backgroundGroup.position.y = 0;
-  decorGroup.scale.setScalar(1);
+  realmBackgrounds.reset();
   syncPlayerTransform();
   syncHealthPips();
   syncBossProgress(null);
   seedShards();
   audio.suspendBeat();
-  audio.setStage(0);
-  setPalette(0, true);
+  enterStage(0, false);
 }
 
 function startGame() {
@@ -2059,7 +1887,13 @@ function chooseUpgrade(upgradeId) {
   state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
   if (transitionTo("playing", { upgraded: true })) {
-    showStageBanner(STAGE_LABELS[state.stageIndex] ?? STAGES[state.stageIndex].name, 1.5, "stage");
+    const presentation = REALM_PRESENTATION[state.stageIndex];
+    showStageBanner(
+      presentation?.title ?? STAGES[state.stageIndex].name,
+      1.5,
+      "stage",
+      presentation?.environment,
+    );
   }
 }
 
@@ -3434,32 +3268,7 @@ function sampleShakeAxis(seed, time) {
 
 function updateVisuals(dt) {
   updatePalette(dt);
-  const visualSpeed = state.reducedMotion ? 0 : 1;
-  decorGroup.rotation.z += dt * 0.004 * visualSpeed;
-  starsGroup.rotation.z -= dt * 0.0015 * visualSpeed;
-  const decorPulse = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 0.55) * 0.008;
-  decorGroup.scale.setScalar(decorPulse);
-  backgroundGroup.position.x = state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.19) * 0.12;
-  backgroundGroup.position.y = state.reducedMotion ? 0 : Math.cos(state.elapsed * 0.16) * 0.08;
-  scenery.fogGlows.forEach((fogGlow, index) => {
-    fogGlow.material.opacity = state.reducedMotion
-      ? (index === 0 ? 0.105 : 0.085)
-      : (index === 0 ? 0.095 : 0.075) + Math.sin(state.elapsed * (0.26 + index * 0.08) + index) * 0.018;
-  });
-  for (const flow of flowLines) {
-    const speed = flow.layer === 0 ? 0.72 : flow.layer === 1 ? -0.46 : 0.29;
-    flow.line.position.x = state.reducedMotion
-      ? flow.baseX
-      : flow.baseX + Math.sin(state.elapsed * speed + flow.phase) * (flow.layer === 0 ? 2.2 : flow.layer === 1 ? 3.1 : 1.45);
-    flow.line.position.y = flow.baseY + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.34 + flow.phase) * 0.22);
-    flow.material.opacity = (flow.layer === 0 ? 0.065 : flow.layer === 1 ? 0.105 : 0.055)
-      + (state.reducedMotion ? 0 : Math.sin(state.elapsed * 0.8 + flow.phase) * 0.018);
-  }
-  if (scenery.boundary) {
-    scenery.boundary.material.opacity = state.reducedMotion
-      ? 0.13
-      : 0.08 + (Math.sin(state.elapsed * 2.1) * 0.5 + 0.5) * 0.09;
-  }
+  realmBackgrounds.update({ elapsed: state.elapsed, dt, reducedMotion: state.reducedMotion });
   const lookAheadTarget = player.position.clone().multiplyScalar(0.035).addScaledVector(player.velocity, 0.11);
   lookAheadTarget.clampLength(0, state.reducedMotion ? 0 : 0.72);
   state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
@@ -3575,6 +3384,26 @@ function updateHUD(dt) {
   }
 }
 
+function enterStage(nextStageIndex, showBanner = true) {
+  const realmIndex = THREE.MathUtils.clamp(Math.trunc(Number(nextStageIndex) || 0), 0, REALMS.length - 1);
+  const realm = REALMS[realmIndex] ?? REALMS[0];
+  const presentation = REALM_PRESENTATION[realmIndex];
+  state.stageIndex = realmIndex;
+  realmBackgrounds.setRealm(realmIndex, state.reducedMotion);
+  document.documentElement.dataset.realm = realm.cssTheme;
+  audio.setStage(realmIndex);
+  setPalette(realmIndex, state.reducedMotion || !showBanner);
+  if (showBanner) {
+    showStageBanner(
+      presentation?.title ?? STAGES[realmIndex].name,
+      realmIndex === 3 ? 2.2 : 1.6,
+      realmIndex === 3 ? "boss" : "stage",
+      presentation?.environment,
+    );
+  }
+  return realmIndex;
+}
+
 function updateStage() {
   const targetStageIndex = getStageIndex(state.elapsed);
   const queuedThrough = state.stageQueue.at(-1) ?? state.stageIndex;
@@ -3584,13 +3413,7 @@ function updateStage() {
   if (state.mode !== "playing" || state.stageQueue.length === 0) return;
 
   const nextStageIndex = state.stageQueue.shift();
-  state.stageIndex = nextStageIndex;
-  audio.setStage(nextStageIndex);
-  setPalette(nextStageIndex);
-  const bannerTitle = nextStageIndex === 3
-    ? "终幕 · 潮汐守卫"
-    : STAGE_LABELS[nextStageIndex] ?? STAGES[nextStageIndex].name;
-  showStageBanner(bannerTitle, nextStageIndex === 3 ? 2.2 : 1.6, nextStageIndex === 3 ? "boss" : "stage");
+  enterStage(nextStageIndex);
   if ((nextStageIndex === 1 || nextStageIndex === 2) && !state.upgradeTriggered[nextStageIndex - 1]) {
     state.upgradeTriggered[nextStageIndex - 1] = true;
     beginUpgrade(nextStageIndex);
@@ -3652,7 +3475,6 @@ function updateBounds() {
   camera.top = view.halfHeight;
   camera.bottom = -view.halfHeight;
   camera.updateProjectionMatrix();
-  if (scenery.boundary) scenery.boundary.scale.set(view.halfWidth / 9, view.halfHeight / 6.25, 1);
 }
 
 function requestDash() {
@@ -3790,6 +3612,7 @@ function resize() {
   refreshRenderQuality();
   postProcessing?.resize(window.innerWidth, window.innerHeight, renderQuality.pixelRatio);
   updateBounds();
+  realmBackgrounds.resize(window.innerWidth, window.innerHeight);
 }
 
 function animate() {
@@ -3859,7 +3682,6 @@ if (import.meta.env.DEV) {
   });
 }
 
-createBackground();
 createPlayer();
 createParticlePool();
 createTrailPool();
@@ -3871,6 +3693,9 @@ resetState();
 renderMode("menu", null);
 const clock = new THREE.Clock();
 window.addEventListener("resize", resize);
-window.addEventListener("beforeunload", disposeLaserAssets, { once: true });
+window.addEventListener("beforeunload", () => {
+  realmBackgrounds.dispose();
+  disposeLaserAssets();
+}, { once: true });
 reducedMotionPreference?.addEventListener?.("change", (event) => applyReducedMotionPreference(event.matches));
 renderer.setAnimationLoop(animate);

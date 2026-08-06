@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 const APP_URL = process.env.APP_URL || 'http://127.0.0.1:4173/';
 const CDP_PORT = Number(process.env.CDP_PORT || 9333);
 const WALL_STALL_MS = Number(process.env.WALL_STALL_MS || 1200);
 const CDP_HTTP = `http://127.0.0.1:${CDP_PORT}`;
+const REALM_SCREENSHOT_DIR = process.env.REALM_SCREENSHOT_DIR || '';
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -367,6 +370,16 @@ class GamePage {
   async pressKey(key, code, extra = {}) {
     await this.dispatchKey('rawKeyDown', key, code, extra);
     await this.dispatchKey('keyUp', key, code, { modifiers: extra.modifiers || 0 });
+  }
+
+  async captureScreenshot(filePath) {
+    const { data } = await this.client.send('Page.captureScreenshot', {
+      format: 'png',
+      captureBeyondViewport: false,
+    });
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, Buffer.from(data, 'base64'));
+    return filePath;
   }
 
   async dispatchRepeatedKey(key, code, count) {
@@ -1243,6 +1256,190 @@ async function renderQualityScenario() {
   });
 }
 
+async function realmArtDirectionsScenario() {
+  let desktopObjectCounts = null;
+  await withPage('realm-art-directions-desktop', {}, async (page) => {
+    page.requireDev('realm art direction boundary and lifecycle probes');
+    await page.startGame();
+    const realms = [];
+    for (let index = 0; index < 4; index += 1) {
+      const entry = await page.gameEvaluate(`
+        const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
+        $state.upgradeTriggered=[true,true];
+        $state.bossTriggered=true;
+        $state.stageQueue=[];
+        $state.elapsed=REALMS[${index}].start;
+        if(${index}===0){
+          $state.stageIndex=0;
+          if(controller) enterStage(0);
+          else setPalette(0,true);
+        }else{
+          $state.stageIndex=${index - 1};
+          $state.mode='playing';
+          updateStage();
+        }
+        $state.mode='paused';
+        const before=controller?.getStats() ?? {updateCounts:[0,0,0,0]};
+        controller?.update({elapsed:$state.elapsed,dt:0.016,reducedMotion:$state.reducedMotion});
+        const after=controller?.getStats() ?? {
+          activeRealm:$state.stageIndex,
+          visibleGroups:0,
+          updateCounts:[0,0,0,0],
+          objectCounts:[0,0,0,0],
+          disposed:false,
+        };
+        const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+        const sampleGroups=root
+          ? root.children.filter((child)=>child.visible)
+          : [backgroundGroup,starsGroup,decorGroup];
+        const signatureParts=[];
+        let fallbackObjectCount=0;
+        sampleGroups.forEach((sampleGroup)=>sampleGroup.traverse((object)=>{
+          if(!object.geometry) return;
+          fallbackObjectCount+=1;
+          const positionCount=object.geometry.attributes?.position?.count ?? 0;
+          const indexCount=object.geometry.index?.count ?? 0;
+          signatureParts.push([object.type,object.geometry.type,positionCount,indexCount].join(':'));
+        }));
+        return {
+          activeRealm:after.activeRealm,
+          boundary:$state.elapsed,
+          dataset:document.documentElement.dataset.realm ?? null,
+          visibleGroups:after.visibleGroups,
+          signature:signatureParts.sort().join('|'),
+          inactiveUpdates:after.updateCounts.reduce((total,count,realmIndex)=>
+            total+(realmIndex===after.activeRealm ? 0 : count-(before.updateCounts[realmIndex] ?? 0)),0),
+          objectCounts:controller ? after.objectCounts : [fallbackObjectCount,fallbackObjectCount,fallbackObjectCount,fallbackObjectCount],
+        };
+      `);
+      realms.push(entry);
+      assert.equal(entry.boundary, [0, 30, 64, 100][index], `realm ${index} did not start at its exact boundary`);
+      assert.equal(entry.activeRealm, index, `realm ${index} did not become active`);
+      if (REALM_SCREENSHOT_DIR) {
+        await sleep(80);
+        await page.captureScreenshot(path.join(
+          REALM_SCREENSHOT_DIR,
+          `realm-${String(index + 1).padStart(2, '0')}-${['abyss', 'data-city', 'star-forge', 'void-cathedral'][index]}.png`,
+        ));
+      }
+    }
+
+    assert.deepEqual(realms.map((entry) => entry.dataset), ['abyss','data-city','star-forge','void-cathedral']);
+    assert.ok(realms.every((entry) => entry.visibleGroups === 1));
+    assert.equal(new Set(realms.map((entry) => entry.signature)).size, 4);
+    assert.ok(realms.every((entry) => entry.inactiveUpdates === 0));
+    desktopObjectCounts = realms[0].objectCounts;
+
+    const reducedSwap = await page.gameEvaluate(`
+      const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
+      if(!controller) return {supported:false};
+      applyReducedMotionPreference(true);
+      $state.elapsed=REALMS[1].start;
+      enterStage(1);
+      const stats=controller.getStats();
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const active=root?.children.find((child)=>child.visible);
+      const lineLayers=active?.children.filter((child)=>child.isLineSegments) ?? [];
+      return {
+        supported:true,
+        activeRealm:stats.activeRealm,
+        dataset:document.documentElement.dataset.realm,
+        visibleGroups:stats.visibleGroups,
+        scale:[active?.scale.x,active?.scale.y],
+        skylineX:lineLayers.slice(0,3).map((line)=>line.position.x),
+        laneY:lineLayers[3]?.position.y,
+      };
+    `);
+    assert.deepEqual(reducedSwap, {
+      supported:true,
+      activeRealm:1,
+      dataset:'data-city',
+      visibleGroups:1,
+      scale:[1,1],
+      skylineX:[0,0,0],
+      laneY:0,
+    });
+
+    const lifecycle = await page.gameEvaluate(`
+      const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      if(!controller || !root) return {supported:false};
+      const before=controller.getStats();
+      controller.resize(640,960);
+      const resized=controller.getStats();
+      controller.setRealm(2,true);
+      const repeatedBefore=controller.getStats();
+      controller.setRealm(2,true);
+      const repeatedAfter=controller.getStats();
+      controller.reset();
+      const reset=controller.getStats();
+      const resources=new Set();
+      root.traverse((object)=>{
+        if(object.geometry) resources.add(object.geometry);
+        const objectMaterials=Array.isArray(object.material) ? object.material : [object.material];
+        objectMaterials.filter(Boolean).forEach((material)=>resources.add(material));
+      });
+      const disposeCounts=[];
+      for(const resource of resources){
+        const original=resource.dispose.bind(resource);
+        let count=0;
+        resource.dispose=()=>{count+=1;disposeCounts.push(resource);original();};
+        resource.userData.__realmDisposeCount=()=>count;
+      }
+      controller.dispose();
+      controller.dispose();
+      const counts=[...resources].map((resource)=>resource.userData.__realmDisposeCount());
+      const disposed=controller.getStats();
+      return {
+        supported:true,
+        countsStable:JSON.stringify(before.objectCounts)===JSON.stringify(resized.objectCounts),
+        repeatedStable:JSON.stringify(repeatedBefore)===JSON.stringify(repeatedAfter),
+        resetActive:reset.activeRealm,
+        resetVisible:reset.visibleGroups,
+        resourceCount:resources.size,
+        disposeCalls:disposeCounts.length,
+        disposed:disposed.disposed,
+        detached:!scene.children.includes(root),
+        once:counts.every((count)=>count===1),
+      };
+    `);
+    assert.deepEqual(lifecycle, {
+      supported:true,
+      countsStable:true,
+      repeatedStable:true,
+      resetActive:0,
+      resetVisible:1,
+      resourceCount:lifecycle.resourceCount,
+      disposeCalls:lifecycle.resourceCount,
+      disposed:true,
+      detached:true,
+      once:true,
+    });
+    assert.ok(lifecycle.resourceCount > 0, 'realm controller did not own any disposable resources');
+  });
+
+  let mobileObjectCounts = null;
+  await withPage('realm-art-directions-coarse', {
+    width: 1024,
+    height: 768,
+    mobile: true,
+    touch: true,
+  }, async (page) => {
+    page.requireDev('coarse realm art direction budget probe');
+    await page.startGame();
+    mobileObjectCounts = await page.gameEvaluate(`
+      return typeof realmBackgrounds==='undefined' ? null : realmBackgrounds.getStats().objectCounts;
+    `);
+  });
+  assert.ok(Array.isArray(desktopObjectCounts) && Array.isArray(mobileObjectCounts));
+  assert.equal(desktopObjectCounts.length, 4);
+  assert.equal(mobileObjectCounts.length, 4);
+  desktopObjectCounts.forEach((count, index) => {
+    assert.ok(mobileObjectCounts[index] < count,
+      `coarse realm ${index} object count ${mobileObjectCounts[index]} was not below desktop ${count}`);
+  });
+}
+
 async function runtimeGuardScenario() {
   await withPage('runtime-guards', {}, async (page) => {
     page.requireDev('runtime guard, cap, and listener lifecycle probe');
@@ -1722,6 +1919,7 @@ const scenarios = [
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
   ['reduced-motion warnings', reducedMotionScenario],
   ['desktop, coarse, and reduced-motion render quality', renderQualityScenario],
+  ['four independent realm art directions', realmArtDirectionsScenario],
   ['runtime finite guards and listener lifecycle', runtimeGuardScenario],
   ['Repair Swarm and combat ARIA', repairAndAriaScenario],
   ['replay cleanup and geometry stability', replayCleanupScenario],
