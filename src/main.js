@@ -933,7 +933,7 @@ function showFloatingText(text, position, tone = "cyan", tier = "small") {
   return item;
 }
 
-function showStageBanner(title, duration = 1.6, tone = "stage", label = "PHASE SHIFT") {
+function showStageBanner(title, duration = 1.05, tone = "stage", label = "PHASE SHIFT") {
   dom.stageBannerLabel.textContent = label;
   dom.stageBannerTitle.textContent = title;
   dom.stageBanner.dataset.tone = tone;
@@ -1890,7 +1890,7 @@ function chooseUpgrade(upgradeId) {
     const presentation = REALM_PRESENTATION[state.stageIndex];
     showStageBanner(
       presentation?.title ?? STAGES[state.stageIndex].name,
-      1.5,
+      1.05,
       "stage",
       presentation?.environment,
     );
@@ -3396,7 +3396,7 @@ function enterStage(nextStageIndex, showBanner = true) {
   if (showBanner) {
     showStageBanner(
       presentation?.title ?? STAGES[realmIndex].name,
-      realmIndex === 3 ? 2.2 : 1.6,
+      realmIndex === 3 ? 1.25 : 1.05,
       realmIndex === 3 ? "boss" : "stage",
       presentation?.environment,
     );

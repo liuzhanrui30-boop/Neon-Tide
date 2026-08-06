@@ -4,6 +4,7 @@ const TAU = Math.PI * 2;
 const BASE_HALF_HEIGHT = 7;
 const BASE_HALF_WIDTH = 10;
 const BACKDROP_Z = -4;
+const REALM_TRANSITION_DURATION = 0.9;
 
 const clampRealm = (index) => Math.min(3, Math.max(0, Math.trunc(Number(index) || 0)));
 const positiveModulo = (value, divisor = 1) => ((value % divisor) + divisor) % divisor;
@@ -21,8 +22,15 @@ function getLayout(width, height) {
 }
 
 function ownMaterial(materials, material) {
+  material.transparent = true;
+  material.userData.realmBaseOpacity = Number.isFinite(material.opacity) ? material.opacity : 1;
   materials.add(material);
   return material;
+}
+
+function setMaterialBaseOpacity(material, opacity) {
+  material.userData.realmBaseOpacity = opacity;
+  material.opacity = opacity;
 }
 
 function meshMaterial(materials, parameters) {
@@ -258,7 +266,10 @@ function createAbyss({ quality, width, height }) {
       const caustic = caustics[index];
       caustic.line.position.x = motion * Math.sin(elapsed * (0.19 + index * 0.07) + caustic.phase) * (0.7 + index * 0.35);
       caustic.line.position.y = caustic.baseY + motion * Math.sin(elapsed * 0.31 + caustic.phase) * 0.16;
-      caustic.material.opacity = 0.12 + index * 0.012 + motion * Math.sin(elapsed * 0.7 + caustic.phase) * 0.025;
+      setMaterialBaseOpacity(
+        caustic.material,
+        0.12 + index * 0.012 + motion * Math.sin(elapsed * 0.7 + caustic.phase) * 0.025,
+      );
     }
     for (const jelly of jellies) {
       jelly.node.position.x = jelly.baseX + motion * Math.sin(elapsed * 0.21 + jelly.phase) * 0.36;
@@ -579,7 +590,10 @@ function createStarForge({ quality, width, height }) {
     for (let index = 0; index < crackLayers.length; index += 1) {
       const layer = crackLayers[index];
       layer.cracks.rotation.z = motion * Math.sin(elapsed * (0.09 + index * 0.02) + layer.phase) * 0.12;
-      layer.material.opacity = 0.13 + index * 0.018 + motion * Math.sin(elapsed * 0.8 + layer.phase) * 0.035;
+      setMaterialBaseOpacity(
+        layer.material,
+        0.13 + index * 0.018 + motion * Math.sin(elapsed * 0.8 + layer.phase) * 0.035,
+      );
     }
     for (const heatLens of heatLenses) {
       heatLens.lens.rotation.z = motion * Math.sin(elapsed * 0.14 + heatLens.phase) * 0.1;
@@ -727,7 +741,10 @@ function createVoidCathedral({ quality, width, height }) {
       flowPositions[index * 3 + 1] = -7 + t * 14;
     }
     flowGeometry.attributes.position.needsUpdate = true;
-    crackMaterial.opacity = 0.11 + motion * (Math.sin(elapsed * 0.46) * 0.5 + 0.5) * 0.07;
+    setMaterialBaseOpacity(
+      crackMaterial,
+      0.11 + motion * (Math.sin(elapsed * 0.46) * 0.5 + 0.5) * 0.07,
+    );
   }
 
   resize(width, height);
@@ -759,33 +776,107 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
   });
 
   let activeRealm = 0;
-  let transitioningRealm = null;
-  let transitionProgress = 1;
+  let transition = null;
   let disposed = false;
+  const realmWeights = [1, 0, 0, 0];
   const updateCounts = [0, 0, 0, 0];
   const objectCounts = builders.map((builder) => builder.objectCount);
+
+  function restoreBuilderMaterials(builder) {
+    for (const material of builder.materials) {
+      material.opacity = material.userData.realmBaseOpacity ?? 1;
+    }
+  }
+
+  function applyBuilderPresentation(builder, weight, direction = 1) {
+    const safeWeight = THREE.MathUtils.clamp(weight, 0, 1);
+    for (const material of builder.materials) {
+      material.opacity = (material.userData.realmBaseOpacity ?? 1) * safeWeight;
+    }
+    builder.group.scale.setScalar(0.94 + safeWeight * 0.06);
+    builder.group.position.set(direction * (1 - safeWeight) * 0.32, (1 - safeWeight) * 0.08, 0);
+  }
+
+  function normalizeBuilder(builder, visible = false) {
+    restoreBuilderMaterials(builder);
+    builder.group.position.set(0, 0, 0);
+    builder.group.scale.set(1, 1, 1);
+    builder.group.visible = visible;
+  }
+
+  function finishTransition(realm = activeRealm) {
+    activeRealm = clampRealm(realm);
+    transition = null;
+    builders.forEach((builder, index) => {
+      realmWeights[index] = index === activeRealm ? 1 : 0;
+      normalizeBuilder(builder, index === activeRealm);
+    });
+  }
 
   function setRealm(index, immediate = false) {
     if (disposed) return activeRealm;
     const nextRealm = clampRealm(index);
     if (nextRealm === activeRealm) {
       if (immediate) {
-        transitioningRealm = null;
-        transitionProgress = 1;
-        builders[activeRealm].group.scale.set(1, 1, 1);
+        finishTransition(activeRealm);
         builders[activeRealm].update(0, 0, true);
+        restoreBuilderMaterials(builders[activeRealm]);
       }
       return activeRealm;
     }
+
+    if (immediate) {
+      finishTransition(nextRealm);
+      builders[activeRealm].update(0, 0, true);
+      restoreBuilderMaterials(builders[activeRealm]);
+      return activeRealm;
+    }
+
+    const visibleRealms = builders
+      .map((builder, builderIndex) => (builder.group.visible ? builderIndex : -1))
+      .filter((builderIndex) => builderIndex >= 0);
+    let outgoingRealm = activeRealm;
+    if (transition) {
+      if (visibleRealms.includes(nextRealm)) {
+        outgoingRealm = visibleRealms.find((realm) => realm !== nextRealm) ?? activeRealm;
+      } else {
+        outgoingRealm = visibleRealms.reduce((best, realm) => (
+          realmWeights[realm] > realmWeights[best] ? realm : best
+        ), visibleRealms[0] ?? activeRealm);
+      }
+    }
+
+    const outgoingWeight = THREE.MathUtils.clamp(
+      Number.isFinite(realmWeights[outgoingRealm]) ? realmWeights[outgoingRealm] : 1,
+      0,
+      1,
+    );
+    const incomingWeight = visibleRealms.includes(nextRealm)
+      ? THREE.MathUtils.clamp(realmWeights[nextRealm], 0, 1)
+      : 1 - outgoingWeight;
+
     activeRealm = nextRealm;
     builders.forEach((builder, builderIndex) => {
-      builder.group.visible = builderIndex === activeRealm;
-      if (builderIndex !== activeRealm) builder.group.scale.set(1, 1, 1);
+      const participates = builderIndex === outgoingRealm || builderIndex === activeRealm;
+      if (!participates) {
+        realmWeights[builderIndex] = 0;
+        normalizeBuilder(builder, false);
+      } else {
+        restoreBuilderMaterials(builder);
+        builder.group.visible = true;
+      }
     });
-    transitioningRealm = immediate ? null : activeRealm;
-    transitionProgress = immediate ? 1 : 0;
-    builders[activeRealm].group.scale.setScalar(immediate ? 1 : 0.94);
-    if (immediate) builders[activeRealm].update(0, 0, true);
+    realmWeights[outgoingRealm] = outgoingWeight;
+    realmWeights[activeRealm] = incomingWeight;
+    transition = {
+      outgoingRealm,
+      incomingRealm: activeRealm,
+      outgoingWeight,
+      incomingWeight,
+      elapsed: 0,
+    };
+    applyBuilderPresentation(builders[outgoingRealm], outgoingWeight, -1);
+    applyBuilderPresentation(builders[activeRealm], incomingWeight, 1);
     return activeRealm;
   }
 
@@ -793,16 +884,29 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     if (disposed) return false;
     const safeElapsed = Number.isFinite(elapsed) ? elapsed : 0;
     const safeDt = Math.max(0, Number.isFinite(dt) ? dt : 0);
-    const builder = builders[activeRealm];
-    builder.update(safeElapsed, safeDt, Boolean(reducedMotion));
-    updateCounts[activeRealm] += 1;
-    if (transitioningRealm === activeRealm) {
-      if (reducedMotion) transitionProgress = 1;
-      else transitionProgress = Math.min(1, transitionProgress + safeDt * 4.8);
-      const eased = 1 - ((1 - transitionProgress) ** 3);
-      builder.group.scale.setScalar(0.94 + eased * 0.06);
-      if (transitionProgress >= 1) transitioningRealm = null;
+
+    if (transition && reducedMotion) finishTransition(activeRealm);
+    if (!transition) {
+      const builder = builders[activeRealm];
+      builder.update(safeElapsed, safeDt, Boolean(reducedMotion));
+      restoreBuilderMaterials(builder);
+      updateCounts[activeRealm] += 1;
+      return true;
     }
+
+    const { outgoingRealm, incomingRealm } = transition;
+    for (const realm of [outgoingRealm, incomingRealm]) {
+      builders[realm].update(safeElapsed, safeDt, false);
+      updateCounts[realm] += 1;
+    }
+    transition.elapsed = Math.min(REALM_TRANSITION_DURATION, transition.elapsed + safeDt);
+    const progress = transition.elapsed / REALM_TRANSITION_DURATION;
+    const eased = progress * progress * (3 - 2 * progress);
+    realmWeights[outgoingRealm] = THREE.MathUtils.lerp(transition.outgoingWeight, 0, eased);
+    realmWeights[incomingRealm] = THREE.MathUtils.lerp(transition.incomingWeight, 1, eased);
+    applyBuilderPresentation(builders[outgoingRealm], realmWeights[outgoingRealm], -1);
+    applyBuilderPresentation(builders[incomingRealm], realmWeights[incomingRealm], 1);
+    if (transition.elapsed >= REALM_TRANSITION_DURATION) finishTransition(incomingRealm);
     return true;
   }
 
@@ -814,9 +918,14 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
 
   function reset() {
     if (disposed) return false;
+    builders.forEach((builder, index) => {
+      builder.update(0, 0, true);
+      realmWeights[index] = index === 0 ? 1 : 0;
+      normalizeBuilder(builder, index === 0);
+    });
+    activeRealm = 0;
+    transition = null;
     updateCounts.fill(0);
-    setRealm(0, true);
-    builders[0].update(0, 0, true);
     return true;
   }
 

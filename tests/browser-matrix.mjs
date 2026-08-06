@@ -1259,111 +1259,324 @@ async function renderQualityScenario() {
 async function realmArtDirectionsScenario() {
   let desktopObjectCounts = null;
   await withPage('realm-art-directions-desktop', {}, async (page) => {
-    page.requireDev('realm art direction boundary and lifecycle probes');
+    page.requireDev('realm crossfade, boundary, reset, banner, and lifecycle probes');
     await page.startGame();
-    const realms = [];
-    for (let index = 0; index < 4; index += 1) {
-      const entry = await page.gameEvaluate(`
-        const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
-        $state.upgradeTriggered=[true,true];
-        $state.bossTriggered=true;
-        $state.stageQueue=[];
-        $state.elapsed=REALMS[${index}].start;
-        if(${index}===0){
-          $state.stageIndex=0;
-          if(controller) enterStage(0);
-          else setPalette(0,true);
-        }else{
-          $state.stageIndex=${index - 1};
-          $state.mode='playing';
-          updateStage();
-        }
-        $state.mode='paused';
-        const before=controller?.getStats() ?? {updateCounts:[0,0,0,0]};
-        controller?.update({elapsed:$state.elapsed,dt:0.016,reducedMotion:$state.reducedMotion});
-        const after=controller?.getStats() ?? {
-          activeRealm:$state.stageIndex,
-          visibleGroups:0,
-          updateCounts:[0,0,0,0],
-          objectCounts:[0,0,0,0],
-          disposed:false,
-        };
-        const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
-        const sampleGroups=root
-          ? root.children.filter((child)=>child.visible)
-          : [backgroundGroup,starsGroup,decorGroup];
-        const signatureParts=[];
-        let fallbackObjectCount=0;
-        sampleGroups.forEach((sampleGroup)=>sampleGroup.traverse((object)=>{
+
+    const crossfade = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const sample=()=>({
+        stats:controller.getStats(),
+        visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
+        backdropOpacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(3))),
+        scale:root.children.map((group)=>Number(group.scale.x.toFixed(3))),
+        position:root.children.map((group)=>[Number(group.position.x.toFixed(3)),Number(group.position.y.toFixed(3))]),
+      });
+      controller.reset();
+      const reset=sample();
+      controller.setRealm(1,false);
+      const beforeStart=controller.getStats().updateCounts;
+      controller.update({elapsed:30,dt:0,reducedMotion:false});
+      const start=sample();
+      start.delta=start.stats.updateCounts.map((count,index)=>count-beforeStart[index]);
+      const beforeMid=start.stats.updateCounts;
+      controller.update({elapsed:30.45,dt:0.45,reducedMotion:false});
+      const mid=sample();
+      mid.delta=mid.stats.updateCounts.map((count,index)=>count-beforeMid[index]);
+      const beforeEnd=mid.stats.updateCounts;
+      controller.update({elapsed:30.91,dt:0.46,reducedMotion:false});
+      const end=sample();
+      end.delta=end.stats.updateCounts.map((count,index)=>count-beforeEnd[index]);
+      return {reset,start,mid,end};
+    `);
+    assert.deepEqual(crossfade.reset.visible, ['abyss']);
+    assert.deepEqual(crossfade.start.visible, ['abyss','data-city']);
+    assert.deepEqual(crossfade.start.delta, [1,1,0,0]);
+    assert.deepEqual(crossfade.start.backdropOpacity.slice(0,2), [1,0]);
+    assert.deepEqual(crossfade.mid.visible, ['abyss','data-city']);
+    assert.deepEqual(crossfade.mid.delta, [1,1,0,0]);
+    assert.ok(Math.abs(crossfade.mid.backdropOpacity[0] - 0.5) <= 0.03);
+    assert.ok(Math.abs(crossfade.mid.backdropOpacity[1] - 0.5) <= 0.03);
+    assert.ok(crossfade.mid.scale[0] < 1 && crossfade.mid.scale[1] < 1);
+    assert.notDeepEqual(crossfade.mid.position[0], [0,0]);
+    assert.notDeepEqual(crossfade.mid.position[1], [0,0]);
+    assert.deepEqual(crossfade.end.visible, ['data-city']);
+    assert.deepEqual(crossfade.end.delta, [1,1,0,0]);
+    assert.deepEqual(crossfade.end.backdropOpacity.slice(0,2), [1,1]);
+    assert.deepEqual(crossfade.end.position[1], [0,0]);
+    assert.equal(crossfade.end.scale[1], 1);
+
+    const redirected = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const sample=()=>({
+        active:controller.getStats().activeRealm,
+        visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
+        opacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(4))),
+        transforms:root.children.map((group)=>[
+          Number(group.position.x.toFixed(4)),Number(group.position.y.toFixed(4)),Number(group.scale.x.toFixed(4)),
+        ]),
+      });
+      controller.reset();
+      controller.setRealm(1,false);
+      controller.update({elapsed:30.3,dt:0.3,reducedMotion:false});
+      const one=sample();
+      controller.setRealm(2,false);
+      const two=sample();
+      controller.update({elapsed:64.3,dt:0.3,reducedMotion:false});
+      controller.setRealm(3,false);
+      const three=sample();
+      controller.update({elapsed:100.91,dt:0.91,reducedMotion:false});
+      const end=sample();
+      return {one,two,three,end};
+    `);
+    assert.deepEqual(redirected.one.visible, ['abyss','data-city']);
+    assert.deepEqual(redirected.two.visible, ['abyss','star-forge']);
+    assert.deepEqual(redirected.three.visible, ['abyss','void-cathedral']);
+    for (const sample of [redirected.one, redirected.two, redirected.three]) {
+      assert.equal(sample.visible.length, 2);
+      const visibleOpacity = sample.opacity.filter((opacity, index) => sample.transforms[index][2] < 1 || opacity < 1);
+      assert.ok(visibleOpacity.length >= 2);
+      assert.ok(Math.abs(sample.opacity.reduce((sum, opacity, index) => (
+        sample.visible.includes(['abyss','data-city','star-forge','void-cathedral'][index]) ? sum + opacity : sum
+      ), 0) - 1) <= 0.001);
+    }
+    assert.equal(redirected.two.active, 2);
+    assert.equal(redirected.three.active, 3);
+    assert.deepEqual(redirected.end.visible, ['void-cathedral']);
+    assert.deepEqual(redirected.end.opacity, [1,1,1,1]);
+    assert.ok(redirected.end.transforms.every((transform)=>JSON.stringify(transform)===JSON.stringify([0,0,1])));
+
+    const resetRegression = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const round=(value)=>Number(value.toFixed(5));
+      const snapshot=()=>root.children.map((group)=>{
+        const renderables=[];
+        group.traverse((object)=>{
           if(!object.geometry) return;
-          fallbackObjectCount+=1;
-          const positionCount=object.geometry.attributes?.position?.count ?? 0;
-          const indexCount=object.geometry.index?.count ?? 0;
-          signatureParts.push([object.type,object.geometry.type,positionCount,indexCount].join(':'));
-        }));
+          const materials=(Array.isArray(object.material) ? object.material : [object.material]).filter(Boolean);
+          renderables.push({
+            type:object.type,
+            visible:object.visible,
+            position:[round(object.position.x),round(object.position.y),round(object.position.z)],
+            rotation:[round(object.rotation.x),round(object.rotation.y),round(object.rotation.z)],
+            scale:[round(object.scale.x),round(object.scale.y),round(object.scale.z)],
+            opacity:materials.map((material)=>round(material.opacity)),
+            points:object.isPoints
+              ? Array.from(object.geometry.attributes.position.array.slice(0,18),round)
+              : [],
+          });
+        });
         return {
-          activeRealm:after.activeRealm,
-          boundary:$state.elapsed,
-          dataset:document.documentElement.dataset.realm ?? null,
-          visibleGroups:after.visibleGroups,
-          signature:signatureParts.sort().join('|'),
-          inactiveUpdates:after.updateCounts.reduce((total,count,realmIndex)=>
-            total+(realmIndex===after.activeRealm ? 0 : count-(before.updateCounts[realmIndex] ?? 0)),0),
-          objectCounts:controller ? after.objectCounts : [fallbackObjectCount,fallbackObjectCount,fallbackObjectCount,fallbackObjectCount],
+          visible:group.visible,
+          position:[round(group.position.x),round(group.position.y),round(group.position.z)],
+          scale:[round(group.scale.x),round(group.scale.y),round(group.scale.z)],
+          renderables,
+        };
+      });
+      controller.reset();
+      const initial=JSON.stringify(snapshot());
+      [0,1,2,3].forEach((realm,index)=>{
+        controller.setRealm(realm,true);
+        controller.update({elapsed:[12.4,42.7,78.2,111.8][index],dt:0.18,reducedMotion:false});
+      });
+      controller.setRealm(1,false);
+      controller.update({elapsed:32.2,dt:0.38,reducedMotion:false});
+      controller.setRealm(3,false);
+      controller.update({elapsed:102.4,dt:0.27,reducedMotion:false});
+      controller.reset();
+      return {
+        same:initial===JSON.stringify(snapshot()),
+        stats:controller.getStats(),
+      };
+    `);
+    assert.equal(resetRegression.same, true, 'reset did not restore every realm transform, opacity, and Points buffer');
+    assert.deepEqual(resetRegression.stats.updateCounts, [0,0,0,0]);
+    assert.equal(resetRegression.stats.activeRealm, 0);
+    assert.equal(resetRegression.stats.visibleGroups, 1);
+
+    const reducedSwap = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      controller.reset();
+      controller.setRealm(1,false);
+      controller.update({elapsed:30.45,dt:0.45,reducedMotion:true});
+      const stats=controller.getStats();
+      const active=root.children.find((group)=>group.visible);
+      return {
+        activeRealm:stats.activeRealm,
+        visibleGroups:stats.visibleGroups,
+        visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
+        opacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(3))),
+        transform:[active.position.x,active.position.y,active.scale.x,active.scale.y],
+      };
+    `);
+    assert.deepEqual(reducedSwap, {
+      activeRealm:1,
+      visibleGroups:1,
+      visible:['data-city'],
+      opacity:[1,1,1,1],
+      transform:[0,0,1,1],
+    });
+
+    const realmSignatures = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      return root.children.map((group,index)=>{
+        controller.setRealm(index,true);
+        const parts=[];
+        group.traverse((object)=>{
+          if(!object.geometry) return;
+          parts.push([
+            object.type,object.geometry.type,
+            object.geometry.attributes?.position?.count ?? 0,
+            object.geometry.index?.count ?? 0,
+          ].join(':'));
+        });
+        return parts.sort().join('|');
+      });
+    `);
+    assert.equal(new Set(realmSignatures).size, 4);
+    desktopObjectCounts = await page.gameEvaluate('return realmBackgrounds.getStats().objectCounts');
+
+    const naturalEntries = [];
+    const expectedDatasets = ['data-city','star-forge','void-cathedral'];
+    const expectedTitles = ['第二境 · 数据都市','第三境 · 星铸熔炉','终境 · 虚空圣堂'];
+    const expectedLabels = [
+      'DATA CITY // 透视车道与封包天际线',
+      'STAR FORGE // 日冕裂隙与灼热碎片',
+      'VOID CATHEDRAL // 八角棱镜与逆流光束',
+    ];
+    for (let target = 1; target < 4; target += 1) {
+      const boundary = [30,64,100][target - 1];
+      await page.gameEvaluate(`
+        clearWorldEntities();
+        $state.upgradeTriggered=[true,true];
+        $state.bossTriggered=${target === 3 ? 'false' : 'true'};
+        $state.stageQueue=[];
+        $state.stageIndex=${target - 1};
+        $state.elapsed=${boundary - 0.08};
+        $state.enemySpawnTimer=9999;
+        $state.formationTimer=9999;
+        $state.shardSpawnTimer=9999;
+        realmBackgrounds.setRealm(${target - 1},true);
+        document.documentElement.dataset.realm=REALMS[${target - 1}].cssTheme;
+        $audio.setStage(${target - 1});
+        setPalette(${target - 1},true);
+        dom.stageBanner.classList.remove('show');
+        $state.stageBannerTimer=0;
+        $state.mode='playing';
+        return true;
+      `);
+      await page.waitForPage(`document.documentElement.dataset.realm===${JSON.stringify(expectedDatasets[target - 1])} && document.querySelector('#stage-banner').classList.contains('show')`, 2500);
+      const entry = await page.gameEvaluate(`
+        const banner=dom.stageBanner.getBoundingClientRect();
+        const hud=dom.hud.getBoundingClientRect();
+        const boss=dom.bossPanel.getBoundingClientRect();
+        const width=window.innerWidth;
+        const height=window.innerHeight;
+        const center={left:width*0.27,right:width*0.73,top:height*0.34,bottom:height*0.72};
+        const overlap=Math.max(0,Math.min(banner.right,center.right)-Math.max(banner.left,center.left))
+          *Math.max(0,Math.min(banner.bottom,center.bottom)-Math.max(banner.top,center.top));
+        return {
+          elapsed:$state.elapsed,
+          stage:$state.stageIndex,
+          controller:realmBackgrounds.getStats(),
+          dataset:document.documentElement.dataset.realm,
+          audio:$audio.getDebugSnapshot().stageIndex,
+          banner:{
+            title:dom.stageBannerTitle.textContent,
+            label:dom.stageBannerLabel.textContent,
+            shown:dom.stageBanner.classList.contains('show'),
+            left:banner.left,top:banner.top,right:banner.right,bottom:banner.bottom,width:banner.width,height:banner.height,
+            hudBottom:hud.bottom,bossBottom:dom.bossPanel.hidden ? 0 : boss.bottom,
+            viewportWidth:width,viewportHeight:height,centerOverlap:overlap,
+          },
         };
       `);
-      realms.push(entry);
-      assert.equal(entry.boundary, [0, 30, 64, 100][index], `realm ${index} did not start at its exact boundary`);
-      assert.equal(entry.activeRealm, index, `realm ${index} did not become active`);
-      if (REALM_SCREENSHOT_DIR) {
-        await sleep(80);
+      naturalEntries.push(entry);
+      assert.ok(entry.elapsed >= boundary, `natural animation did not cross ${boundary}s`);
+      assert.equal(entry.stage, target);
+      assert.equal(entry.controller.activeRealm, target);
+      assert.equal(entry.controller.visibleGroups, 2);
+      assert.equal(entry.dataset, expectedDatasets[target - 1]);
+      assert.equal(entry.audio, target);
+      assert.equal(entry.banner.title, expectedTitles[target - 1]);
+      assert.equal(entry.banner.label, expectedLabels[target - 1]);
+      assert.equal(entry.banner.shown, true);
+      assert.ok(entry.banner.left >= 8 && entry.banner.right <= entry.banner.viewportWidth - 8);
+      assert.ok(entry.banner.top >= entry.banner.hudBottom + 4, 'desktop banner overlapped the HUD');
+      assert.ok(entry.banner.top >= entry.banner.bossBottom + 4, 'boss banner overlapped the boss health panel');
+      assert.ok(entry.banner.bottom < entry.banner.viewportHeight * 0.34, 'desktop banner covered the combat center');
+      assert.equal(entry.banner.centerOverlap, 0);
+      await page.gameEvaluate(`
+        $state.mode='paused';
+        realmBackgrounds.update({elapsed:$state.elapsed,dt:0.91,reducedMotion:false});
+        dom.stageBanner.classList.remove('show');
+        $state.stageBannerTimer=0;
+        return true;
+      `);
+    }
+    assert.deepEqual(naturalEntries.map((entry)=>entry.dataset), expectedDatasets);
+
+    if (REALM_SCREENSHOT_DIR) {
+      for (let index = 0; index < 4; index += 1) {
+        const setup = await page.gameEvaluate(`
+          clearWorldEntities();
+          closeDialogs({restoreFocus:false});
+          $state.mode='paused';
+          $state.stageIndex=${index};
+          $state.elapsed=[12,42,76,108][${index}];
+          document.documentElement.dataset.realm=REALMS[${index}].cssTheme;
+          setPalette(${index},true);
+          realmBackgrounds.setRealm(${index},true);
+          realmBackgrounds.update({elapsed:$state.elapsed,dt:0,reducedMotion:false});
+          dom.stageBanner.classList.remove('show');
+          $state.stageBannerTimer=0;
+          dom.toast.classList.remove('show');
+          $state.toastTimer=0;
+          dom.combo.classList.remove('show');
+          $player.position.set(-2.2,-1.4);
+          $player.group.position.set($player.position.x,$player.position.y,0);
+          const lancer=spawnEnemy('lancer',new THREE.Vector2(3.2,2.1));
+          const chaser=spawnEnemy('chaser',new THREE.Vector2(-4.6,2.8));
+          const toPlayer=$player.position.clone().sub(lancer.group.position).normalize();
+          lancer.beamDirection.copy(toPlayer);
+          lancer.group.rotation.z=Math.atan2(toPlayer.y,toPlayer.x)-Math.PI/2;
+          lancer.visuals.line.visible=true;
+          setEnemyState(lancer,'telegraph',0.7,0.7);
+          updateLancer(lancer,0.2,toPlayer);
+          return {
+            enemies:$enemies.length,
+            lancerType:lancer.type,
+            telegraph:lancer.visuals.line.visible && lancer.state==='telegraph',
+            chaserType:chaser.type,
+            bannerShown:dom.stageBanner.classList.contains('show'),
+            toastShown:dom.toast.classList.contains('show'),
+            overlayShown:dom.overlay.classList.contains('visible'),
+          };
+        `);
+        assert.deepEqual(setup, {
+          enemies:2,
+          lancerType:'lancer',
+          telegraph:true,
+          chaserType:'chaser',
+          bannerShown:false,
+          toastShown:false,
+          overlayShown:false,
+        });
+        await sleep(260);
         await page.captureScreenshot(path.join(
           REALM_SCREENSHOT_DIR,
-          `realm-${String(index + 1).padStart(2, '0')}-${['abyss', 'data-city', 'star-forge', 'void-cathedral'][index]}.png`,
+          `realm-combat-${String(index + 1).padStart(2, '0')}-${['abyss','data-city','star-forge','void-cathedral'][index]}.png`,
         ));
       }
     }
 
-    assert.deepEqual(realms.map((entry) => entry.dataset), ['abyss','data-city','star-forge','void-cathedral']);
-    assert.ok(realms.every((entry) => entry.visibleGroups === 1));
-    assert.equal(new Set(realms.map((entry) => entry.signature)).size, 4);
-    assert.ok(realms.every((entry) => entry.inactiveUpdates === 0));
-    desktopObjectCounts = realms[0].objectCounts;
-
-    const reducedSwap = await page.gameEvaluate(`
-      const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
-      if(!controller) return {supported:false};
-      applyReducedMotionPreference(true);
-      $state.elapsed=REALMS[1].start;
-      enterStage(1);
-      const stats=controller.getStats();
-      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
-      const active=root?.children.find((child)=>child.visible);
-      const lineLayers=active?.children.filter((child)=>child.isLineSegments) ?? [];
-      return {
-        supported:true,
-        activeRealm:stats.activeRealm,
-        dataset:document.documentElement.dataset.realm,
-        visibleGroups:stats.visibleGroups,
-        scale:[active?.scale.x,active?.scale.y],
-        skylineX:lineLayers.slice(0,3).map((line)=>line.position.x),
-        laneY:lineLayers[3]?.position.y,
-      };
-    `);
-    assert.deepEqual(reducedSwap, {
-      supported:true,
-      activeRealm:1,
-      dataset:'data-city',
-      visibleGroups:1,
-      scale:[1,1],
-      skylineX:[0,0,0],
-      laneY:0,
-    });
-
     const lifecycle = await page.gameEvaluate(`
-      const controller=typeof realmBackgrounds==='undefined' ? null : realmBackgrounds;
+      const controller=realmBackgrounds;
       const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
-      if(!controller || !root) return {supported:false};
       const before=controller.getStats();
       controller.resize(640,960);
       const resized=controller.getStats();
@@ -1391,7 +1604,6 @@ async function realmArtDirectionsScenario() {
       const counts=[...resources].map((resource)=>resource.userData.__realmDisposeCount());
       const disposed=controller.getStats();
       return {
-        supported:true,
         countsStable:JSON.stringify(before.objectCounts)===JSON.stringify(resized.objectCounts),
         repeatedStable:JSON.stringify(repeatedBefore)===JSON.stringify(repeatedAfter),
         resetActive:reset.activeRealm,
@@ -1404,7 +1616,6 @@ async function realmArtDirectionsScenario() {
       };
     `);
     assert.deepEqual(lifecycle, {
-      supported:true,
       countsStable:true,
       repeatedStable:true,
       resetActive:0,
@@ -1420,16 +1631,55 @@ async function realmArtDirectionsScenario() {
 
   let mobileObjectCounts = null;
   await withPage('realm-art-directions-coarse', {
-    width: 1024,
-    height: 768,
+    width: 390,
+    height: 844,
     mobile: true,
     touch: true,
   }, async (page) => {
-    page.requireDev('coarse realm art direction budget probe');
+    page.requireDev('coarse realm art direction budget and banner probe');
     await page.startGame();
-    mobileObjectCounts = await page.gameEvaluate(`
-      return typeof realmBackgrounds==='undefined' ? null : realmBackgrounds.getStats().objectCounts;
+    mobileObjectCounts = await page.gameEvaluate('return realmBackgrounds.getStats().objectCounts');
+    await page.gameEvaluate(`
+      $state.upgradeTriggered=[true,true];
+      $state.bossTriggered=true;
+      $state.stageQueue=[];
+      $state.stageIndex=0;
+      $state.elapsed=29.92;
+      $state.enemySpawnTimer=9999;
+      $state.formationTimer=9999;
+      $state.shardSpawnTimer=9999;
+      realmBackgrounds.setRealm(0,true);
+      document.documentElement.dataset.realm=REALMS[0].cssTheme;
+      $audio.setStage(0);
+      dom.stageBanner.classList.remove('show');
+      $state.stageBannerTimer=0;
+      $state.mode='playing';
+      return true;
     `);
+    await page.waitForPage(`document.documentElement.dataset.realm==='data-city' && document.querySelector('#stage-banner').classList.contains('show')`, 2500);
+    const mobileBanner = await page.gameEvaluate(`
+      const banner=dom.stageBanner.getBoundingClientRect();
+      const hud=dom.hud.getBoundingClientRect();
+      const width=window.innerWidth;
+      const height=window.innerHeight;
+      const center={left:width*0.18,right:width*0.82,top:height*0.31,bottom:height*0.69};
+      const overlap=Math.max(0,Math.min(banner.right,center.right)-Math.max(banner.left,center.left))
+        *Math.max(0,Math.min(banner.bottom,center.bottom)-Math.max(banner.top,center.top));
+      return {
+        stage:$state.stageIndex,
+        dataset:document.documentElement.dataset.realm,
+        audio:$audio.getDebugSnapshot().stageIndex,
+        left:banner.left,top:banner.top,right:banner.right,bottom:banner.bottom,
+        hudBottom:hud.bottom,width,height,overlap,
+      };
+    `);
+    assert.equal(mobileBanner.stage, 1);
+    assert.equal(mobileBanner.dataset, 'data-city');
+    assert.equal(mobileBanner.audio, 1);
+    assert.ok(mobileBanner.left >= 8 && mobileBanner.right <= mobileBanner.width - 8);
+    assert.ok(mobileBanner.top >= mobileBanner.hudBottom + 4, 'mobile banner overlapped the HUD');
+    assert.ok(mobileBanner.bottom < mobileBanner.height * 0.31, 'mobile banner covered the combat center');
+    assert.equal(mobileBanner.overlap, 0);
   });
   assert.ok(Array.isArray(desktopObjectCounts) && Array.isArray(mobileObjectCounts));
   assert.equal(desktopObjectCounts.length, 4);
