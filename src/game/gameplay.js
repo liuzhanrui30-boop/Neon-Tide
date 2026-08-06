@@ -43,6 +43,24 @@ export function beamHitsCircle(beam = {}, circle = {}) {
   return perpendicularDistance < halfWidth + radius;
 }
 
+export function projectileHitsCircle(projectile = {}, circle = {}) {
+  const values = [
+    projectile.x,
+    projectile.y,
+    projectile.velocityX,
+    projectile.velocityY,
+    projectile.radius,
+    circle.x,
+    circle.y,
+    circle.radius,
+  ];
+  if (!values.every(Number.isFinite) || projectile.radius < 0 || circle.radius < 0) return false;
+  const combinedRadius = projectile.radius + circle.radius;
+  const dx = projectile.x - circle.x;
+  const dy = projectile.y - circle.y;
+  return dx * dx + dy * dy <= combinedRadius * combinedRadius;
+}
+
 export function getMineDetonationFrame(timeRemaining, reducedMotion = false) {
   const duration = 0.78;
   const progress = Math.min(1, Math.max(0, 1 - finiteOr(timeRemaining, duration) / duration));

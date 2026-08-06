@@ -7,6 +7,8 @@ import {
   getActiveEnemyCap,
   getFormationBudget,
   getFormationSlots,
+  getPressureTarget,
+  getSpawnBurstLimit,
   getSpawnInterval,
   getStageIndex,
   getStageProgress,
@@ -160,4 +162,15 @@ test('2.2 pressure caps and spawn cadence are locked', () => {
   assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 32);
   assert.deepEqual([getSpawnInterval(0, 0), getSpawnInterval(1, 30), getSpawnInterval(2, 64)], [0.62, 0.46, 0.34]);
   assert.equal(getSpawnInterval(2, 10_000), 0.26);
+});
+
+test('2.2 population targets and burst limits retain cap and health relief priority', () => {
+  assert.deepEqual([0, 1, 2].map((stageIndex) => getPressureTarget(stageIndex, {
+    activeCap: 42,
+    healthPercent: 100,
+  })), [15, 24, 34]);
+  assert.deepEqual([0, 1, 2].map(getSpawnBurstLimit), [2, 3, 4]);
+  assert.equal(getPressureTarget(2, { activeCap: 32, healthPercent: 100 }), 32);
+  assert.ok(getPressureTarget(2, { activeCap: 42, healthPercent: 20 }) < 34);
+  assert.equal(getPressureTarget(2, { activeCap: 0, healthPercent: 100 }), 0);
 });

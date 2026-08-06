@@ -34,6 +34,23 @@ export function getSpawnInterval(stageIndex = 0, elapsed = 0) {
   return Number(Math.max(COMBAT.spawnIntervalFloor, base - Math.min(0.16, pressure)).toFixed(3));
 }
 
+export function getPressureTarget(stageIndex = 0, context = {}) {
+  const index = clamp(Math.trunc(Number(stageIndex) || 0), 0, COMBAT.targetPopulations.length - 1);
+  const requestedCap = Number(context.activeCap);
+  const activeCap = Number.isFinite(requestedCap)
+    ? Math.max(0, Math.trunc(requestedCap))
+    : getActiveEnemyCap(context);
+  const healthPercent = clamp(Number.isFinite(Number(context.healthPercent)) ? Number(context.healthPercent) : 100, 0, 100);
+  const target = COMBAT.targetPopulations[index];
+  const relievedTarget = healthPercent <= 34 ? Math.floor(target * 0.74) : target;
+  return Math.min(activeCap, Math.max(0, relievedTarget));
+}
+
+export function getSpawnBurstLimit(stageIndex = 0) {
+  const index = clamp(Math.trunc(Number(stageIndex) || 0), 0, COMBAT.spawnBurstLimits.length - 1);
+  return COMBAT.spawnBurstLimits[index];
+}
+
 export function getFormationBudget(stageIndex = 0, elapsed = 0, context = {}) {
   const requestedCap = Number(context.maxEnemyCap);
   const cap = Number.isFinite(requestedCap)

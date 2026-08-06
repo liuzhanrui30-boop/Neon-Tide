@@ -15,9 +15,17 @@ import {
   clampFinite,
   finiteOr,
   getMineDetonationFrame,
+  projectileHitsCircle,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
-import { FORMATION_TEMPLATES } from "./game/config.js";
+import { COMBAT, FORMATION_TEMPLATES } from "./game/config.js";
+import {
+  getCurrentForce,
+  getDataLanePenalty,
+  getEnvironmentDelay,
+  getEnvironmentFrame,
+  getGravityForce,
+} from "./game/environment.js";
 import {
   LASER_RULES,
   gainWeaponEnergy,
@@ -32,6 +40,8 @@ import {
   getActiveEnemyCap,
   getFormationBudget,
   getFormationSlots,
+  getPressureTarget,
+  getSpawnBurstLimit,
   getSpawnInterval,
   getStageIndex,
 } from "./game/director.js";
@@ -62,6 +72,7 @@ const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
 const MAX_FLOATING_TEXTS = 24;
+const PROJECTILE_POOL_SIZE = COMBAT.projectilePoolSize;
 const enemyScratch = {
   toPlayer: new THREE.Vector2(),
   nearMissDirection: new THREE.Vector2(),
@@ -230,6 +241,12 @@ const state = {
   spawnSequence: 0,
   enemySpawnTimer: 1.1,
   formationTimer: 4.8,
+  environmentTimer: Infinity,
+  environmentElapsed: 0,
+  environmentSeed: 0x4e544944,
+  environmentSequence: 0,
+  environmentActive: false,
+  combatFrame: 0,
   lastFormation: null,
   lastFormationAt: -Infinity,
   shardSpawnTimer: 1.8,
@@ -281,6 +298,10 @@ const state = {
     laserHits: 0,
     laserInterrupts: 0,
     laserPeakTargets: 0,
+    projectilePeak: 0,
+    environmentEvents: 0,
+    environmentActiveFrames: 0,
+    realmAttackRoles: {},
   },
   cameraLookAhead: new THREE.Vector2(),
   reducedMotion: reducedMotionPreference?.matches ?? false,
@@ -312,6 +333,7 @@ const FOCUSABLE_SELECTOR = [
 
 const shards = [];
 const enemies = [];
+const projectiles = [];
 const particles = [];
 const particlePool = [];
 const ripples = [];
@@ -496,6 +518,8 @@ const shared = {
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   }),
+  projectileCircleGeometry: new THREE.CircleGeometry(0.16, 10),
+  projectileDiamondGeometry: new THREE.PlaneGeometry(0.3, 0.3),
 };
 
 function createTriangleGeometry(nose, tailWidth, tailY) {
@@ -535,6 +559,79 @@ shared.enemyGeometry = createTriangleGeometry(0.43, 0.31, -0.3);
 shared.strikerGeometry = createTriangleGeometry(0.72, 0.2, -0.58);
 shared.swarmWingGeometry = createWingGeometry();
 shared.bossTriangleGeometry = createTrianglePulseGeometry();
+
+let environmentFrame = getEnvironmentFrame(REALMS[0].id, 999);
+
+function makeEnvironmentMaterial(color, opacity = 0.35) {
+  return new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+}
+
+function createEnvironmentVisuals() {
+  const currentGroup = new THREE.Group();
+  const currentGeometry = new THREE.PlaneGeometry(24, 2.4);
+  const currentMaterial = makeEnvironmentMaterial(0x36e0ff, 0.18);
+  const currentBand = new THREE.Mesh(currentGeometry, currentMaterial);
+  const arrowPoints = [];
+  for (let x = -10; x <= 10; x += 2.5) {
+    arrowPoints.push(
+      new THREE.Vector3(x - 0.55, 0, 0), new THREE.Vector3(x + 0.55, 0, 0),
+      new THREE.Vector3(x + 0.55, 0, 0), new THREE.Vector3(x + 0.22, 0.25, 0),
+      new THREE.Vector3(x + 0.55, 0, 0), new THREE.Vector3(x + 0.22, -0.25, 0),
+    );
+  }
+  const arrowGeometry = new THREE.BufferGeometry().setFromPoints(arrowPoints);
+  const arrowMaterial = new THREE.LineBasicMaterial({ color: 0xe7ffff, transparent: true, opacity: 0.72, depthWrite: false });
+  const arrows = new THREE.LineSegments(arrowGeometry, arrowMaterial);
+  arrows.position.z = 0.02;
+  currentGroup.add(currentBand, arrows);
+
+  const dataGroup = new THREE.Group();
+  const dataGeometry = new THREE.PlaneGeometry(24, 2);
+  const dataMaterial = makeEnvironmentMaterial(0xa56bff, 0.2);
+  const dataBand = new THREE.Mesh(dataGeometry, dataMaterial);
+  const gridPoints = [];
+  for (let x = -12; x <= 12; x += 1.2) gridPoints.push(new THREE.Vector3(x, -1, 0), new THREE.Vector3(x, 1, 0));
+  for (let y = -1; y <= 1; y += 0.5) gridPoints.push(new THREE.Vector3(-12, y, 0), new THREE.Vector3(12, y, 0));
+  const gridGeometry = new THREE.BufferGeometry().setFromPoints(gridPoints);
+  const gridMaterial = new THREE.LineBasicMaterial({ color: 0xff4fd8, transparent: true, opacity: 0.62, depthWrite: false });
+  const grid = new THREE.LineSegments(gridGeometry, gridMaterial);
+  grid.position.z = 0.02;
+  dataGroup.add(dataBand, grid);
+
+  const gravityGroup = new THREE.Group();
+  const gravityMaterials = [
+    makeEnvironmentMaterial(0xff9f43, 0.55),
+    makeEnvironmentMaterial(0xff4fba, 0.42),
+    makeEnvironmentMaterial(0xe7ffff, 0.3),
+  ];
+  const gravityGeometries = [
+    new THREE.RingGeometry(0.7, 0.82, 48),
+    new THREE.RingGeometry(1.35, 1.45, 56),
+    new THREE.RingGeometry(2.1, 2.18, 64),
+  ];
+  gravityGeometries.forEach((geometry, index) => gravityGroup.add(new THREE.Mesh(geometry, gravityMaterials[index])));
+
+  const visuals = {
+    current: { group: currentGroup, meshes: [currentBand, arrows], geometries: [currentGeometry, arrowGeometry], materials: [currentMaterial, arrowMaterial] },
+    dataLane: { group: dataGroup, meshes: [dataBand, grid], geometries: [dataGeometry, gridGeometry], materials: [dataMaterial, gridMaterial] },
+    gravity: { group: gravityGroup, meshes: [...gravityGroup.children], geometries: gravityGeometries, materials: gravityMaterials },
+  };
+  for (const visual of Object.values(visuals)) {
+    visual.group.visible = false;
+    visual.group.position.z = 1.1;
+    world.add(visual.group);
+  }
+  return visuals;
+}
+
+const environmentVisual = createEnvironmentVisuals();
 
 function createPlayer() {
   const group = new THREE.Group();
@@ -695,6 +792,256 @@ function createParticlePool(count = MAX_PARTICLES) {
     particlePool.push({ mesh, life: 0, maxLife: 0, velocity: new THREE.Vector2() });
   }
   return particlePool.length;
+}
+
+function getProjectileActiveCap() {
+  const coarsePointer = window.matchMedia?.("(pointer: coarse)").matches ?? false;
+  return coarsePointer || window.innerWidth < 700
+    ? COMBAT.coarsePointerProjectileActiveCap
+    : COMBAT.desktopProjectileActiveCap;
+}
+
+function repairProjectileEntry(projectile) {
+  if (!projectile?.material?.isMaterial) return false;
+  if (!projectile.velocity?.isVector2) projectile.velocity = new THREE.Vector2();
+  if (!projectile.mesh?.isMesh) {
+    projectile.mesh = new THREE.Mesh(shared.projectileCircleGeometry, projectile.material);
+    projectile.mesh.position.z = 3.4;
+    world.add(projectile.mesh);
+  }
+  projectile.mesh.material = projectile.material;
+  if (!projectile.mesh.geometry?.isBufferGeometry) projectile.mesh.geometry = shared.projectileCircleGeometry;
+  projectile.group = projectile.mesh;
+  return true;
+}
+
+function resetProjectile(projectile) {
+  if (!repairProjectileEntry(projectile)) return false;
+  projectile.active = false;
+  projectile.type = "none";
+  projectile.life = 0;
+  projectile.maxLife = 0;
+  projectile.damage = 0;
+  projectile.radius = 0;
+  projectile.velocity.set(0, 0);
+  projectile.mesh.visible = false;
+  projectile.mesh.position.set(0, 0, 3.4);
+  projectile.mesh.rotation.set(0, 0, 0);
+  projectile.mesh.scale.set(1, 1, 1);
+  projectile.mesh.material.opacity = 0;
+  return true;
+}
+
+function createProjectilePool() {
+  if (projectiles.length > 0) return projectiles.length;
+  for (let index = 0; index < PROJECTILE_POOL_SIZE; index += 1) {
+    const material = new THREE.MeshBasicMaterial({
+      color: 0xffd166,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const mesh = new THREE.Mesh(shared.projectileCircleGeometry, material);
+    mesh.visible = false;
+    mesh.position.z = 3.4;
+    world.add(mesh);
+    projectiles.push({
+      active: false,
+      type: "none",
+      mesh,
+      material,
+      group: mesh,
+      velocity: new THREE.Vector2(),
+      life: 0,
+      maxLife: 0,
+      damage: 0,
+      radius: 0,
+    });
+  }
+  return projectiles.length;
+}
+
+function spawnProjectile(type, origin, direction, overrides = {}) {
+  if (!origin || !direction || ![origin.x, origin.y, direction.x, direction.y].every(Number.isFinite)) return null;
+  const activeCount = projectiles.reduce((count, projectile) => count + Number(projectile.active), 0);
+  if (activeCount >= getProjectileActiveCap()) return null;
+  const projectile = projectiles.find((candidate) => !candidate.active);
+  if (!projectile || !repairProjectileEntry(projectile)) return null;
+  const normalizedDirection = projectile.velocity.set(direction.x, direction.y);
+  if (normalizedDirection.lengthSq() <= 0) return null;
+  normalizedDirection.normalize();
+  const preset = type === "voidShard"
+    ? { speed: 4.1, life: 2.8, damage: 1, radius: 0.18, color: 0xff4fba, geometry: shared.projectileDiamondGeometry }
+    : { speed: 3.2, life: 2.4, damage: 1, radius: 0.19, color: 0xffd166, geometry: shared.projectileCircleGeometry };
+  const speed = Math.max(0, finiteOr(overrides.speed, preset.speed));
+  const life = Math.max(0.01, finiteOr(overrides.life, preset.life));
+  const damage = Math.max(0, Math.trunc(finiteOr(overrides.damage, preset.damage)));
+  const radius = Math.max(0.01, finiteOr(overrides.radius, preset.radius));
+  projectile.active = true;
+  projectile.type = type === "voidShard" ? "voidShard" : "lancerBolt";
+  projectile.life = projectile.maxLife = life;
+  projectile.damage = damage;
+  projectile.radius = radius;
+  projectile.velocity.multiplyScalar(speed);
+  projectile.mesh.geometry = preset.geometry;
+  projectile.mesh.position.set(origin.x, origin.y, 3.4);
+  projectile.mesh.rotation.z = Math.atan2(direction.y, direction.x) + (projectile.type === "voidShard" ? Math.PI / 4 : 0);
+  projectile.mesh.scale.setScalar(finiteOr(overrides.scale, 1));
+  projectile.mesh.material.color.set(overrides.color ?? preset.color);
+  projectile.mesh.material.opacity = 0.92;
+  projectile.mesh.visible = true;
+  const nextActiveCount = activeCount + 1;
+  state.stats.projectilePeak = Math.max(state.stats.projectilePeak, nextActiveCount);
+  return projectile;
+}
+
+function updateProjectiles(dt) {
+  const step = Math.max(0, finiteOr(dt, 0));
+  let activeCount = 0;
+  for (const projectile of projectiles) {
+    if (!projectile.active) continue;
+    activeCount += 1;
+    projectile.life -= step;
+    projectile.mesh.position.x += projectile.velocity.x * step;
+    projectile.mesh.position.y += projectile.velocity.y * step;
+    if (!state.reducedMotion) projectile.mesh.rotation.z += step * (projectile.type === "voidShard" ? 4.8 : 1.8);
+    projectile.mesh.material.opacity = THREE.MathUtils.clamp(projectile.life / Math.max(projectile.maxLife, 0.001), 0, 1) * 0.92;
+    const hitPlayer = projectileHitsCircle({
+      x: projectile.mesh.position.x,
+      y: projectile.mesh.position.y,
+      velocityX: projectile.velocity.x,
+      velocityY: projectile.velocity.y,
+      radius: projectile.radius,
+    }, {
+      x: player.position.x,
+      y: player.position.y,
+      radius: player.radius,
+    });
+    const outOfBounds = Math.abs(projectile.mesh.position.x) > view.halfWidth + 2
+      || Math.abs(projectile.mesh.position.y) > view.halfHeight + 2;
+    if (hitPlayer && !state.dashInvulnerable && state.hurtInvuln <= 0) {
+      damagePlayer(projectile);
+      resetProjectile(projectile);
+    } else if (projectile.life <= 0 || outOfBounds) {
+      resetProjectile(projectile);
+    }
+  }
+  state.stats.projectilePeak = Math.max(state.stats.projectilePeak, activeCount);
+  return activeCount;
+}
+
+function deterministicEnvironmentUnit(seed, sequence) {
+  let value = (Math.trunc(finiteOr(seed, 0)) + Math.imul(Math.trunc(finiteOr(sequence, 0)) + 1, 0x9e3779b1)) >>> 0;
+  value ^= value >>> 16;
+  value = Math.imul(value, 0x7feb352d);
+  value ^= value >>> 15;
+  return (value >>> 0) / 0x100000000;
+}
+
+function hideEnvironmentVisuals() {
+  Object.values(environmentVisual).forEach((visual) => { visual.group.visible = false; });
+}
+
+function scheduleEnvironmentForStage() {
+  const realm = REALMS[state.stageIndex] ?? REALMS[0];
+  state.environmentActive = false;
+  state.environmentElapsed = 0;
+  const seed = deterministicEnvironmentUnit(state.environmentSeed, state.environmentSequence);
+  state.environmentSequence += 1;
+  state.environmentTimer = getEnvironmentDelay(realm.id, seed);
+  environmentFrame = getEnvironmentFrame(realm.id, 0);
+  hideEnvironmentVisuals();
+  return state.environmentTimer;
+}
+
+function updateEnvironmentVisual(frame) {
+  hideEnvironmentVisuals();
+  if (!frame || !["telegraph", "active"].includes(frame.phase)) return;
+  const visual = frame.type === "current"
+    ? environmentVisual.current
+    : frame.type === "data-lane" ? environmentVisual.dataLane : environmentVisual.gravity;
+  visual.group.visible = true;
+  visual.group.position.set(frame.center?.x ?? 0, frame.type === "data-lane" ? frame.laneCenter ?? 0 : frame.center?.y ?? 0, 1.1);
+  const telegraphProgress = frame.telegraph > 0 ? THREE.MathUtils.clamp(frame.elapsed / frame.telegraph, 0, 1) : 1;
+  const pulse = state.reducedMotion ? 1 : 1 + Math.sin(frame.elapsed * 7) * 0.06;
+  visual.group.scale.setScalar((frame.phase === "telegraph" ? 0.88 + telegraphProgress * 0.12 : 1) * pulse);
+  visual.meshes.forEach((mesh) => {
+    if (mesh.material) mesh.material.opacity = frame.phase === "telegraph" ? 0.2 + telegraphProgress * 0.35 : 0.68;
+  });
+  if (frame.type === "gravity-well" && !state.reducedMotion) {
+    visual.group.children.forEach((ring, index) => {
+      ring.rotation.z = frame.elapsed * (index % 2 ? -1 : 1) * (0.5 + index * 0.15);
+    });
+  }
+}
+
+function applyEnvironmentForce(frame, target, simulationDt) {
+  if (!target?.velocity || !target?.position) return;
+  const point = { x: target.position.x, y: target.position.y };
+  const force = frame.type === "current" ? getCurrentForce(frame, point) : getGravityForce(frame, point);
+  target.velocity.x += force.x * simulationDt;
+  target.velocity.y += force.y * simulationDt;
+}
+
+function applyEnvironment(dt, simulationDt = Math.min(Math.max(0, finiteOr(dt, 0)), 0.05)) {
+  const wallDt = Math.max(0, finiteOr(dt, 0));
+  const forceDt = Math.min(0.05, Math.max(0, finiteOr(simulationDt, 0)));
+  const realm = REALMS[state.stageIndex] ?? REALMS[0];
+  if (realm.environment.type === "none") {
+    state.environmentTimer = Infinity;
+    state.environmentActive = false;
+    environmentFrame = getEnvironmentFrame(realm.id, 0);
+    hideEnvironmentVisuals();
+    return environmentFrame;
+  }
+  if (!state.environmentActive) {
+    state.environmentTimer -= wallDt;
+    if (state.environmentTimer > 0) return environmentFrame;
+    state.environmentActive = true;
+    state.environmentElapsed = Math.max(0, -state.environmentTimer);
+    state.environmentTimer = 0;
+    state.stats.environmentEvents += 1;
+    audio.event("environment");
+  } else {
+    state.environmentElapsed += wallDt;
+  }
+  environmentFrame = getEnvironmentFrame(realm.id, state.environmentElapsed);
+  updateEnvironmentVisual(environmentFrame);
+  if (environmentFrame.phase === "active") {
+    state.stats.environmentActiveFrames += 1;
+    applyEnvironmentForce(environmentFrame, player, forceDt);
+    for (const enemy of enemies) applyEnvironmentForce(environmentFrame, { position: enemy.group.position, velocity: enemy.velocity }, forceDt);
+    for (const shard of shards) applyEnvironmentForce(environmentFrame, { position: shard.group.position, velocity: shard.velocity }, forceDt);
+  } else if (environmentFrame.phase === "cooldown") {
+    scheduleEnvironmentForStage();
+  }
+  return environmentFrame;
+}
+
+function clearEnvironmentAndProjectiles() {
+  projectiles.forEach(resetProjectile);
+  state.environmentActive = false;
+  state.environmentElapsed = 0;
+  state.environmentTimer = Infinity;
+  environmentFrame = getEnvironmentFrame((REALMS[state.stageIndex] ?? REALMS[0]).id, 999);
+  hideEnvironmentVisuals();
+  return true;
+}
+
+function disposeCombatAssets() {
+  for (const projectile of projectiles) {
+    world.remove(projectile.mesh);
+    projectile.material.dispose();
+  }
+  projectiles.length = 0;
+  shared.projectileCircleGeometry.dispose();
+  shared.projectileDiamondGeometry.dispose();
+  for (const visual of Object.values(environmentVisual)) {
+    world.remove(visual.group);
+    visual.geometries.forEach((geometry) => geometry.dispose());
+    visual.materials.forEach((material) => material.dispose());
+  }
 }
 
 function createTrailPool(count = MAX_TRAIL_NODES) {
@@ -998,7 +1345,7 @@ function spawnShard(position) {
   const ring = new THREE.Mesh(shared.shardRingGeometry, shared.shardRingMaterial);
   group.add(glow, ring, gem);
   world.add(group);
-  const shard = { group, gem, ring, baseY: position.y, phase: Math.random() * TAU };
+  const shard = { group, gem, ring, baseX: position.x, baseY: position.y, velocity: new THREE.Vector2(), phase: Math.random() * TAU };
   shards.push(shard);
   return shard;
 }
@@ -1093,15 +1440,22 @@ function createStriker(position = randomEdgePosition()) {
   const stabilizer = new THREE.Mesh(shared.strikerStabilizerGeometry, shared.strikerMaterial);
   stabilizer.position.set(0, -0.2, -0.02);
   stabilizer.rotation.z = Math.PI / 4;
-  const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
-  line.position.z = -0.08;
-  line.visible = false;
-  group.add(line, glow, stabilizer, body);
+  const lines = [-0.18, 0, 0.18].map((angle) => {
+    const line = new THREE.Line(shared.telegraphLineGeometry, shared.telegraphMaterial);
+    line.position.z = -0.08;
+    line.rotation.z = angle;
+    line.visible = false;
+    return line;
+  });
+  group.add(...lines, glow, stabilizer, body);
   return registerEnemy("striker", position, group, "track", {
     speed: 2.0 + Math.random() * 0.22,
     stateTimer: 0.55 + Math.random() * 0.75,
+    intentIndex: Math.floor(Math.random() * 3),
+    selectedLane: 1,
+    aimDirection: new THREE.Vector2(),
     dashDirection: new THREE.Vector2(),
-    visuals: { glow, body, stabilizer, line },
+    visuals: { glow, body, stabilizer, line: lines[1], lines },
     priority: 2,
   });
 }
@@ -1183,6 +1537,10 @@ function createMine(position = randomShardPosition()) {
     previousDangerRadius: 0,
     detonationStage: -1,
     pulseHit: false,
+    chainDelay: 0,
+    chainQueuedFrame: -1,
+    chainTriggered: false,
+    attackRecorded: false,
     visuals: { glow, body, ring, tick },
     ownedMaterials: [ringMaterial, tickMaterial],
     priority: 2,
@@ -1207,6 +1565,8 @@ function createElite(position = randomEdgePosition(1.1), type = "elite") {
     shockPreviousRadius: 0,
     pulseHit: false,
     dashCharges: 3,
+    counterCooldown: 0,
+    counterHitToken: null,
     visuals: { shockwave, shield, outer, body },
     ownedMaterials: [shockMaterial],
     priority: 3,
@@ -1232,6 +1592,13 @@ function createBoss() {
   const line = new THREE.Mesh(shared.beamGeometry, lineMaterial);
   line.visible = false;
   line.scale.set(0.08, 1, 1);
+  const shardLines = new THREE.Group();
+  [-0.28, -0.14, 0, 0.14, 0.28].forEach((angle) => {
+    const shardLine = new THREE.Line(shared.telegraphLineGeometry, lineMaterial);
+    shardLine.rotation.z = angle;
+    shardLine.visible = false;
+    shardLines.add(shardLine);
+  });
   const pulseMaterial = shared.dangerRingMaterial.clone();
   const pulseRing = new THREE.Mesh(shared.bossPulseGeometry, pulseMaterial);
   pulseRing.visible = false;
@@ -1245,7 +1612,7 @@ function createBoss() {
     node.position.set(Math.cos(angle) * 2.72, Math.sin(angle) * 2.72, 0.04);
     orbitNodes.add(node);
   }
-  group.add(line, pulseRing, trianglePulse, haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core);
+  group.add(line, shardLines, pulseRing, trianglePulse, haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core);
   const enemy = registerEnemy("boss", new THREE.Vector2(0, view.halfHeight + 4.8), group, "enter", {
     stateTimer: 1.5,
     telegraph: 0,
@@ -1268,7 +1635,7 @@ function createBoss() {
     pulseHit: false,
     hitReactTimer: 0,
     priority: 4,
-    visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, pulseRing, trianglePulse },
+    visuals: { haloRing, outerRing, middleRing, innerRing, orbitNodes, coreGlow, core, line, shardLines, pulseRing, trianglePulse },
     ownedMaterials: [lineMaterial, pulseMaterial, triangleMaterial, coreMaterial, coreGlowMaterial],
   });
   if (enemy) {
@@ -1301,6 +1668,23 @@ function spawnEnemy(type = null, position = null, overrides = {}) {
   return createChaser(spawnPosition, overrides);
 }
 
+function getNextEligibleSpawnType() {
+  const roleCycles = [
+    ["chaser", "chaser", "swarm", "chaser", "swarm"],
+    ["striker", "lancer", "swarm", "chaser", "striker"],
+    ["chaser", "striker", "lancer", "mine", "swarm", "elite"],
+  ];
+  const roles = roleCycles[Math.min(2, state.stageIndex)] ?? roleCycles[2];
+  for (let offset = 0; offset < roles.length; offset += 1) {
+    const type = roles[(state.spawnSequence + offset) % roles.length];
+    if ((ENEMY_TYPES[type]?.minStage ?? 0) <= state.stageIndex) {
+      state.spawnSequence += offset + 1;
+      return type;
+    }
+  }
+  return null;
+}
+
 function formationActiveCost() {
   return enemies.reduce((cost, enemy) => cost + (ENEMY_TYPES[enemy.type]?.threatCost ?? 1), 0);
 }
@@ -1314,6 +1698,10 @@ function getFormationSpatialGap(templateName) {
 function spawnFormation() {
   if (state.stageIndex >= 3 || state.bossTriggered) return false;
   const cap = getEnemyCap();
+  const healthPercent = (state.health / Math.max(1, state.maxHealth)) * 100;
+  const pressureTarget = getPressureTarget(state.stageIndex, { activeCap: cap, healthPercent });
+  const populationCapacity = Math.max(0, pressureTarget - enemies.length);
+  if (populationCapacity <= 0) return false;
   const activeCost = formationActiveCost();
   const cooldown = FORMATION_TEMPLATES[state.lastFormation]?.cooldown ?? 0;
   const cooldownRemaining = Number.isFinite(state.lastFormationAt)
@@ -1338,7 +1726,7 @@ function spawnFormation() {
   if (spatialGap < template.minSafeGap) return false;
   const budget = getFormationBudget(state.stageIndex, state.elapsed, { activeCost, maxEnemyCap: cap });
   let remainingBudget = budget;
-  let remainingCapacity = Math.max(0, cap - enemies.length);
+  let remainingCapacity = Math.min(populationCapacity, Math.max(0, cap - enemies.length));
   const slots = getFormationSlots(template.name, { width: view.halfWidth * 2, height: view.halfHeight * 2 });
   const spawnedRoles = [];
   let actualThreatCost = 0;
@@ -1394,6 +1782,7 @@ function removeEnemy(index) {
 }
 
 function clearWorldEntities() {
+  clearEnvironmentAndProjectiles();
   while (shards.length) removeShard(shards.length - 1);
   while (enemies.length) removeEnemy(enemies.length - 1);
   for (const ripple of ripples) {
@@ -1464,6 +1853,12 @@ function resetState() {
   state.spawnSequence = 0;
   state.enemySpawnTimer = 0.72;
   state.formationTimer = 4.8;
+  state.environmentTimer = Infinity;
+  state.environmentElapsed = 0;
+  state.environmentSeed = 0x4e544944;
+  state.environmentSequence = 0;
+  state.environmentActive = false;
+  state.combatFrame = 0;
   state.lastFormation = null;
   state.lastFormationAt = -Infinity;
   state.shardSpawnTimer = 1.8;
@@ -1506,6 +1901,10 @@ function resetState() {
   state.stats.laserHits = 0;
   state.stats.laserInterrupts = 0;
   state.stats.laserPeakTargets = 0;
+  state.stats.projectilePeak = 0;
+  state.stats.environmentEvents = 0;
+  state.stats.environmentActiveFrames = 0;
+  state.stats.realmAttackRoles = {};
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -1562,13 +1961,14 @@ function startGame() {
 
 function pauseGame() {
   if (state.mode !== "playing") return;
-  transitionTo("paused");
+  if (transitionTo("paused")) clearEnvironmentAndProjectiles();
 }
 
 function resumeGame() {
   if (state.mode !== "paused") return;
   audio.unlock();
-  transitionTo("playing", { resumed: true });
+  if (!transitionTo("playing", { resumed: true })) return;
+  scheduleEnvironmentForStage();
   toast("信号恢复", "cyan");
 }
 
@@ -1743,6 +2143,7 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
   state.runFinished = true;
   state.terminalReason = reason;
   while (enemies.length) removeEnemy(enemies.length - 1);
+  clearEnvironmentAndProjectiles();
   state.stats.activeHazards = 0;
   if (outcome === "victory") state.score += 250;
   updateHighScore();
@@ -1797,6 +2198,8 @@ function getDerivedValues() {
     if (id === "magnet-field") values.pickupRadiusMultiplier += upgrade.effect;
     if (id === "overclock") values.pickupWeaponEnergy = LASER_RULES.focusedPickupEnergy;
   }
+  const lanePenalty = getDataLanePenalty(environmentFrame, player.position);
+  if (lanePenalty > 0) values.dashRecoveryMultiplier *= 1 - lanePenalty;
   return values;
 }
 
@@ -2029,6 +2432,10 @@ function readMoveDirection() {
 function updateShards(dt) {
   const pickupRadiusMultiplier = getDerivedValues().pickupRadiusMultiplier;
   for (const shard of shards) {
+    shard.baseX += shard.velocity.x * dt;
+    shard.baseY += shard.velocity.y * dt;
+    shard.velocity.multiplyScalar(Math.exp(-2.8 * dt));
+    shard.group.position.x = shard.baseX;
     shard.gem.rotation.z += dt * 1.8;
     shard.ring.rotation.z -= dt * 0.8;
     shard.group.position.y = state.reducedMotion
@@ -2143,7 +2550,7 @@ function interruptLaserTarget(enemy) {
 function isEnemyAttackExecuting(enemy) {
   if (!enemy || typeof enemy.state !== "string") return false;
   if (enemy.type === "boss") return enemy.state === "execute";
-  return ["active", "detonate", "charge", "dash", "shockExecute"].includes(enemy.state);
+  return ["active", "detonate", "charge", "dash", "shockExecute", "armorCounterExecute"].includes(enemy.state);
 }
 
 function deferOrDestroyLaserTarget(enemy) {
@@ -2201,6 +2608,7 @@ function resolveLaserHits() {
         enterBossPhaseTwo(enemy);
       }
     }
+    tryStartBulwarkArmorCounter(enemy, "laser", state.laserSequence);
     const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
     spawnParticleBurst(hitPosition, enemy.type === "boss" ? 0xe7ffff : paletteState.primary.getHex(), enemy.type === "boss" ? 10 : 6, 3.2, 0.78);
     deferOrDestroyLaserTarget(enemy);
@@ -2251,14 +2659,20 @@ function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
   enemy.telegraph = telegraph;
 }
 
+function recordRealmAttack(role) {
+  state.stats.realmAttackRoles[role] = (state.stats.realmAttackRoles[role] ?? 0) + 1;
+  return state.stats.realmAttackRoles[role];
+}
+
 function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wobbleStrength = 0.2) {
+  const laneResponse = getDataLanePenalty(environmentFrame, enemy.group.position) > 0 ? 1.15 : 1;
   const steering = enemyScratch.steering.copy(toPlayer).multiplyScalar(speed);
   if (wobbleStrength > 0) {
     enemyScratch.perpendicular.set(-toPlayer.y, toPlayer.x)
       .multiplyScalar(Math.sin(state.elapsed * 2.2 + enemy.wobble) * wobbleStrength);
     steering.add(enemyScratch.perpendicular);
   }
-  enemy.velocity.lerp(steering, 1 - Math.exp(-response * dt));
+  enemy.velocity.lerp(steering, 1 - Math.exp(-response * laneResponse * dt));
 }
 
 function updateChaser(enemy, dt, toPlayer) {
@@ -2316,32 +2730,45 @@ function updateStriker(enemy, dt, toPlayer) {
   if (enemy.state === "track") {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 3.8, 0.14);
     if (enemy.stateTimer <= 0) {
-      enemy.dashDirection.copy(toPlayer);
-      enemy.visuals.line.visible = true;
+      enemy.selectedLane = Math.abs(Math.trunc(enemy.intentIndex ?? 0)) % 3;
+      enemy.aimDirection.copy(toPlayer);
+      enemy.dashDirection.copy(enemy.aimDirection).rotateAround(new THREE.Vector2(0, 0), [-0.18, 0, 0.18][enemy.selectedLane]);
+      enemy.visuals.lines.forEach((line) => { line.visible = true; });
       setEnemyState(enemy, "telegraph", 0.55, 0.55);
     }
   } else if (enemy.state === "telegraph") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
     enemy.velocity.multiplyScalar(Math.exp(-10 * dt));
-    enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
-    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.line.material, enemy.telegraph, 0.55);
+    enemy.group.rotation.z = Math.atan2(enemy.aimDirection.y, enemy.aimDirection.x) - Math.PI / 2;
+    if (state.reducedMotion) enemy.visuals.lines.forEach((line) => applyDiscreteWarning(line.material, enemy.telegraph, 0.55));
     else {
-      enemy.visuals.line.material.color.set(0xff7ae6);
-      enemy.visuals.line.material.opacity = 0.72;
+      enemy.visuals.lines.forEach((line) => {
+        line.material.color.set(0xff7ae6);
+        line.material.opacity = 0.72;
+      });
     }
     const telegraphScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 32) * 0.12;
     enemy.visuals.body.scale.setScalar(telegraphScale);
     if (enemy.stateTimer <= 0) {
-      enemy.visuals.line.visible = false;
+      enemy.visuals.lines.forEach((line, index) => { line.visible = index === 1; });
       enemy.visuals.body.scale.setScalar(1);
       enemy.velocity.copy(enemy.dashDirection).multiplyScalar(18 + Math.min(2, state.elapsed * 0.01));
+      enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
+      enemy.intentIndex = (enemy.intentIndex + 1) % 3;
+      recordRealmAttack("Striker");
       setEnemyState(enemy, "dash", 0.44);
     }
   } else if (enemy.state === "dash") {
-    if (enemy.stateTimer <= 0) setEnemyState(enemy, "recover", 0.54);
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.lines.forEach((line) => { line.visible = false; });
+      setEnemyState(enemy, "recover", 0.54);
+    }
   } else if (enemy.state === "recover") {
     enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
-    if (enemy.stateTimer <= 0) setEnemyState(enemy, "track", 0.7 + Math.random() * 0.6);
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.lines.forEach((line) => { line.visible = false; });
+      setEnemyState(enemy, "track", 0.7 + Math.random() * 0.6);
+    }
   }
 }
 
@@ -2384,6 +2811,16 @@ function updateLancer(enemy, dt, toPlayer) {
     state.stats.activeHazards += 1;
     if (enemy.stateTimer <= 0) {
       enemy.visuals.beam.visible = false;
+      if (state.stageIndex >= 1) {
+        for (const angle of [-0.18, 0, 0.18]) {
+          spawnProjectile("lancerBolt", enemy.group.position, enemy.beamDirection.clone().rotateAround(new THREE.Vector2(0, 0), angle), {
+            speed: 3.2,
+            life: 2.4,
+            damage: 1,
+          });
+        }
+        recordRealmAttack("Lancer");
+      }
       setEnemyState(enemy, "recover", 0.85);
     }
   } else if (enemy.state === "recover") {
@@ -2412,24 +2849,22 @@ function updateSwarm(enemy, dt, toPlayer) {
 }
 
 function updateMine(enemy, dt) {
-  enemy.stateTimer -= dt;
+  if (!(enemy.state === "chainTelegraph" && enemy.chainQueuedFrame === state.combatFrame)) enemy.stateTimer -= dt;
   enemy.group.rotation.z += dt * (enemy.state === "arming" ? 0.8 : 2.5);
-  if (enemy.state === "arming") {
+  if (enemy.state === "arming" || enemy.state === "chainTelegraph") {
     enemy.telegraph = Math.max(0, enemy.stateTimer);
-    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.ring.material, enemy.telegraph, 1.1);
+    const telegraphDuration = enemy.state === "chainTelegraph" ? Math.max(0.45, enemy.chainDelay) : 1.1;
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.ring.material, enemy.telegraph, telegraphDuration);
     else {
       enemy.visuals.ring.material.color.set(0xff9f43);
       enemy.visuals.ring.material.opacity = 0.62;
     }
-    const progress = 1 - enemy.telegraph / 1.1;
+    const progress = 1 - THREE.MathUtils.clamp(enemy.telegraph / telegraphDuration, 0, 1);
     enemy.visuals.ring.scale.setScalar(0.85 + progress * 0.3);
     enemy.visuals.tick.scale.setScalar(0.8 + progress * 0.55);
     enemy.visuals.tick.material.opacity = state.reducedMotion ? 0.55 : 0.32 + progress * 0.44;
     if (enemy.stateTimer <= 0) {
-      enemy.previousDangerRadius = 0;
-      enemy.dangerRadius = 0;
-      enemy.detonationStage = -1;
-      setEnemyState(enemy, "detonate", 0.78);
+      enterMineDetonate(enemy);
     }
   } else if (enemy.state === "detonate") {
     const frame = getMineDetonationFrame(enemy.stateTimer, state.reducedMotion);
@@ -2455,9 +2890,48 @@ function updateMine(enemy, dt) {
   }
 }
 
+function enqueueMineChain(source) {
+  if (!source || source.chainTriggered) return 0;
+  source.chainTriggered = true;
+  const neighbors = enemies
+    .filter((enemy) => enemy !== source && enemy.type === "mine" && !enemy.dead && ["arming", "chainTelegraph"].includes(enemy.state))
+    .map((enemy) => ({ enemy, distance: enemy.group.position.distanceTo(source.group.position) }))
+    .filter(({ distance }) => distance <= 3.2)
+    .sort((left, right) => left.distance - right.distance);
+  neighbors.forEach(({ enemy }, chainIndex) => {
+    const delay = 0.45 + chainIndex * 0.12;
+    const existingDelay = enemy.state === "chainTelegraph" ? finiteOr(enemy.chainDelay, 0) : 0;
+    enemy.chainDelay = Math.max(existingDelay, delay);
+    enemy.chainQueuedFrame = state.combatFrame;
+    enemy.chainTriggered = false;
+    enemy.attackRecorded = false;
+    if (enemy.state === "chainTelegraph") {
+      enemy.stateTimer = Math.max(enemy.stateTimer, enemy.chainDelay);
+      enemy.telegraph = Math.max(enemy.telegraph, enemy.chainDelay);
+    } else {
+      setEnemyState(enemy, "chainTelegraph", enemy.chainDelay, enemy.chainDelay);
+    }
+  });
+  return neighbors.length;
+}
+
+function enterMineDetonate(enemy) {
+  enemy.previousDangerRadius = 0;
+  enemy.dangerRadius = 0;
+  enemy.detonationStage = -1;
+  setEnemyState(enemy, "detonate", 0.78);
+  if (!enemy.attackRecorded) {
+    enemy.attackRecorded = true;
+    recordRealmAttack("Mine");
+  }
+  enqueueMineChain(enemy);
+  return enemy;
+}
+
 function updateElite(enemy, dt, toPlayer) {
   enemy.stateTimer -= dt;
   enemy.shockTimer -= dt;
+  enemy.counterCooldown = Math.max(0, finiteOr(enemy.counterCooldown, 0) - dt);
   if (enemy.state === "chase") {
     steerEnemy(enemy, toPlayer, dt, enemy.speed, 2.8, 0.08);
     if (enemy.stateTimer <= 0 && enemy.dashCharges > 0) {
@@ -2498,6 +2972,37 @@ function updateElite(enemy, dt, toPlayer) {
       enemy.visuals.shockwave.visible = false;
       setEnemyState(enemy, "chase", 1.1 + Math.random() * 0.7);
     }
+  } else if (enemy.state === "armorCounterTelegraph") {
+    enemy.velocity.multiplyScalar(Math.exp(-12 * dt));
+    enemy.telegraph = Math.max(0, enemy.stateTimer);
+    const progress = 1 - THREE.MathUtils.clamp(enemy.telegraph / 0.55, 0, 1);
+    enemy.visuals.shockwave.visible = true;
+    enemy.visuals.shockwave.scale.setScalar(0.62 + progress * 0.5);
+    if (state.reducedMotion) applyDiscreteWarning(enemy.visuals.shockwave.material, enemy.telegraph, 0.55);
+    else {
+      enemy.visuals.shockwave.material.color.set(0x64f5ff);
+      enemy.visuals.shockwave.material.opacity = 0.5 + progress * 0.36;
+    }
+    if (enemy.stateTimer <= 0) {
+      enemy.shockPreviousRadius = 0;
+      enemy.shockRadius = 0.45;
+      enemy.pulseHit = false;
+      setEnemyState(enemy, "armorCounterExecute", 0.32);
+    }
+  } else if (enemy.state === "armorCounterExecute") {
+    const progress = 1 - THREE.MathUtils.clamp(enemy.stateTimer / 0.32, 0, 1);
+    enemy.shockPreviousRadius = enemy.shockRadius;
+    enemy.shockRadius = THREE.MathUtils.lerp(0.45, 3.8, progress);
+    enemy.visuals.shockwave.visible = true;
+    enemy.visuals.shockwave.scale.setScalar(enemy.shockRadius / 0.88);
+    enemy.visuals.shockwave.material.color.set(0xe7ffff);
+    enemy.visuals.shockwave.material.opacity = state.reducedMotion ? 0.7 : 0.78 - progress * 0.32;
+    state.stats.activeHazards += 1;
+    if (enemy.stateTimer <= 0) {
+      enemy.visuals.shockwave.visible = false;
+      enemy.counterCooldown = 0;
+      setEnemyState(enemy, "recover", 0.4);
+    }
   } else if (enemy.state === "recover") {
     enemy.velocity.multiplyScalar(Math.exp(-5.5 * dt));
     enemy.visuals.shockwave.visible = false;
@@ -2509,6 +3014,22 @@ function updateElite(enemy, dt, toPlayer) {
   enemy.visuals.shield.scale.setScalar(shieldScale);
 }
 
+function tryStartBulwarkArmorCounter(enemy, source, attackId) {
+  if (!enemy || enemy.type !== "bulwark" || enemy.hp <= 0) return false;
+  const token = `${source}:${attackId}`;
+  if (enemy.counterHitToken === token || enemy.counterCooldown > 0) return false;
+  if (["shockExecute", "armorCounterTelegraph", "armorCounterExecute"].includes(enemy.state)) return false;
+  enemy.counterHitToken = token;
+  enemy.counterCooldown = 0.8;
+  enemy.shockPreviousRadius = 0;
+  enemy.shockRadius = 0.3;
+  enemy.pulseHit = false;
+  enemy.visuals.shockwave.visible = true;
+  recordRealmAttack("Bulwark");
+  setEnemyState(enemy, "armorCounterTelegraph", 0.55, 0.55);
+  return true;
+}
+
 function recordBossAttack(enemy, kind) {
   const entry = Object.freeze({ kind, phase: enemy.phase, elapsed: Number(state.elapsed.toFixed(2)) });
   state.stats.bossAttackLog.push(entry);
@@ -2518,6 +3039,7 @@ function recordBossAttack(enemy, kind) {
 
 function clearBossAttackVisuals(enemy) {
   enemy.visuals.line.visible = false;
+  enemy.visuals.shardLines.children.forEach((line) => { line.visible = false; });
   enemy.visuals.pulseRing.visible = false;
   enemy.visuals.trianglePulse.visible = false;
   enemy.visuals.line.scale.set(0.08, 1, 1);
@@ -2570,8 +3092,9 @@ function enterBossPhaseTwo(enemy) {
 
 function beginBossTelegraph(enemy) {
   const attackPool = enemy.phase === 2
-    ? ["sweepBeam", "trianglePulse", "flankSwarm"]
+    ? ["sweepBeam", "voidShards", "trianglePulse", "flankSwarm"]
     : ["charge", "doublePulse", "summonSwarm"];
+  clearBossAttackVisuals(enemy);
   enemy.attackKind = attackPool[enemy.attackIndex % attackPool.length];
   enemy.attackIndex += 1;
   enemy.pulseHit = false;
@@ -2580,14 +3103,20 @@ function beginBossTelegraph(enemy) {
   enemy.previousDangerRadius = 0;
   enemy.dangerRadius = 0;
   const lineAttack = enemy.attackKind === "charge" || enemy.attackKind === "sweepBeam";
+  const shardAttack = enemy.attackKind === "voidShards";
   enemy.visuals.line.visible = lineAttack;
-  enemy.visuals.pulseRing.visible = !lineAttack && enemy.attackKind !== "trianglePulse";
+  enemy.visuals.shardLines.children.forEach((line) => { line.visible = shardAttack; });
+  enemy.visuals.pulseRing.visible = !lineAttack && !shardAttack && enemy.attackKind !== "trianglePulse";
   enemy.visuals.trianglePulse.visible = enemy.attackKind === "trianglePulse";
   if (enemy.attackKind === "charge") enemy.dashDirection.copy(player.position).sub(enemy.group.position).normalize();
   if (enemy.attackKind === "sweepBeam") {
     enemy.beamDirection.copy(player.position).sub(enemy.group.position).normalize();
     enemy.beamStartAngle = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - 1.12;
     enemy.beamEndAngle = enemy.beamStartAngle + 2.24;
+  }
+  if (enemy.attackKind === "voidShards") {
+    enemy.beamDirection.copy(player.position).sub(enemy.group.position).normalize();
+    enemy.group.rotation.z = Math.atan2(enemy.beamDirection.y, enemy.beamDirection.x) - Math.PI / 2;
   }
   if (enemy.attackKind === "trianglePulse") {
     enemy.triangleBaseAngle = Math.atan2(
@@ -2605,6 +3134,7 @@ function beginBossTelegraph(enemy) {
 function beginBossExecute(enemy) {
   const attack = enemy.attackKind;
   enemy.visuals.line.visible = attack === "sweepBeam";
+  enemy.visuals.shardLines.children.forEach((line) => { line.visible = false; });
   if (attack === "charge") {
     enemy.velocity.copy(enemy.dashDirection).multiplyScalar(9.5);
     setEnemyState(enemy, "execute", 0.72);
@@ -2620,6 +3150,15 @@ function beginBossExecute(enemy) {
   } else if (attack === "sweepBeam") {
     enemy.beamWidth = 0.3;
     setEnemyState(enemy, "execute", 1.16);
+  } else if (attack === "voidShards") {
+    for (const angle of [-0.28, -0.14, 0, 0.14, 0.28]) {
+      spawnProjectile("voidShard", enemy.group.position, enemy.beamDirection.clone().rotateAround(new THREE.Vector2(0, 0), angle), {
+        speed: 4.1,
+        damage: 1,
+      });
+    }
+    recordRealmAttack("Boss");
+    setEnemyState(enemy, "execute", 0.64);
   } else {
     spawnBossSwarm(enemy, attack === "flankSwarm");
     setEnemyState(enemy, "execute", 0.64);
@@ -2674,6 +3213,17 @@ function updateBoss(enemy, dt) {
       }
       const lineProgress = 1 - enemy.telegraph / BOSS_TELEGRAPH_TIME;
       enemy.visuals.line.scale.set(enemy.attackKind === "sweepBeam" ? 0.08 + lineProgress * 0.12 : 0.08, 1, 1);
+    } else if (enemy.attackKind === "voidShards") {
+      const progress = 1 - enemy.telegraph / BOSS_TELEGRAPH_TIME;
+      enemy.visuals.shardLines.children.forEach((line, index) => {
+        line.visible = true;
+        line.scale.y = 0.86 + progress * (0.2 + index * 0.035);
+        if (state.reducedMotion) applyDiscreteWarning(line.material, enemy.telegraph, BOSS_TELEGRAPH_TIME);
+        else {
+          line.material.color.set(0xff4fba);
+          line.material.opacity = 0.42 + progress * 0.42;
+        }
+      });
     } else {
       const warningScale = state.reducedMotion
         ? 1.85
@@ -2723,6 +3273,8 @@ function updateBoss(enemy, dt) {
       enemy.visuals.line.material.color.set(state.reducedMotion ? 0xff9f43 : 0xff506f);
       enemy.visuals.line.material.opacity = state.reducedMotion ? 0.72 : 0.84 + progress * 0.12;
       state.stats.activeHazards += 1;
+    } else if (enemy.attackKind === "voidShards") {
+      enemy.visuals.shardLines.children.forEach((line) => { line.visible = false; });
     } else if (enemy.attackKind !== "charge") {
       const summonScale = state.reducedMotion ? 1 : 1 + Math.sin(state.elapsed * 18) * 0.18;
       enemy.visuals.pulseRing.scale.setScalar(summonScale);
@@ -2848,6 +3400,7 @@ function damageEnemy(enemy) {
     return;
   }
   if (enemy.type === "boss") awardReward("bossHit");
+  tryStartBulwarkArmorCounter(enemy, "dash", state.dashSequence);
   const away = position.clone().sub(player.position).normalize();
   enemy.velocity.addScaledVector(away, enemy.type === "elite" ? 2.4 : 1.2);
   enemy.hitReactTimer = 0.18;
@@ -2866,6 +3419,7 @@ function damageEnemy(enemy) {
 
 function updateEnemies(dt) {
   state.stats.activeHazards = 0;
+  state.combatFrame += 1;
   const initialCount = enemies.length;
   for (let index = initialCount - 1; index >= 0; index -= 1) {
     const enemy = enemies[index];
@@ -2885,7 +3439,7 @@ function updateEnemies(dt) {
       destroyEnemy(enemy, enemy.pendingDeathSource ?? "laser");
       continue;
     }
-    const stationary = ["enter", "telegraph", "active", "shockTelegraph", "shockExecute", "detonate", "chargeTelegraph"].includes(enemy.state);
+    const stationary = ["enter", "telegraph", "active", "shockTelegraph", "shockExecute", "armorCounterTelegraph", "armorCounterExecute", "detonate", "chainTelegraph", "chargeTelegraph"].includes(enemy.state);
     if (enemy.type !== "mine" && !stationary) {
       enemy.group.position.x += enemy.velocity.x * dt;
       enemy.group.position.y += enemy.velocity.y * dt;
@@ -2989,20 +3543,27 @@ function updateSpawning(dt) {
   const healthPercent = (state.health / Math.max(1, state.maxHealth)) * 100;
   const reliefBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
   const cap = getEnemyCap();
-  const targetPopulation = Math.min(cap, [12, 19, 27][state.stageIndex] ?? 27);
-  const easedTarget = healthPercent <= 34 ? Math.max(8, Math.floor(targetPopulation * 0.74)) : targetPopulation;
+  const easedTarget = getPressureTarget(state.stageIndex, { activeCap: cap, healthPercent });
 
   if (state.formationTimer <= 0) {
-    const formed = spawnFormation();
-    state.formationTimer = 5 + Math.random() * 4;
-    if (!formed) state.formationTimer = Math.min(state.formationTimer, 2.1);
+    spawnFormation();
+    state.formationTimer = COMBAT.formationCooldown.min
+      + Math.random() * (COMBAT.formationCooldown.max - COMBAT.formationCooldown.min);
   }
 
   if (state.enemySpawnTimer <= 0) {
     const remaining = Math.max(0, Math.min(cap, easedTarget) - enemies.length);
-    const burstLimit = state.stageIndex === 0 ? 1 : state.stageIndex === 1 ? 2 : 3;
-    const burst = Math.min(remaining, burstLimit, Math.max(1, reliefBudget + state.stageIndex));
-    for (let index = 0; index < burst; index += 1) spawnEnemy();
+    const burstLimit = Math.min(remaining, getSpawnBurstLimit(state.stageIndex));
+    let threatBudget = Math.max(1, reliefBudget + state.stageIndex);
+    for (let index = 0; index < burstLimit; index += 1) {
+      const type = getNextEligibleSpawnType();
+      if (!type) break;
+      const threatCost = ENEMY_TYPES[type]?.threatCost ?? 1;
+      if (threatCost > threatBudget || enemies.length >= cap) break;
+      const created = spawnEnemy(type);
+      if (!created) break;
+      threatBudget -= threatCost;
+    }
     state.enemySpawnTimer = getSpawnInterval(state.stageIndex, state.elapsed);
   }
 
@@ -3127,6 +3688,11 @@ function sanitizeRuntimeState() {
   state.enemySpawnTimer = finiteOrInfinity(state.enemySpawnTimer, 0);
   state.formationTimer = finite(state.formationTimer, 0);
   state.shardSpawnTimer = finite(state.shardSpawnTimer, 0);
+  state.environmentTimer = finiteOrInfinity(state.environmentTimer, Infinity);
+  state.environmentElapsed = Math.max(0, finite(state.environmentElapsed, 0));
+  state.environmentSeed = Math.trunc(finite(state.environmentSeed, 0x4e544944));
+  state.environmentSequence = Math.max(0, Math.trunc(finite(state.environmentSequence, 0)));
+  state.combatFrame = Math.max(0, Math.trunc(finite(state.combatFrame, 0)));
   state.dashTimer = Math.max(0, finite(state.dashTimer, 0));
   state.dashInvulnTimer = Math.max(0, finite(state.dashInvulnTimer, 0));
   state.hurtInvuln = Math.max(0, finite(state.hurtInvuln, 0));
@@ -3178,6 +3744,35 @@ function sanitizeRuntimeState() {
     removeEnemy(enemies.length - 1);
     runtimeStats.orphanGuards += 1;
     corrected = true;
+  }
+  let activeProjectiles = 0;
+  const projectileCap = getProjectileActiveCap();
+  for (const projectile of projectiles) {
+    const needsRepair = !projectile?.mesh?.isMesh || projectile.mesh.material !== projectile.material || !projectile.velocity?.isVector2;
+    if (needsRepair) {
+      if (repairProjectileEntry(projectile)) resetProjectile(projectile);
+      corrected = true;
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
+    const structurallyValid = Boolean(projectile.mesh.material?.isMaterial);
+    const runtimeValid = structurallyValid && Number.isFinite(projectile.life) && Number.isFinite(projectile.maxLife)
+      && Number.isFinite(projectile.damage) && Number.isFinite(projectile.radius)
+      && Number.isFinite(projectile.velocity.x) && Number.isFinite(projectile.velocity.y)
+      && Number.isFinite(projectile.mesh.position.x) && Number.isFinite(projectile.mesh.position.y)
+      && Number.isFinite(projectile.mesh.material.opacity);
+    if (!runtimeValid) {
+      if (structurallyValid) resetProjectile(projectile);
+      corrected = true;
+      runtimeStats.orphanGuards += 1;
+      continue;
+    }
+    if (!projectile.active) continue;
+    activeProjectiles += 1;
+    if (activeProjectiles > projectileCap) {
+      resetProjectile(projectile);
+      corrected = true;
+    }
   }
   for (let index = particles.length - 1; index >= 0; index -= 1) {
     const particle = particles[index];
@@ -3258,6 +3853,9 @@ function sanitizeRuntimeState() {
   }
   state.stats.activeHazards = Math.max(0, finite(state.stats.activeHazards, 0));
   state.stats.enemyPeak = Math.max(0, finite(state.stats.enemyPeak, enemies.length));
+  state.stats.projectilePeak = Math.max(0, finite(state.stats.projectilePeak, 0));
+  state.stats.environmentEvents = Math.max(0, finite(state.stats.environmentEvents, 0));
+  state.stats.environmentActiveFrames = Math.max(0, finite(state.stats.environmentActiveFrames, 0));
   if (corrected) runtimeStats.finiteGuards += 1;
   return corrected;
 }
@@ -3388,7 +3986,9 @@ function enterStage(nextStageIndex, showBanner = true) {
   const realmIndex = THREE.MathUtils.clamp(Math.trunc(Number(nextStageIndex) || 0), 0, REALMS.length - 1);
   const realm = REALMS[realmIndex] ?? REALMS[0];
   const presentation = REALM_PRESENTATION[realmIndex];
+  clearEnvironmentAndProjectiles();
   state.stageIndex = realmIndex;
+  scheduleEnvironmentForStage();
   realmBackgrounds.setRealm(realmIndex, state.reducedMotion);
   document.documentElement.dataset.realm = realm.cssTheme;
   audio.setStage(realmIndex);
@@ -3631,13 +4231,14 @@ function animate() {
     state.hurtInvuln = Math.max(0, state.hurtInvuln - simDt);
     input.dashBuffer = Math.max(0, input.dashBuffer - simDt);
     input.laserBuffer = Math.max(0, input.laserBuffer - simDt);
-    const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
-    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     state.comboTimer = Math.max(0, state.comboTimer - simDt);
     if (state.comboTimer <= 0 && state.combo > 0) {
       clearCombo();
     }
     updateStage();
+    if (state.mode === "playing") applyEnvironment(wallDt, simDt);
+    const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
+    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     const countdownTarget = state.bossDeadline ?? GAME.bossStart;
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
     if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
@@ -3647,6 +4248,7 @@ function animate() {
       updateLaser(simDt);
       updateShards(simDt);
       updateEnemies(simDt);
+      updateProjectiles(simDt);
       if (state.mode === "playing") updateSpawning(simDt);
       updateParticles(simDt);
       updateRipples(simDt);
@@ -3684,6 +4286,7 @@ if (import.meta.env.DEV) {
 
 createPlayer();
 createParticlePool();
+createProjectilePool();
 createTrailPool();
 setupInput();
 renderJourneyStrip();
@@ -3696,6 +4299,7 @@ window.addEventListener("resize", resize);
 window.addEventListener("beforeunload", () => {
   realmBackgrounds.dispose();
   disposeLaserAssets();
+  disposeCombatAssets();
 }, { once: true });
 reducedMotionPreference?.addEventListener?.("change", (event) => applyReducedMotionPreference(event.matches));
 renderer.setAnimationLoop(animate);

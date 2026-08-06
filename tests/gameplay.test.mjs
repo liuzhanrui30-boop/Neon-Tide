@@ -117,6 +117,19 @@ test('beam collision uses the same full width rendered by the beam mesh', () => 
   assert.equal(gameplay.beamHitsCircle(beam, { x: 18.1, y: 0, radius: 0.4 }), false);
 });
 
+test('projectile collision requires finite motion data and uses both circle radii', () => {
+  assert.equal(typeof gameplay.projectileHitsCircle, 'function');
+  const projectile = { x: 2, y: -1, velocityX: 3.2, velocityY: 0, radius: 0.2 };
+
+  assert.equal(gameplay.projectileHitsCircle(projectile, { x: 2.49, y: -1, radius: 0.3 }), true);
+  assert.equal(gameplay.projectileHitsCircle(projectile, { x: 2.51, y: -1, radius: 0.3 }), false);
+  for (const field of ['x', 'y', 'velocityX', 'velocityY', 'radius']) {
+    assert.equal(gameplay.projectileHitsCircle({ ...projectile, [field]: Number.NaN }, { x: 2.2, y: -1, radius: 0.3 }), false);
+  }
+  assert.equal(gameplay.projectileHitsCircle(projectile, { x: Number.NaN, y: -1, radius: 0.3 }), false);
+  assert.equal(gameplay.projectileHitsCircle(projectile, { x: 2.2, y: -1, radius: Number.POSITIVE_INFINITY }), false);
+});
+
 test('mine detonation advances through three monotonic expansion stages with discrete reduced-motion radii', () => {
   assert.equal(typeof gameplay.getMineDetonationFrame, 'function');
   const animated = [0.77, 0.51, 0.25].map((timeRemaining) => gameplay.getMineDetonationFrame(timeRemaining, false));

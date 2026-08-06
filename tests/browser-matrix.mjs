@@ -899,8 +899,8 @@ async function lightLanceCombatContractsScenario() {
     });
     assert.deepEqual(contracts.executingMidTick, { lancer:true,mine:true,hunter:true,striker:true,bulwark:true });
     assert.deepEqual(contracts.executingAfter, { lancer:false,mine:false,hunter:false,striker:false,bulwark:false });
-    assert.deepEqual(contracts.interrupted, { hunter:{hp:1,state:'recover'},bulwark:{hp:2,state:'recover'},lancer:{hp:1,state:'recover'} });
-    assert.deepEqual(contracts.recovered, { hunter:'chase',bulwark:'chase',lancer:'lock' });
+    assert.deepEqual(contracts.interrupted, { hunter:{hp:1,state:'recover'},bulwark:{hp:2,state:'armorCounterTelegraph'},lancer:{hp:1,state:'recover'} });
+    assert.deepEqual(contracts.recovered, { hunter:'chase',bulwark:'armorCounterTelegraph',lancer:'lock' });
     assert.deepEqual(contracts.sameFrame, { laser:'charge',energy:0,dash:0,invuln:0,speed:0 });
     assert.deepEqual(contracts.adjacent, { dashStarted:true,laserDuringDash:false,energy:100,state:'ready',dash:0.19,invuln:0.19 });
     assert.equal(contracts.chargeFirst.chargeStarted, true);
@@ -1027,10 +1027,12 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
     const cap = await page.gameEvaluate(`
       clearWorldEntities();
       for (let index=0; index<50; index+=1) spawnEnemy('chaser');
-      return {cap:getEnemyCap(),count:$enemies.length,peak:$state.stats.enemyPeak};
+      for (let index=0; index<72; index+=1) spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      return {cap:getEnemyCap(),count:$enemies.length,peak:$state.stats.enemyPeak,projectilePeak:$state.stats.projectilePeak,projectiles:projectiles.filter((projectile)=>projectile.active).length};
     `);
     assert.equal(cap.cap, 32, `${name}: coarse enemy cap changed`);
     assert.ok(cap.count <= cap.cap && cap.peak <= cap.cap, `${name}: coarse cap exceeded ${JSON.stringify(cap)}`);
+    assert.ok(cap.projectiles < 48 && cap.projectilePeak < 48, `${name}: coarse projectile cap exceeded ${JSON.stringify(cap)}`);
   });
 }
 
@@ -1102,6 +1104,242 @@ async function highPressureCombatScenario() {
     assert.ok(snapshot.beamCollision.hazards >= 1 && snapshot.beamCollision.beamPeak >= 1, `beam hazard stats missing: ${JSON.stringify(snapshot.beamCollision)}`);
     assert.ok(snapshot.roles.Lancer >= 1, `lancer role missing: ${JSON.stringify(snapshot.roles)}`);
     assert.ok(snapshot.afterCleanup > 0 && snapshot.activeEnemies === 0, 'combat cleanup left orphan enemies');
+  });
+}
+
+async function realmHazardsAndAttackVariantsScenario() {
+  await withPage('realm-hazards-and-attack-variants', {}, async (page) => {
+    page.requireDev('environment, projectile pool, and expanded attack contracts');
+    await page.startGame();
+    const contracts = await page.gameEvaluate(`
+      clearWorldEntities();
+      const pressure={
+        cap:getEnemyCap(),
+        targets:[0,1,2].map((stageIndex)=>getPressureTarget(stageIndex,{activeCap:getEnemyCap(),healthPercent:100})),
+        bursts:[0,1,2].map(getSpawnBurstLimit),
+      };
+      const poolStart={
+        size:projectiles.length,
+        active:projectiles.filter((projectile)=>projectile.active).length,
+        materials:new Set(projectiles.map((projectile)=>projectile.mesh.material.uuid)).size,
+      };
+      for(let index=0;index<90;index+=1){
+        spawnProjectile(index%2?'voidShard':'lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      }
+      const poolPressure={
+        active:projectiles.filter((projectile)=>projectile.active).length,
+        peak:$state.stats.projectilePeak,
+        geometries:new Set(projectiles.filter((projectile)=>projectile.active).map((projectile)=>projectile.mesh.geometry.uuid)).size,
+      };
+      clearEnvironmentAndProjectiles();
+      $player.position.set(1.5,0);$player.velocity.set(0,0);$state.hurtInvuln=0;$state.dashInvulnTimer=0;
+      const projectileHealth=$state.health;
+      const liveProjectile=spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      updateProjectiles(0.2);
+      const projectileMid={active:liveProjectile.active,x:Number(liveProjectile.mesh.position.x.toFixed(2)),health:$state.health};
+      updateProjectiles(0.1);
+      const projectileHit={active:liveProjectile.active,health:$state.health};
+      clearEnvironmentAndProjectiles();
+      clearWorldEntities();$state.stageIndex=2;$state.health=1;$state.maxHealth=3;$state.formationTimer=0;$state.enemySpawnTimer=0;
+      for(let index=0;index<25;index+=1) spawnEnemy('chaser');
+      const reliefFormations=$state.stats.formationCount;
+      updateSpawning(0.01);
+      const healthRelief={count:$enemies.length,formations:$state.stats.formationCount-reliefFormations,target:getPressureTarget(2,{activeCap:getEnemyCap(),healthPercent:100/3})};
+      clearWorldEntities();$state.health=3;$state.maxHealth=3;
+
+      $state.stageIndex=1;
+      const lancer=createLancer(new THREE.Vector2(-3,0));
+      lancer.state='active';lancer.stateTimer=0.01;lancer.beamDirection.set(1,0);
+      updateLancer(lancer,0.02);
+      const lancerBolts=projectiles.filter((projectile)=>projectile.active&&projectile.type==='lancerBolt').map((projectile)=>({
+        speed:Number(projectile.velocity.length().toFixed(2)),life:projectile.life,damage:projectile.damage,
+        angle:Number(Math.atan2(projectile.velocity.y,projectile.velocity.x).toFixed(2)),
+      }));
+
+      const striker=createStriker(new THREE.Vector2(0,3));
+      striker.intentIndex=2;striker.state='track';striker.stateTimer=0;
+      updateStriker(striker,0.01,new THREE.Vector2(0,-1));
+      const strikerTelegraph=striker.visuals.lines.map((line)=>line.visible);
+      updateStriker(striker,0.56,new THREE.Vector2(0,-1));
+      const strikerVisibleIndex=striker.visuals.lines.findIndex((line)=>line.visible);
+      const strikerRayAngle=striker.group.rotation.z+striker.visuals.lines[strikerVisibleIndex].rotation.z+Math.PI/2;
+      const strikerDashAngle=Math.atan2(striker.dashDirection.y,striker.dashDirection.x);
+      const strikerAngleError=Math.abs(Math.atan2(Math.sin(strikerRayAngle-strikerDashAngle),Math.cos(strikerRayAngle-strikerDashAngle)));
+      const strikerExecute={state:striker.state,selected:striker.selectedLane,visible:striker.visuals.lines.map((line)=>line.visible),angleError:strikerAngleError};
+
+      const mineA=createMine(new THREE.Vector2(-4,-2));
+      const mineB=createMine(new THREE.Vector2(-2,-2));
+      const mineD=createMine(new THREE.Vector2(-1,-2));
+      const mineC=createMine(new THREE.Vector2(0,-2));
+      mineA.state='arming';mineA.stateTimer=0.01;
+      mineB.state='arming';mineB.stateTimer=10;
+      mineD.state='arming';mineD.stateTimer=10;
+      mineC.state='arming';mineC.stateTimer=10;
+      updateEnemies(0.02);
+      const firstChain={state:mineB.state,delay:mineB.chainDelay,telegraph:mineB.telegraph,secondDelay:mineD.chainDelay,secondTelegraph:mineD.telegraph,cState:mineC.state};
+      updateEnemies(0.44);
+      const beforeNeighborExecute=mineB.state;
+      updateEnemies(0.02);
+      const secondChain={bState:mineB.state,cState:mineC.state,cDelay:mineC.chainDelay,cTelegraph:mineC.telegraph};
+
+      const bulwark=createElite(new THREE.Vector2(4,0),'bulwark');
+      bulwark.state='chase';bulwark.stateTimer=5;bulwark.counterCooldown=0;
+      $state.dashSequence+=1;
+      damageEnemy(bulwark);
+      const bulwarkFirst={state:bulwark.state,timer:bulwark.stateTimer,counters:$state.stats.realmAttackRoles.Bulwark};
+      damageEnemy(bulwark);
+      const bulwarkSameHit={state:bulwark.state,timer:bulwark.stateTimer,counters:$state.stats.realmAttackRoles.Bulwark};
+      bulwark.hp=3;bulwark.state='shockExecute';bulwark.stateTimer=0.4;bulwark.counterCooldown=0;
+      $state.dashSequence+=1;
+      damageEnemy(bulwark);
+      const bulwarkShockState=bulwark.state;
+
+      clearEnvironmentAndProjectiles();
+      $state.bossSpawned=false;
+      const boss=createBoss();
+      boss.phase=2;boss.phase2Triggered=true;boss.attackIndex=0;boss.state='choose';boss.stateTimer=0;
+      const bossWindows=[];
+      for(let tick=0;tick<100;tick+=1){
+        updateBoss(boss,0.1);
+        if(boss.state==='telegraph') bossWindows.push({
+          kind:boss.attackKind,
+          sweep:boss.visuals.line.visible,
+          shards:boss.visuals.shardLines.children.some((line)=>line.visible),
+          remaining:boss.telegraph,
+        });
+        if(boss.state==='execute'&&boss.attackKind==='voidShards') break;
+      }
+      const bossShards=projectiles.filter((projectile)=>projectile.active&&projectile.type==='voidShard').map((projectile)=>({
+        speed:Number(projectile.velocity.length().toFixed(2)),damage:projectile.damage,shape:projectile.mesh.geometry===shared.projectileDiamondGeometry?'diamond':'other',
+      }));
+
+      clearEnvironmentAndProjectiles();
+      $state.stageIndex=0;
+      scheduleEnvironmentForStage();
+      $state.environmentTimer=0;
+      const currentEnemy=createChaser(new THREE.Vector2(-5,3));currentEnemy.velocity.set(0,0);
+      const currentShard=spawnShard(new THREE.Vector2(-6,-3));currentShard.velocity.set(0,0);
+      const healthBefore=$state.health;
+      applyEnvironment(0.1,0.05);
+      const environmentTelegraph={phase:environmentFrame.phase,events:$state.stats.environmentEvents,health:$state.health};
+      applyEnvironment(2,0.05);
+      const environmentActive={
+        phase:environmentFrame.phase,elapsed:$state.environmentElapsed,activeFrames:$state.stats.environmentActiveFrames,
+        health:$state.health,visual:environmentVisual.current.group.visible,playerVelocity:$player.velocity.x,
+        enemyVelocity:currentEnemy.velocity.x,shardVelocity:currentShard.velocity.x,
+      };
+      const visualShapes={
+        current:environmentVisual.current.meshes[0].isMesh&&environmentVisual.current.meshes[1].isLineSegments,
+        data:environmentVisual.dataLane.meshes[0].isMesh&&environmentVisual.dataLane.meshes[1].isLineSegments,
+        gravity:environmentVisual.gravity.group.children.every((ring)=>ring.isMesh),
+      };
+      clearEnvironmentAndProjectiles();
+      $state.stageIndex=1;scheduleEnvironmentForStage();$state.environmentTimer=0;$player.position.set(0,0);$player.velocity.set(0,0);
+      applyEnvironment(1,0.05);
+      const dataLane={phase:environmentFrame.phase,dashRecovery:getDerivedValues().dashRecoveryMultiplier,visual:environmentVisual.dataLane.group.visible};
+      clearEnvironmentAndProjectiles();
+      $state.stageIndex=2;scheduleEnvironmentForStage();$state.environmentTimer=0;$player.position.set(2,0);$player.velocity.set(0,0);
+      const gravityEnemy=createChaser(new THREE.Vector2(3,0));gravityEnemy.velocity.set(0,0);
+      const gravityShard=spawnShard(new THREE.Vector2(4,0));gravityShard.velocity.set(0,0);
+      applyEnvironment(1.1,0.05);
+      const gravity={
+        phase:environmentFrame.phase,player:$player.velocity.x,enemy:gravityEnemy.velocity.x,shard:gravityShard.velocity.x,
+        visual:environmentVisual.gravity.group.visible,health:$state.health,
+      };
+      spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      enterStage(1,false);
+      const stageClear={active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length};
+      const roles={...$state.stats.realmAttackRoles};
+      resetState();
+      const restart={
+        size:projectiles.length,active:projectiles.filter((projectile)=>projectile.active).length,
+        events:$state.stats.environmentEvents,peak:$state.stats.projectilePeak,roles:{...$state.stats.realmAttackRoles},
+      };
+      return {pressure,poolStart,poolPressure,projectileHealth,projectileMid,projectileHit,healthRelief,lancerBolts,strikerTelegraph,strikerExecute,firstChain,beforeNeighborExecute,secondChain,
+        bulwarkFirst,bulwarkSameHit,bulwarkShockState,bossWindows,bossShards,healthBefore,environmentTelegraph,environmentActive,visualShapes,dataLane,gravity,
+        stageClear,roles,restart};
+    `);
+    assert.deepEqual(contracts.pressure, { cap:42,targets:[15,24,34],bursts:[2,3,4] });
+    assert.deepEqual(contracts.poolStart, { size:72,active:0,materials:72 });
+    assert.ok(contracts.poolPressure.active < 72 && contracts.poolPressure.peak < 72, `desktop projectile cap exceeded: ${JSON.stringify(contracts.poolPressure)}`);
+    assert.equal(contracts.poolPressure.geometries, 2);
+    assert.deepEqual(contracts.projectileMid, { active:true,x:0.64,health:contracts.projectileHealth });
+    assert.deepEqual(contracts.projectileHit, { active:false,health:contracts.projectileHealth-1 });
+    assert.deepEqual(contracts.healthRelief, { count:25,formations:0,target:25 });
+    assert.deepEqual(contracts.lancerBolts.map(({ speed,life,damage })=>({ speed,life,damage })), [
+      { speed:3.2,life:2.4,damage:1 },{ speed:3.2,life:2.4,damage:1 },{ speed:3.2,life:2.4,damage:1 },
+    ]);
+    assert.deepEqual(contracts.lancerBolts.map(({ angle })=>angle), [-0.18,0,0.18]);
+    assert.deepEqual(contracts.strikerTelegraph, [true,true,true]);
+    assert.equal(contracts.strikerExecute.state, 'dash');
+    assert.equal(contracts.strikerExecute.visible.filter(Boolean).length, 1);
+    assert.ok(contracts.strikerExecute.angleError < 0.001, `striker execute ray missed its dash lane: ${JSON.stringify(contracts.strikerExecute)}`);
+    assert.equal(contracts.firstChain.state, 'chainTelegraph');
+    assert.ok(contracts.firstChain.delay >= 0.45 && contracts.firstChain.telegraph >= 0.45);
+    assert.ok(contracts.firstChain.secondDelay >= 0.57 && contracts.firstChain.secondTelegraph >= 0.57);
+    assert.equal(contracts.firstChain.cState, 'arming');
+    assert.equal(contracts.beforeNeighborExecute, 'chainTelegraph');
+    assert.equal(contracts.secondChain.bState, 'detonate');
+    assert.equal(contracts.secondChain.cState, 'chainTelegraph');
+    assert.ok(contracts.secondChain.cDelay >= 0.45 && contracts.secondChain.cTelegraph >= 0.45);
+    assert.deepEqual(contracts.bulwarkFirst, { state:'armorCounterTelegraph',timer:0.55,counters:1 });
+    assert.deepEqual(contracts.bulwarkSameHit, contracts.bulwarkFirst);
+    assert.equal(contracts.bulwarkShockState, 'shockExecute');
+    assert.ok(contracts.bossWindows.some(({ kind })=>kind==='sweepBeam'));
+    assert.ok(contracts.bossWindows.some(({ kind })=>kind==='voidShards'));
+    assert.ok(contracts.bossWindows.every(({ sweep,shards })=>!(sweep&&shards)), `boss telegraphs overlap: ${JSON.stringify(contracts.bossWindows)}`);
+    assert.ok(contracts.bossWindows.every(({ remaining })=>remaining>0&&remaining<=0.68));
+    assert.equal(contracts.bossShards.length, 5);
+    assert.ok(contracts.bossShards.every(({ speed,damage,shape })=>speed===4.1&&damage===1&&shape==='diamond'));
+    assert.deepEqual(contracts.environmentTelegraph, { phase:'telegraph',events:1,health:contracts.healthBefore });
+    assert.ok(contracts.environmentActive.phase==='active'&&contracts.environmentActive.elapsed>=2.1&&contracts.environmentActive.activeFrames>=1);
+    assert.equal(contracts.environmentActive.health, contracts.healthBefore, 'environment event directly damaged the player');
+    assert.equal(contracts.environmentActive.visual, true);
+    assert.ok(contracts.environmentActive.playerVelocity>0&&contracts.environmentActive.enemyVelocity>0&&contracts.environmentActive.shardVelocity>0,
+      `current did not influence all runtime bodies: ${JSON.stringify(contracts.environmentActive)}`);
+    assert.deepEqual(contracts.visualShapes, { current:true,data:true,gravity:true });
+    assert.deepEqual(contracts.dataLane, { phase:'active',dashRecovery:0.65,visual:true });
+    assert.equal(contracts.gravity.phase, 'active');
+    assert.ok(contracts.gravity.player<0&&contracts.gravity.enemy<0&&contracts.gravity.shard<0, `gravity did not pull all runtime bodies: ${JSON.stringify(contracts.gravity)}`);
+    assert.equal(contracts.gravity.visual, true);
+    assert.equal(contracts.gravity.health, contracts.healthBefore, 'gravity event directly damaged the player');
+    assert.equal(contracts.stageClear.active, 0);
+    assert.equal(contracts.stageClear.visuals, 0);
+    assert.ok(contracts.roles.Lancer>=1&&contracts.roles.Striker>=1&&contracts.roles.Mine>=1&&contracts.roles.Bulwark===1&&contracts.roles.Boss>=1, `attack roles missing: ${JSON.stringify(contracts.roles)}`);
+    assert.deepEqual(contracts.restart, { size:72,active:0,events:0,peak:0,roles:{} });
+
+    const pauseStart = await page.gameEvaluate(`
+      $state.stageIndex=0;scheduleEnvironmentForStage();$state.environmentTimer=0;applyEnvironment(0.2,0.05);
+      const before={eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents};
+      spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
+      pauseGame();return {...before,mode:$state.mode,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,clearedElapsed:$state.environmentElapsed,timer:String($state.environmentTimer)};
+    `);
+    assert.deepEqual(pauseStart, { eventElapsed:0.2,gameElapsed:pauseStart.gameElapsed,events:1,mode:'paused',active:0,visuals:0,clearedElapsed:0,timer:'Infinity' });
+    await sleep(160);
+    const paused = await page.gameEvaluate(`return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,events:$state.stats.environmentEvents,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,mode:$state.mode}`);
+    assert.deepEqual(paused, { eventElapsed:0,gameElapsed:pauseStart.gameElapsed,events:pauseStart.events,active:0,visuals:0,mode:'paused' });
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    const resumed = await page.gameEvaluate(`return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,timer:$state.environmentTimer,mode:$state.mode}`);
+    assert.equal(resumed.mode, 'playing');
+    assert.equal(resumed.eventElapsed, 0);
+    assert.ok(Number.isFinite(resumed.timer)&&resumed.timer>0, `resume did not reschedule environment event: ${JSON.stringify(resumed)}`);
+    assert.ok(resumed.gameElapsed-pauseStart.gameElapsed < 0.08, `pause advanced game elapsed ${pauseStart.gameElapsed} -> ${resumed.gameElapsed}`);
+    const activeUpgrade = await page.gameEvaluate(`
+      $state.environmentTimer=0;applyEnvironment(0.2,0.05);
+      const projectile=spawnProjectile('lancerBolt',new THREE.Vector2(-5,4),new THREE.Vector2(1,0));
+      return {eventElapsed:$state.environmentElapsed,projectile:Boolean(projectile?.active),visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length};
+    `);
+    const upgradeStart = await page.gameEvaluate(`
+      const before={eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length};
+      beginUpgrade(1);return {...before,mode:$state.mode};
+    `);
+    assert.deepEqual(activeUpgrade, { eventElapsed:0.2,projectile:true,visuals:1 });
+    await sleep(160);
+    const upgrading = await page.gameEvaluate(`return {eventElapsed:$state.environmentElapsed,gameElapsed:$state.elapsed,active:projectiles.filter((projectile)=>projectile.active).length,visuals:Object.values(environmentVisual).filter((visual)=>visual.group.visible).length,mode:$state.mode}`);
+    assert.deepEqual(upgrading, { eventElapsed:upgradeStart.eventElapsed,gameElapsed:upgradeStart.gameElapsed,active:upgradeStart.active,visuals:upgradeStart.visuals,mode:'upgrade' });
+    await page.click('.upgrade-option');
+    await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
   });
 }
 
@@ -1912,6 +2150,22 @@ async function runtimeGuardScenario() {
       $enemies.push({type:'orphan',dead:false,velocity:null});
       $player.position.x=NaN;
       $state.enemySpawnTimer=Infinity;
+      const badProjectile=spawnProjectile('voidShard',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      badProjectile.mesh.position.x=NaN;
+      badProjectile.velocity.y=Infinity;
+      badProjectile.life=NaN;
+      badProjectile.mesh.material.opacity=Infinity;
+      const brokenProjectile=spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      brokenProjectile.mesh.material=null;
+      brokenProjectile.velocity=null;
+      $state.environmentTimer=NaN;
+      $state.environmentElapsed=Infinity;
+      $state.environmentSeed=NaN;
+      $state.environmentSequence=Infinity;
+      $state.combatFrame=NaN;
+      $state.stats.projectilePeak=NaN;
+      $state.stats.environmentEvents=Infinity;
+      $state.stats.environmentActiveFrames=NaN;
       const badParticle=particlePool[0];
       badParticle.mesh.visible=true;
       badParticle.mesh.position.x=NaN;
@@ -1941,7 +2195,16 @@ async function runtimeGuardScenario() {
     assert.equal(injected.afterSetup, injected.before.setup, 'reopening input duplicated listeners');
     assert.deepEqual(injected.afterPools, injected.pools, 'reopening pools duplicated geometry/materials');
     await sleep(100);
-    const healed = await page.gameEvaluate(`return {
+    const healed = await page.gameEvaluate(`
+      const sanitizedEnvironment={
+        timer:Number.isFinite($state.environmentTimer)?'finite':String($state.environmentTimer),
+        elapsed:$state.environmentElapsed,seed:$state.environmentSeed,sequence:$state.environmentSequence,combatFrame:$state.combatFrame,
+        projectilePeak:$state.stats.projectilePeak,events:$state.stats.environmentEvents,activeFrames:$state.stats.environmentActiveFrames,
+      };
+      const reusableProjectile=spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
+      const projectileReusable=Boolean(reusableProjectile?.mesh?.material?.isMaterial&&reusableProjectile?.velocity?.isVector2);
+      if(reusableProjectile) resetProjectile(reusableProjectile);
+      return {
       guards:runtimeStats.finiteGuards,
       orphans:runtimeStats.orphanGuards,
       cleanup:$state.stats.activeCleanupCount,
@@ -1950,6 +2213,15 @@ async function runtimeGuardScenario() {
       spawnSentinel:Number.isFinite($state.enemySpawnTimer)?'finite':String($state.enemySpawnTimer),
       particles:particles.length,
       trails:trails.length,
+      projectilePool:projectiles.length,
+      activeProjectiles:projectiles.filter((projectile)=>projectile.active).length,
+      projectileReset:projectiles.every((projectile)=>!projectile.active||(
+        Number.isFinite(projectile.mesh.position.x)&&Number.isFinite(projectile.mesh.position.y)
+        &&Number.isFinite(projectile.velocity.x)&&Number.isFinite(projectile.velocity.y)
+        &&Number.isFinite(projectile.life)&&Number.isFinite(projectile.mesh.material.opacity)
+      )),
+      projectileReusable,
+      environment:sanitizedEnvironment,
       retiredTrail:trailPool[0] ? {
         visible:trailPool[0].group.visible,
         life:trailPool[0].life,
@@ -1964,6 +2236,12 @@ async function runtimeGuardScenario() {
     assert.equal(healed.playerFinite, true);
     assert.equal(healed.spawnSentinel, 'Infinity');
     assert.ok(healed.particles <= 300 && healed.trails <= 48);
+    assert.equal(healed.projectilePool, 72);
+    assert.equal(healed.activeProjectiles, 0);
+    assert.equal(healed.projectileReset, true);
+    assert.equal(healed.projectileReusable, true);
+    assert.deepEqual({ ...healed.environment,combatFrame:0 }, { timer:'Infinity',elapsed:0,seed:0x4e544944,sequence:0,combatFrame:0,projectilePeak:0,events:0,activeFrames:0 });
+    assert.ok(Number.isInteger(healed.environment.combatFrame) && healed.environment.combatFrame >= 0);
     assert.ok(healed.particles === 0, `malformed particle remained active: ${JSON.stringify(healed)}`);
     assert.deepEqual(healed.retiredTrail, { visible:false, life:0, maxLife:0, transform:[0,1,0], opacity:0 });
     const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};runtimeHooks.applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
@@ -2289,11 +2567,11 @@ async function bossPhaseTwoScenario() {
         updateShards(dt);
         updateEnemies(dt);
       };
-      const seen=[]; let beamProbe=false; let triangleProbe=false; let flankPeak=0;
+      const seen=[]; let beamProbe=false; let voidProbe=false; let triangleProbe=false; let flankPeak=0;
       for (let tick=0; tick<360 && $state.mode==='playing'; tick+=1) {
-        if (seen.length>=3 && beamProbe && triangleProbe && flankPeak>=2) break;
+        if (seen.length>=4 && beamProbe && voidProbe && triangleProbe && flankPeak>=2) break;
         if (boss.state==='telegraph' && !seen.some((attack)=>attack.kind===boss.attackKind)) {
-          seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,triangle:boss.visuals.trianglePulse.visible});
+          seen.push({kind:boss.attackKind,telegraph:boss.telegraph,line:boss.visuals.line.visible,shards:boss.visuals.shardLines.children.some((line)=>line.visible),triangle:boss.visuals.trianglePulse.visible});
         }
         if (boss.state==='execute' && boss.attackKind==='sweepBeam' && !beamProbe) {
           $player.position.copy(boss.group.position).addScaledVector(boss.beamDirection,2.9);
@@ -2302,6 +2580,11 @@ async function bossPhaseTwoScenario() {
           advance(0.05);
           beamProbe=beamHitsPlayer(boss) && $state.health<health && $state.stats.activeHazards>0;
           continue;
+        }
+        if (boss.state==='execute' && boss.attackKind==='voidShards' && !voidProbe) {
+          voidProbe=!boss.visuals.line.visible
+            && !boss.visuals.shardLines.children.some((line)=>line.visible)
+            && projectiles.filter((projectile)=>projectile.active&&projectile.type==='voidShard').length===5;
         }
         if (boss.state==='execute' && boss.attackKind==='trianglePulse' && !triangleProbe && boss.dangerRadius>4.5) {
           const probeDistance=Math.min(5,boss.dangerRadius*0.65);
@@ -2319,17 +2602,21 @@ async function bossPhaseTwoScenario() {
         advance(0.1);
         flankPeak=Math.max(flankPeak,$enemies.filter((enemy)=>enemy.type==='swarm').length);
       }
-      return {mode:$state.mode,seen,stats:[...$state.stats.bossAttackLog],telegraphs:[...$state.stats.bossAttackTelegraphs],beamProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
+      return {mode:$state.mode,seen,stats:[...$state.stats.bossAttackLog],telegraphs:[...$state.stats.bossAttackTelegraphs],beamProbe,voidProbe,triangleProbe,flankPeak,hazards:$state.stats.activeHazards};
     `);
     assert.equal(attacks.mode, 'playing', `phase 2 live hazard loop ended before victory probe: ${JSON.stringify(attacks)}`);
-    assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'trianglePulse', 'flankSwarm']);
-    assert.ok(attacks.telegraphs.length >= 3 && attacks.telegraphs.every((duration) => duration >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.telegraphs)}`);
+    assert.deepEqual(attacks.seen.map((attack) => attack.kind), ['sweepBeam', 'voidShards', 'trianglePulse', 'flankSwarm']);
+    assert.ok(attacks.telegraphs.length >= 4 && attacks.telegraphs.every((duration) => duration >= 0.68), `short boss telegraph: ${JSON.stringify(attacks.telegraphs)}`);
     assert.ok(attacks.seen.find((attack) => attack.kind === 'sweepBeam')?.line, 'sweep beam telegraph was not visible');
+    assert.ok(attacks.seen.find((attack) => attack.kind === 'voidShards')?.shards, 'void shard fan telegraph was not visible');
+    assert.ok(attacks.seen.every((attack) => !(attack.line && attack.shards)), `sweep and shard telegraphs overlapped: ${JSON.stringify(attacks.seen)}`);
     assert.ok(attacks.seen.find((attack) => attack.kind === 'trianglePulse')?.triangle, 'triangle telegraph was not visible');
     assert.ok(attacks.beamProbe, 'sweep beam active collision did not register');
+    assert.ok(attacks.voidProbe, 'void shard execute did not spawn one five-shard fan');
     assert.ok(attacks.triangleProbe, 'triangle pulse directional collision/hazard did not register');
     assert.ok(attacks.flankPeak >= 2, `flank swarm did not spawn: ${attacks.flankPeak}`);
     assert.ok(attacks.stats.some((attack) => attack.kind === 'sweepBeam' && attack.phase === 2));
+    assert.ok(attacks.stats.some((attack) => attack.kind === 'voidShards' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'trianglePulse' && attack.phase === 2));
     assert.ok(attacks.stats.some((attack) => attack.kind === 'flankSwarm' && attack.phase === 2));
 
@@ -2365,6 +2652,7 @@ const scenarios = [
   ['briefing and laser UI', briefingAndLaserUiScenario],
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],
+  ['realm hazards and expanded attacks', realmHazardsAndAttackVariantsScenario],
   ['reviewed combat contracts', reviewedCombatContractsScenario],
   ['phone coarse layout 390x844', () => coarseLayoutScenario('phone-390x844', 390, 844, 2)],
   ['tablet coarse layout 1024x768', () => coarseLayoutScenario('tablet-1024x768', 1024, 768, 1)],
