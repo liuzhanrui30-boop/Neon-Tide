@@ -242,7 +242,9 @@ export class NeonAudio {
       this._lastScheduledStep = this._gridStep;
       this._scheduleGridEvent(scheduleTime, intensity, context, realm, gridInterval, realmTransition);
       this._hasScheduledMusic = true;
-      this.nextBeatTime = gridTime + gridInterval;
+      // A late bar commit must begin the new tempo from the time it can actually start.
+      // Look-ahead commits retain the exact grid boundary to preserve musical timing.
+      this.nextBeatTime = (realmTransition && scheduleTime > gridTime ? scheduleTime : gridTime) + gridInterval;
       this._gridStep = (this._gridStep + 1) % GRID_STEPS_PER_BAR;
       if (this._gridStep === 0) this._barIndex += 1;
     }
@@ -301,6 +303,8 @@ export class NeonAudio {
       bpm: REALMS[this.stageIndex]?.music.bpm ?? REALMS[0].music.bpm,
       gridStep: this._lastScheduledStep,
       schedulerReady: this._beatInitialized,
+      nextBeatTime: this.nextBeatTime,
+      pendingBoundary: this._pendingStageIndex === null ? null : this.nextBeatTime,
       activeMusicSources: this._musicSources.size,
     };
   }

@@ -283,6 +283,20 @@ test('an active realm change waits for the next old-realm bar and crossfades at 
   assert.ok(Math.abs(audio.nextBeatTime - (oldBarDuration + newGridInterval)) < 1e-12);
 });
 
+test('late bar-boundary realm commit rephases from the actual schedule time', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext, random: () => 0.5 });
+  audio.unlock();
+  audio.setStage(2);
+  audio.update(64, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
+  const boundary = audio.getDebugSnapshot().pendingBoundary;
+  audio.setStage(3);
+  audio.context.currentTime = boundary + 0.11;
+  audio.update(100, 0.8, 'playing', { laserReady: false, bossPhase: 1 });
+  const snapshot = audio.getDebugSnapshot();
+  const newGrid = 60 / 140 / 4;
+  assert.ok(snapshot.nextBeatTime >= audio.context.currentTime + newGrid - 1e-9);
+});
+
 test('look-ahead scheduling stays stable across consecutive pre-boundary frames', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
