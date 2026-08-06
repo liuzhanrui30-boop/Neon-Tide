@@ -1403,16 +1403,33 @@ async function realmArtDirectionsScenario() {
       root.children[0].children[0].material.color.set(0xff0000);
       root.children[1].children[0].material.color.set(0x0000ff);
       scene.background.set(0x00ff00);
+      const foreground=new THREE.Mesh(
+        new THREE.PlaneGeometry(4,4),
+        new THREE.MeshBasicMaterial({
+          color:0xffffff,
+          transparent:false,
+          depthTest:true,
+          depthWrite:true,
+        }),
+      );
+      foreground.position.set(0,0,0);
+      scene.add(foreground);
       const bufferSize=renderer.getDrawingBufferSize(new THREE.Vector2());
       const gl=renderer.getContext();
-      const readCenter=()=>{
-        renderer.render(scene,camera);
+      const readPixel=(xRatio,yRatio)=>{
         const pixel=new Uint8Array(4);
         gl.readPixels(
-          Math.floor(bufferSize.x/2),Math.floor(bufferSize.y/2),1,1,
+          Math.floor(bufferSize.x*xRatio),Math.floor(bufferSize.y*yRatio),1,1,
           gl.RGBA,gl.UNSIGNED_BYTE,pixel,
         );
         return Array.from(pixel);
+      };
+      const readFrame=()=>{
+        renderer.render(scene,camera);
+        return {
+          background:readPixel(0.82,0.5),
+          foreground:readPixel(0.5,0.5),
+        };
       };
       const backdropState=()=>root.children.map((group)=>{
         const backdrop=group.children[0];
@@ -1426,17 +1443,20 @@ async function realmArtDirectionsScenario() {
         };
       });
       controller.setRealm(0,true);
-      const abyssPixel=readCenter();
+      const abyssFrame=readFrame();
       controller.setRealm(1,true);
-      const cityPixel=readCenter();
+      const cityFrame=readFrame();
       controller.setRealm(0,true);
       controller.setRealm(1,false);
       controller.update({elapsed:30,dt:0,reducedMotion:false});
-      const start={pixel:readCenter(),state:backdropState()};
+      const start={frame:readFrame(),state:backdropState()};
       controller.update({elapsed:30.45,dt:0.45,reducedMotion:false});
-      const mid={pixel:readCenter(),state:backdropState()};
+      const mid={frame:readFrame(),state:backdropState()};
       controller.update({elapsed:30.9,dt:0.45,reducedMotion:false});
-      const end={pixel:readCenter(),state:backdropState()};
+      const end={frame:readFrame(),state:backdropState()};
+      scene.remove(foreground);
+      foreground.geometry.dispose();
+      foreground.material.dispose();
       scene.children.forEach((child,index)=>{child.visible=sceneVisibility[index];});
       root.children.forEach((group,groupIndex)=>group.children.forEach((child,childIndex)=>{
         child.visible=decorationVisibility[groupIndex][childIndex];
@@ -1444,25 +1464,31 @@ async function realmArtDirectionsScenario() {
       root.children.forEach((group,index)=>group.children[0].material.color.copy(backdropColors[index]));
       scene.background.copy(sceneBackground);
       controller.reset();
-      return {abyssPixel,cityPixel,start,mid,end};
+      return {abyssFrame,cityFrame,start,mid,end};
     `);
-    const expectedMidPixel = backdropBlend.abyssPixel.map((channel,index) => (
-      index === 3 ? 255 : Math.round((channel + backdropBlend.cityPixel[index]) / 2)
+    const expectedMidPixel = backdropBlend.abyssFrame.background.map((channel,index) => (
+      index === 3 ? 255 : Math.round((channel + backdropBlend.cityFrame.background[index]) / 2)
     ));
-    assert.deepEqual(backdropBlend.start.pixel, backdropBlend.abyssPixel);
-    assert.deepEqual(backdropBlend.end.pixel, backdropBlend.cityPixel);
-    backdropBlend.mid.pixel.forEach((channel,index) => {
+    assert.deepEqual(backdropBlend.start.frame.foreground, backdropBlend.abyssFrame.foreground);
+    assert.deepEqual(backdropBlend.mid.frame.foreground, backdropBlend.abyssFrame.foreground,
+      'incoming realm backdrop tinted an opaque foreground mesh at the transition midpoint');
+    assert.deepEqual(backdropBlend.end.frame.foreground, backdropBlend.abyssFrame.foreground);
+    assert.deepEqual(backdropBlend.cityFrame.foreground, backdropBlend.abyssFrame.foreground);
+    assert.deepEqual(backdropBlend.start.frame.background, backdropBlend.abyssFrame.background);
+    assert.deepEqual(backdropBlend.end.frame.background, backdropBlend.cityFrame.background);
+    backdropBlend.mid.frame.background.forEach((channel,index) => {
       assert.ok(Math.abs(channel-expectedMidPixel[index]) <= 3,
         `midpoint framebuffer channel ${index} was ${channel}, expected ${expectedMidPixel[index]}`);
     });
-    assert.equal(backdropBlend.mid.pixel[3], 255);
+    assert.equal(backdropBlend.mid.frame.background[3], 255);
+    assert.equal(backdropBlend.mid.frame.foreground[3], 255);
     assert.deepEqual(backdropBlend.start.state.slice(0,2).map((state)=>state.opacity), [1,0]);
     assert.deepEqual(backdropBlend.mid.state.slice(0,2).map((state)=>state.opacity), [1,0.5]);
     assert.equal(backdropBlend.mid.state[0].transparent, false);
     assert.equal(backdropBlend.mid.state[1].transparent, true);
     assert.ok(backdropBlend.mid.state[0].renderOrder < backdropBlend.mid.state[1].renderOrder);
-    assert.equal(backdropBlend.mid.state[0].depthTest, false);
-    assert.equal(backdropBlend.mid.state[1].depthTest, false);
+    assert.equal(backdropBlend.mid.state[0].depthTest, true);
+    assert.equal(backdropBlend.mid.state[1].depthTest, true);
     assert.equal(backdropBlend.mid.state[0].depthWrite, false);
     assert.equal(backdropBlend.mid.state[1].depthWrite, false);
     assert.deepEqual(backdropBlend.end.state.filter((state)=>state.visible).map((state)=>({

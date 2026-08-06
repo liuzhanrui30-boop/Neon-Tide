@@ -94,7 +94,7 @@ function createShapeGeometry(points) {
 
 function createBackdrop(materials, color) {
   const material = meshMaterial(materials, { color });
-  material.depthTest = false;
+  material.depthTest = true;
   material.userData.realmBackdrop = true;
   const backdrop = new THREE.Mesh(
     new THREE.PlaneGeometry(80, 36),
