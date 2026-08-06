@@ -4,28 +4,33 @@ import assert from 'node:assert/strict';
 import NeonAudio, * as audioModule from '../src/game/audio.js';
 
 class MockParam {
-  constructor(context) {
+  constructor(context, defaultValue = 0) {
     this.context = context;
-    this.value = 0;
+    this.value = defaultValue;
     this.events = [];
   }
 
   setValueAtTime(value, time = 0) {
-    this.value = value;
+    if (time <= (this.context?.currentTime ?? 0)) this.value = value;
     this.events.push({ method: 'setValueAtTime', value, time });
   }
 
   setTargetAtTime(value, time = 0, constant = 0) {
-    this.value = value;
     this.events.push({ method: 'setTargetAtTime', value, time, constant });
   }
 
   cancelScheduledValues(time = 0) {
+    this.events = this.events.filter((event) => !Number.isFinite(event.time) || event.time < time);
     this.events.push({ method: 'cancelScheduledValues', time });
   }
 
+  cancelAndHoldAtTime(time = 0) {
+    this.events = this.events.filter((event) => !Number.isFinite(event.time) || event.time < time);
+    this.events.push({ method: 'cancelAndHoldAtTime', time, value: this.value });
+  }
+
   exponentialRampToValueAtTime(value, time = 0) {
-    this.value = value;
+    if (time <= (this.context?.currentTime ?? 0)) this.value = value;
     this.events.push({ method: 'exponentialRampToValueAtTime', value, time });
   }
 }
@@ -52,7 +57,7 @@ class MockNode {
 class MockGain extends MockNode {
   constructor(context) {
     super(context, 'gain');
-    this.gain = new MockParam(context);
+    this.gain = new MockParam(context, 1);
   }
 }
 
@@ -73,17 +78,22 @@ class MockOscillator extends MockNode {
     this.frequency = new MockParam(context);
     this.detune = new MockParam(context);
     this.type = 'sine';
+    this.startTime = null;
+    this.started = false;
     this.stopTime = null;
     this.stopCalls = [];
     this.onended = null;
   }
 
   start(time = 0) {
+    this.startTime = time;
+    this.started = true;
     this.context.starts.push(time);
     this.context.startedSources.push(this);
   }
 
   stop(time = 0) {
+    if (!this.started) throw new Error('InvalidStateError: stop before start()');
     this.stopTime = time;
     this.stopCalls.push(time);
   }
@@ -107,17 +117,22 @@ class MockBufferSource extends MockNode {
     super(context, 'buffer-source');
     this.buffer = null;
     this.playbackRate = new MockParam(context);
+    this.startTime = null;
+    this.started = false;
     this.stopTime = null;
     this.stopCalls = [];
     this.onended = null;
   }
 
   start(time = 0) {
+    this.startTime = time;
+    this.started = true;
     this.context.starts.push(time);
     this.context.startedSources.push(this);
   }
 
   stop(time = 0) {
+    if (!this.started) throw new Error('InvalidStateError: stop before start()');
     this.stopTime = time;
     this.stopCalls.push(time);
   }
@@ -224,6 +239,42 @@ test('stage changes fade and stop every old music source without stopping UI cue
     assert.ok(source.stopTime <= 0.1);
     assert.ok(source.connections[0].gain.events.some((event) => event.method === 'setTargetAtTime' && event.value === 0.0001));
   });
+  nonMusicSources.forEach((source, index) => assert.equal(source.stopCalls.length, nonMusicStopCounts[index]));
+  assert.equal(audio.getDebugSnapshot().activeMusicSources, 0);
+});
+
+test('stage change silences future music at its scheduled start without an illegal pre-start stop', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext });
+  audio.unlock();
+  audio.event('pickup', 1);
+  audio.event('laserReady', 1);
+  const nonMusicSources = [
+    ...sourcesRoutedTo(audio.context, audio.sfxGain),
+    ...sourcesRoutedTo(audio.context, audio.uiGain),
+  ];
+  const nonMusicStopCounts = nonMusicSources.map((source) => source.stopCalls.length);
+  audio._beatInitialized = true;
+  audio._lastRealTime = 0;
+  audio._gridStep = 0;
+  audio.nextBeatTime = 0.015;
+  audio.update(0.01, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  const futureMusic = sourcesRoutedTo(audio.context, audio.musicGain)
+    .filter((source) => source.startTime > audio.context.currentTime);
+  assert.ok(futureMusic.length >= 2);
+
+  audio.context.currentTime = 0.005;
+  assert.doesNotThrow(() => audio.setStage(1));
+
+  for (const source of futureMusic) {
+    const envelope = source.connections[0];
+    assert.equal(envelope.gain.value, 0.0001);
+    assert.ok(envelope.gain.events.some((event) => (
+      event.method === 'setValueAtTime'
+      && event.value === 0.0001
+      && event.time === audio.context.currentTime
+    )));
+    assert.equal(source.stopTime, source.startTime);
+  }
   nonMusicSources.forEach((source, index) => assert.equal(source.stopCalls.length, nonMusicStopCounts[index]));
   assert.equal(audio.getDebugSnapshot().activeMusicSources, 0);
 });

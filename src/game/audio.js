@@ -319,22 +319,47 @@ export class NeonAudio {
     if (!this.context || this._musicSources.size === 0) return;
     const now = Number(this.context.currentTime) || 0;
     for (const voice of this._musicSources) {
-      try {
-        if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
-          voice.envelope.gain.cancelScheduledValues(now);
+      const futureVoice = voice.startTime > now;
+      if (futureVoice) {
+        try {
+          if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
+            voice.envelope.gain.cancelScheduledValues(now);
+          }
+          setParam(voice.envelope.gain, 'setValueAtTime', 0.0001, now);
+        } catch {
+          // Stopping exactly at the already-scheduled start is the final silence guard.
         }
-        setParam(voice.envelope.gain, 'setTargetAtTime', 0.0001, now, 0.012);
-        voice.source.stop(Math.max(now, Math.min(voice.stopTime, now + MUSIC_REPHASE_FADE)));
+      } else {
+        try {
+          if (typeof voice.envelope.gain.cancelAndHoldAtTime === 'function') {
+            voice.envelope.gain.cancelAndHoldAtTime(now);
+          } else {
+            const heldGain = clamp(voice.envelope.gain.value, 0.0001, MAX_LAYER_GAIN);
+            if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
+              voice.envelope.gain.cancelScheduledValues(now);
+            }
+            setParam(voice.envelope.gain, 'setValueAtTime', heldGain, now);
+          }
+          setParam(voice.envelope.gain, 'setTargetAtTime', 0.0001, now, 0.012);
+        } catch {
+          // The shortened stop below still retires a voice if automation is unavailable.
+        }
+      }
+      try {
+        const stopTime = futureVoice
+          ? voice.startTime
+          : Math.max(now, Math.min(voice.stopTime, now + MUSIC_REPHASE_FADE));
+        voice.source.stop(stopTime);
       } catch {
-        // A source may finish between the rephase request and its shortened stop.
+        // A source may finish between the rephase request and its replacement stop.
       }
     }
     this._musicSources.clear();
   }
 
-  _trackMusicSource(source, envelope, stopTime, bus) {
+  _trackMusicSource(source, envelope, startTime, stopTime, bus) {
     if (bus !== this.musicGain) return null;
-    const voice = { source, envelope, stopTime };
+    const voice = { source, envelope, startTime, stopTime };
     this._musicSources.add(voice);
     return voice;
   }
@@ -395,7 +420,7 @@ export class NeonAudio {
       oscillator.connect(gain);
       gain.connect(bus);
       const stopTime = time + duration + 0.01;
-      musicVoice = this._trackMusicSource(oscillator, gain, stopTime, bus);
+      musicVoice = this._trackMusicSource(oscillator, gain, time, stopTime, bus);
       oscillator.onended = () => {
         if (musicVoice) this._musicSources.delete(musicVoice);
         try { oscillator.disconnect(); } catch {}
@@ -430,7 +455,7 @@ export class NeonAudio {
       source.connect(gain);
       gain.connect(bus);
       const stopTime = time + duration + 0.01;
-      musicVoice = this._trackMusicSource(source, gain, stopTime, bus);
+      musicVoice = this._trackMusicSource(source, gain, time, stopTime, bus);
       source.onended = () => {
         if (musicVoice) this._musicSources.delete(musicVoice);
         try { source.disconnect(); } catch {}
