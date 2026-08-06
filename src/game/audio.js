@@ -8,6 +8,7 @@ const UI_LEVEL = 0.5;
 const MAX_LAYER_GAIN = 0.12;
 const GRID_STEPS_PER_BAR = 16;
 const MAX_STARTS_PER_UPDATE = 8;
+const MUSIC_REPHASE_FADE = 0.03;
 const DUCK_EVENTS = new Set(['dash', 'hurt', 'laserFire', 'bossHit', 'victory', 'defeat']);
 
 const EVENT_RECIPES = Object.freeze({
@@ -44,6 +45,38 @@ function midiToFrequency(note) {
   return 440 * (2 ** ((note - 69) / 12));
 }
 
+export function createLaserAudioEvents(audio, { maxEnergy = 100, maxTargets = 5 } = {}) {
+  const readyThreshold = Math.max(0, Number(maxEnergy) || 100);
+  const targetCap = Math.max(1, Number(maxTargets) || 5);
+  let hitPlayedForShot = false;
+  return Object.freeze({
+    onEnergyChange(previousEnergy, nextEnergy) {
+      const previous = Number(previousEnergy);
+      const next = Number(nextEnergy);
+      if (!Number.isFinite(previous) || !Number.isFinite(next) || previous >= readyThreshold || next < readyThreshold) return false;
+      audio?.event?.('laserReady', 1);
+      return true;
+    },
+    onChargeStarted() {
+      hitPlayedForShot = false;
+      audio?.event?.('laserCharge', 1);
+      return true;
+    },
+    onPhaseChange(previousPhase, nextPhase) {
+      if (previousPhase !== 'charge' || nextPhase !== 'active') return false;
+      audio?.event?.('laserFire', 1);
+      return true;
+    },
+    onHits(count) {
+      const hits = Math.max(0, Number(count) || 0);
+      if (hits <= 0 || hitPlayedForShot) return false;
+      hitPlayedForShot = true;
+      audio?.event?.('laserHit', clamp(hits / targetCap, 0, 1));
+      return true;
+    },
+  });
+}
+
 /** Owns the game's optional Web Audio graph. Creation is deliberately deferred to unlock(). */
 export class NeonAudio {
   constructor({ contextFactory = null, random = Math.random } = {}) {
@@ -64,6 +97,7 @@ export class NeonAudio {
     this._lastRealTime = null;
     this._unlocked = false;
     this._noiseBuffer = null;
+    this._musicSources = new Set();
     this._musicBase = MUSIC_LEVEL;
     this._musicTarget = MUSIC_LEVEL;
     this._duckActiveUntil = 0;
@@ -240,10 +274,12 @@ export class NeonAudio {
       bpm: REALMS[this.stageIndex]?.music.bpm ?? REALMS[0].music.bpm,
       gridStep: this._lastScheduledStep,
       schedulerReady: this._beatInitialized,
+      activeMusicSources: this._musicSources.size,
     };
   }
 
   suspendBeat() {
+    this._stopMusicSources();
     this._beatInitialized = false;
     this.nextBeatTime = 0;
     this._gridStep = 0;
@@ -277,6 +313,30 @@ export class NeonAudio {
     if (busName === 'ambience') return this.ambienceGain;
     if (busName === 'ui') return this.uiGain;
     return this.sfxGain;
+  }
+
+  _stopMusicSources() {
+    if (!this.context || this._musicSources.size === 0) return;
+    const now = Number(this.context.currentTime) || 0;
+    for (const voice of this._musicSources) {
+      try {
+        if (typeof voice.envelope.gain.cancelScheduledValues === 'function') {
+          voice.envelope.gain.cancelScheduledValues(now);
+        }
+        setParam(voice.envelope.gain, 'setTargetAtTime', 0.0001, now, 0.012);
+        voice.source.stop(Math.max(now, Math.min(voice.stopTime, now + MUSIC_REPHASE_FADE)));
+      } catch {
+        // A source may finish between the rephase request and its shortened stop.
+      }
+    }
+    this._musicSources.clear();
+  }
+
+  _trackMusicSource(source, envelope, stopTime, bus) {
+    if (bus !== this.musicGain) return null;
+    const voice = { source, envelope, stopTime };
+    this._musicSources.add(voice);
+    return voice;
   }
 
   _scheduleGridEvent(time, intensity, context, realm, gridInterval) {
@@ -321,6 +381,7 @@ export class NeonAudio {
     if (!this._ready() || !bus) return;
     let oscillator = null;
     let gain = null;
+    let musicVoice = null;
     try {
       oscillator = this.context.createOscillator();
       gain = this.context.createGain();
@@ -333,14 +394,18 @@ export class NeonAudio {
       setParam(gain.gain, 'exponentialRampToValueAtTime', 0.0001, time + duration);
       oscillator.connect(gain);
       gain.connect(bus);
+      const stopTime = time + duration + 0.01;
+      musicVoice = this._trackMusicSource(oscillator, gain, stopTime, bus);
       oscillator.onended = () => {
+        if (musicVoice) this._musicSources.delete(musicVoice);
         try { oscillator.disconnect(); } catch {}
         try { gain.disconnect(); } catch {}
         oscillator.onended = null;
       };
       oscillator.start(time);
-      oscillator.stop(time + duration + 0.01);
+      oscillator.stop(stopTime);
     } catch {
+      if (musicVoice) this._musicSources.delete(musicVoice);
       try { oscillator?.disconnect(); } catch {}
       try { gain?.disconnect(); } catch {}
       // Browsers can reject scheduling while a context is closing; audio is optional.
@@ -351,6 +416,7 @@ export class NeonAudio {
     if (!this._ready() || !bus || typeof this.context.createBufferSource !== 'function') return;
     let source = null;
     let gain = null;
+    let musicVoice = null;
     try {
       if (!this._noiseBuffer) this._noiseBuffer = this._createNoiseBuffer();
       if (!this._noiseBuffer) return;
@@ -363,14 +429,18 @@ export class NeonAudio {
       setParam(gain.gain, 'exponentialRampToValueAtTime', 0.0001, time + duration);
       source.connect(gain);
       gain.connect(bus);
+      const stopTime = time + duration + 0.01;
+      musicVoice = this._trackMusicSource(source, gain, stopTime, bus);
       source.onended = () => {
+        if (musicVoice) this._musicSources.delete(musicVoice);
         try { source.disconnect(); } catch {}
         try { gain.disconnect(); } catch {}
         source.onended = null;
       };
       source.start(time);
-      source.stop(time + duration + 0.01);
+      source.stop(stopTime);
     } catch {
+      if (musicVoice) this._musicSources.delete(musicVoice);
       try { source?.disconnect(); } catch {}
       try { gain?.disconnect(); } catch {}
       // Noise is an optional layer and must not interrupt the render loop.

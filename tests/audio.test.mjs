@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import NeonAudio from '../src/game/audio.js';
+import NeonAudio, * as audioModule from '../src/game/audio.js';
 
 class MockParam {
   constructor(context) {
@@ -18,6 +18,10 @@ class MockParam {
   setTargetAtTime(value, time = 0, constant = 0) {
     this.value = value;
     this.events.push({ method: 'setTargetAtTime', value, time, constant });
+  }
+
+  cancelScheduledValues(time = 0) {
+    this.events.push({ method: 'cancelScheduledValues', time });
   }
 
   exponentialRampToValueAtTime(value, time = 0) {
@@ -70,6 +74,7 @@ class MockOscillator extends MockNode {
     this.detune = new MockParam(context);
     this.type = 'sine';
     this.stopTime = null;
+    this.stopCalls = [];
     this.onended = null;
   }
 
@@ -80,6 +85,7 @@ class MockOscillator extends MockNode {
 
   stop(time = 0) {
     this.stopTime = time;
+    this.stopCalls.push(time);
   }
 }
 
@@ -102,6 +108,7 @@ class MockBufferSource extends MockNode {
     this.buffer = null;
     this.playbackRate = new MockParam(context);
     this.stopTime = null;
+    this.stopCalls = [];
     this.onended = null;
   }
 
@@ -112,6 +119,7 @@ class MockBufferSource extends MockNode {
 
   stop(time = 0) {
     this.stopTime = time;
+    this.stopCalls.push(time);
   }
 }
 
@@ -158,6 +166,10 @@ class MockAudioContext {
   }
 }
 
+function sourcesRoutedTo(context, bus) {
+  return context.startedSources.filter((source) => source.connections[0]?.connections[0] === bus);
+}
+
 test('audio creates four buses, audible music layers and safe master headroom', () => {
   const audio = new NeonAudio({ contextFactory: MockAudioContext });
   audio.unlock();
@@ -187,6 +199,68 @@ test('stage changes rephase at a bar and strong sfx ducks then releases music', 
   assert.equal(duckEvents[0].constant, 0.025);
   assert.equal(duckEvents[1].constant, 0.34);
   assert.ok(duckEvents[1].time > duckEvents[0].time);
+});
+
+test('stage changes fade and stop every old music source without stopping UI cues', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext });
+  audio.unlock();
+  audio.update(0, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  audio.event('laserReady', 1);
+  audio.event('pickup', 1);
+  const oldMusic = sourcesRoutedTo(audio.context, audio.musicGain);
+  const nonMusicSources = [
+    ...sourcesRoutedTo(audio.context, audio.uiGain),
+    ...sourcesRoutedTo(audio.context, audio.sfxGain),
+  ];
+  const oldMusicStopCounts = oldMusic.map((source) => source.stopCalls.length);
+  const nonMusicStopCounts = nonMusicSources.map((source) => source.stopCalls.length);
+
+  audio.context.currentTime = 0.05;
+  audio.setStage(1);
+
+  assert.ok(oldMusic.length >= 2);
+  oldMusic.forEach((source, index) => {
+    assert.equal(source.stopCalls.length, oldMusicStopCounts[index] + 1);
+    assert.ok(source.stopTime <= 0.1);
+    assert.ok(source.connections[0].gain.events.some((event) => event.method === 'setTargetAtTime' && event.value === 0.0001));
+  });
+  nonMusicSources.forEach((source, index) => assert.equal(source.stopCalls.length, nonMusicStopCounts[index]));
+  assert.equal(audio.getDebugSnapshot().activeMusicSources, 0);
+});
+
+test('short mute and resume replaces the old music voices instead of overlapping them', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext });
+  audio.unlock();
+  audio.update(0, 0.5, 'playing', { laserReady: false, bossPhase: 1 });
+  const oldMusic = sourcesRoutedTo(audio.context, audio.musicGain);
+  const oldStopCounts = oldMusic.map((source) => source.stopCalls.length);
+
+  audio.context.currentTime = 0.04;
+  audio.setMuted(true);
+  oldMusic.forEach((source, index) => assert.equal(source.stopCalls.length, oldStopCounts[index] + 1));
+  audio.setMuted(false);
+  audio.context.currentTime = 0.08;
+  audio.update(0.08, 0.5, 'playing', { laserReady: false, bossPhase: 1 });
+
+  const resumedMusic = sourcesRoutedTo(audio.context, audio.musicGain).filter((source) => !oldMusic.includes(source));
+  assert.ok(resumedMusic.length >= 2);
+  assert.equal(audio.getDebugSnapshot().activeMusicSources, resumedMusic.length);
+});
+
+test('stale clocks stop old music voices before scheduling the rephased bar', () => {
+  const audio = new NeonAudio({ contextFactory: MockAudioContext });
+  audio.unlock();
+  audio.update(0, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+  const oldMusic = sourcesRoutedTo(audio.context, audio.musicGain);
+  const oldStopCounts = oldMusic.map((source) => source.stopCalls.length);
+
+  audio.context.currentTime = 0.5;
+  audio.update(0.5, 0.8, 'playing', { laserReady: true, bossPhase: 1 });
+
+  oldMusic.forEach((source, index) => assert.equal(source.stopCalls.length, oldStopCounts[index] + 1));
+  const rephasedMusic = sourcesRoutedTo(audio.context, audio.musicGain).filter((source) => !oldMusic.includes(source));
+  assert.ok(rephasedMusic.length >= 2);
+  assert.equal(audio.getDebugSnapshot().activeMusicSources, rephasedMusic.length);
 });
 
 test('adaptive scheduler adds drums and arp without ever starting more than eight sources per update', () => {
@@ -274,6 +348,39 @@ test('event recipes include the laser, environment and realm-shift cues with bou
       assert.ok(highFrequencies[index] / lowFrequencies[index] <= 1.084);
     }
   }
+});
+
+test('production laser audio bridge emits ready, charge, fire and one aggregated hit cue per shot', () => {
+  assert.equal(typeof audioModule.createLaserAudioEvents, 'function');
+  const audio = new NeonAudio({ contextFactory: MockAudioContext, random: () => 0.5 });
+  audio.unlock();
+  const laserAudio = audioModule.createLaserAudioEvents(audio, { maxEnergy: 100, maxTargets: 5 });
+
+  assert.equal(laserAudio.onEnergyChange(95, 100), true);
+  const afterFirstReady = audio.context.starts.length;
+  assert.equal(laserAudio.onEnergyChange(100, 100), false);
+  assert.equal(audio.context.starts.length, afterFirstReady);
+  assert.equal(laserAudio.onEnergyChange(95, 100), true);
+
+  const beforeCharge = audio.context.starts.length;
+  laserAudio.onChargeStarted();
+  assert.ok(audio.context.starts.length > beforeCharge);
+  assert.equal(laserAudio.onPhaseChange('charge', 'charge'), false);
+  const beforeFire = audio.context.starts.length;
+  assert.equal(laserAudio.onPhaseChange('charge', 'active'), true);
+  assert.ok(audio.context.starts.length > beforeFire);
+  assert.ok(audio.getDebugSnapshot().musicTarget < audio.getDebugSnapshot().musicBase);
+
+  const beforeHit = audio.context.starts.length;
+  assert.equal(laserAudio.onHits(3), true);
+  const afterHit = audio.context.starts.length;
+  assert.ok(afterHit > beforeHit);
+  assert.equal(laserAudio.onHits(1), false);
+  assert.equal(audio.context.starts.length, afterHit);
+
+  laserAudio.onChargeStarted();
+  assert.equal(laserAudio.onHits(1), true);
+  assert.ok(audio.context.starts.length > afterHit);
 });
 
 test('ducking events lower music while ordinary pickup sfx leaves its target unchanged', () => {

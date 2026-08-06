@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import "./style.css";
-import NeonAudio from "./game/audio.js";
+import NeonAudio, { createLaserAudioEvents } from "./game/audio.js";
 import {
   ENEMY_TYPES,
   GAME,
@@ -292,6 +292,10 @@ const input = {
 };
 
 const audio = new NeonAudio();
+const laserAudio = createLaserAudioEvents(audio, {
+  maxEnergy: LASER_RULES.maxEnergy,
+  maxTargets: LASER_RULES.maxTargets,
+});
 let activeDialog = null;
 let restoreFocusTarget = null;
 const FOCUSABLE_SELECTOR = [
@@ -1970,7 +1974,9 @@ function getDerivedValues() {
 
 function addWeaponEnergyFromPickup() {
   const focused = getDerivedValues().pickupWeaponEnergy === LASER_RULES.focusedPickupEnergy;
+  const previousWeaponEnergy = state.weaponEnergy;
   state.weaponEnergy = gainWeaponEnergy(state.weaponEnergy, focused);
+  laserAudio.onEnergyChange(previousWeaponEnergy, state.weaponEnergy);
   if (canFireLaser(state.weaponEnergy) && !["charge", "active"].includes(state.laserState)) {
     state.laserState = "ready";
   }
@@ -2275,6 +2281,7 @@ function startLaserCharge() {
   syncLaserTransform();
   spawnRipple(player.position, paletteState.primary.getHex(), 0.72);
   toast("光矛蓄力", "cyan");
+  laserAudio.onChargeStarted();
   return true;
 }
 
@@ -2374,6 +2381,7 @@ function resolveLaserHits() {
 
 function updateLaser(dt) {
   if (!["charge", "active"].includes(state.laserState)) return state.laserState;
+  const previousPhase = state.laserState;
   state.laserElapsed += Math.max(0, Number.isFinite(dt) ? dt : 0);
   const phase = getLaserPhase(state.laserElapsed);
   if (phase === "done") {
@@ -2381,6 +2389,7 @@ function updateLaser(dt) {
     return state.laserState;
   }
   state.laserState = phase;
+  laserAudio.onPhaseChange(previousPhase, phase);
   syncLaserTransform();
   player.laser.group.visible = true;
   player.laser.halo.material.color.copy(paletteState.primary);
@@ -2397,7 +2406,7 @@ function updateLaser(dt) {
     const activeElapsed = Math.max(0, state.laserElapsed - LASER_RULES.chargeDuration);
     player.laser.group.scale.set(LASER_RULES.length, LASER_RULES.width, 1);
     player.laser.core.material.opacity = 0.18 + Math.max(0, 1 - activeElapsed / 0.08) * 0.82;
-    resolveLaserHits();
+    laserAudio.onHits(resolveLaserHits());
   }
   return state.laserState;
 }
