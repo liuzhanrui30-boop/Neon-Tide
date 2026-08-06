@@ -1265,13 +1265,25 @@ async function realmArtDirectionsScenario() {
     const crossfade = await page.gameEvaluate(`
       const controller=realmBackgrounds;
       const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
-      const sample=()=>({
-        stats:controller.getStats(),
-        visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
-        backdropOpacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(3))),
-        scale:root.children.map((group)=>Number(group.scale.x.toFixed(3))),
-        position:root.children.map((group)=>[Number(group.position.x.toFixed(3)),Number(group.position.y.toFixed(3))]),
-      });
+      const sample=()=>{
+        const decorationWeight=root.children.map((group)=>{
+          const backdrop=group.children[0];
+          let material=null;
+          group.traverse((object)=>{
+            if(material || object===backdrop || !object.material) return;
+            material=Array.isArray(object.material) ? object.material[0] : object.material;
+          });
+          return Number((material.opacity/(material.userData.realmBaseOpacity ?? 1)).toFixed(3));
+        });
+        return {
+          stats:controller.getStats(),
+          visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
+          backdropOpacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(3))),
+          decorationWeight,
+          scale:root.children.map((group)=>Number(group.scale.x.toFixed(3))),
+          position:root.children.map((group)=>[Number(group.position.x.toFixed(3)),Number(group.position.y.toFixed(3))]),
+        };
+      };
       controller.reset();
       const reset=sample();
       controller.setRealm(1,false);
@@ -1295,8 +1307,9 @@ async function realmArtDirectionsScenario() {
     assert.deepEqual(crossfade.start.backdropOpacity.slice(0,2), [1,0]);
     assert.deepEqual(crossfade.mid.visible, ['abyss','data-city']);
     assert.deepEqual(crossfade.mid.delta, [1,1,0,0]);
-    assert.ok(Math.abs(crossfade.mid.backdropOpacity[0] - 0.5) <= 0.03);
+    assert.equal(crossfade.mid.backdropOpacity[0], 1);
     assert.ok(Math.abs(crossfade.mid.backdropOpacity[1] - 0.5) <= 0.03);
+    assert.deepEqual(crossfade.mid.decorationWeight.slice(0,2), [0.5,0.5]);
     assert.ok(crossfade.mid.scale[0] < 1 && crossfade.mid.scale[1] < 1);
     assert.notDeepEqual(crossfade.mid.position[0], [0,0]);
     assert.notDeepEqual(crossfade.mid.position[1], [0,0]);
@@ -1309,44 +1322,203 @@ async function realmArtDirectionsScenario() {
     const redirected = await page.gameEvaluate(`
       const controller=realmBackgrounds;
       const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
-      const sample=()=>({
-        active:controller.getStats().activeRealm,
-        visible:root.children.filter((group)=>group.visible).map((group)=>group.userData.realm),
-        opacity:root.children.map((group)=>Number(group.children[0].material.opacity.toFixed(4))),
-        transforms:root.children.map((group)=>[
-          Number(group.position.x.toFixed(4)),Number(group.position.y.toFixed(4)),Number(group.scale.x.toFixed(4)),
-        ]),
+      const round=(value)=>Number(value.toFixed(5));
+      const sample=()=>root.children.map((group)=>{
+        const backdrop=group.children[0];
+        let decorationMaterial=null;
+        group.traverse((object)=>{
+          if(decorationMaterial || object===backdrop || !object.material) return;
+          decorationMaterial=Array.isArray(object.material) ? object.material[0] : object.material;
+        });
+        const baseOpacity=decorationMaterial?.userData.realmBaseOpacity ?? decorationMaterial?.opacity ?? 1;
+        return {
+          realm:group.userData.realm,
+          visible:group.visible,
+          decorationWeight:group.visible
+            ? round((decorationMaterial?.opacity ?? 0)/Math.max(0.00001,baseOpacity))
+            : 0,
+          backdropOpacity:round(backdrop.material.opacity),
+          position:[round(group.position.x),round(group.position.y)],
+          scale:round(group.scale.x),
+        };
       });
       controller.reset();
       controller.setRealm(1,false);
       controller.update({elapsed:30.3,dt:0.3,reducedMotion:false});
-      const one=sample();
+      const beforeQueue=sample();
       controller.setRealm(2,false);
-      const two=sample();
-      controller.update({elapsed:64.3,dt:0.3,reducedMotion:false});
+      const afterQueueTwo=sample();
       controller.setRealm(3,false);
-      const three=sample();
-      controller.update({elapsed:100.91,dt:0.91,reducedMotion:false});
+      const afterQueueThree=sample();
+      controller.update({elapsed:30.899,dt:0.599,reducedMotion:false});
+      const beforeHandoff=sample();
+      controller.update({elapsed:30.9,dt:0.001,reducedMotion:false});
+      const afterHandoff=sample();
+      controller.update({elapsed:100.35,dt:0.45,reducedMotion:false});
+      const queuedMid=sample();
+      controller.update({elapsed:100.8,dt:0.45,reducedMotion:false});
       const end=sample();
-      return {one,two,three,end};
-    `);
-    assert.deepEqual(redirected.one.visible, ['abyss','data-city']);
-    assert.deepEqual(redirected.two.visible, ['abyss','star-forge']);
-    assert.deepEqual(redirected.three.visible, ['abyss','void-cathedral']);
-    for (const sample of [redirected.one, redirected.two, redirected.three]) {
-      assert.equal(sample.visible.length, 2);
-      const visibleOpacity = sample.opacity.filter((opacity, index) => sample.transforms[index][2] < 1 || opacity < 1);
-      assert.ok(visibleOpacity.length >= 2);
-      assert.ok(Math.abs(sample.opacity.reduce((sum, opacity, index) => (
-        sample.visible.includes(['abyss','data-city','star-forge','void-cathedral'][index]) ? sum + opacity : sum
-      ), 0) - 1) <= 0.001);
-    }
-    assert.equal(redirected.two.active, 2);
-    assert.equal(redirected.three.active, 3);
-    assert.deepEqual(redirected.end.visible, ['void-cathedral']);
-    assert.deepEqual(redirected.end.opacity, [1,1,1,1]);
-    assert.ok(redirected.end.transforms.every((transform)=>JSON.stringify(transform)===JSON.stringify([0,0,1])));
 
+      controller.reset();
+      controller.setRealm(1,false);
+      controller.update({elapsed:30.3,dt:0.3,reducedMotion:false});
+      const beforeIncomingRequest=sample();
+      controller.setRealm(1,false);
+      const afterIncomingRequest=sample();
+      const beforeReverse=sample();
+      controller.setRealm(0,false);
+      const afterReverseRequest=sample();
+      controller.update({elapsed:30.899,dt:0.599,reducedMotion:false});
+      const beforeReverseHandoff=sample();
+      controller.update({elapsed:30.9,dt:0.001,reducedMotion:false});
+      const afterReverseHandoff=sample();
+      controller.update({elapsed:30.901,dt:0.001,reducedMotion:false});
+      const afterReverseFirstFrame=sample();
+      controller.update({elapsed:31.8,dt:0.899,reducedMotion:false});
+      const reverseEnd=sample();
+
+      controller.reset();
+      controller.setRealm(1,false);
+      controller.update({elapsed:30.2,dt:0.2,reducedMotion:false});
+      controller.setRealm(2,false);
+      controller.setRealm(3,false);
+      controller.update({elapsed:30.3,dt:0.1,reducedMotion:true});
+      const reducedLatest=sample();
+      return {
+        beforeQueue,afterQueueTwo,afterQueueThree,beforeHandoff,afterHandoff,queuedMid,end,
+        beforeIncomingRequest,afterIncomingRequest,beforeReverse,afterReverseRequest,
+        beforeReverseHandoff,afterReverseHandoff,afterReverseFirstFrame,reverseEnd,reducedLatest,
+        finalStats:controller.getStats(),
+      };
+    `);
+    const backdropBlend = await page.gameEvaluate(`
+      const controller=realmBackgrounds;
+      const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
+      const sceneVisibility=scene.children.map((child)=>child.visible);
+      const decorationVisibility=root.children.map((group)=>group.children.map((child)=>child.visible));
+      const backdropColors=root.children.map((group)=>group.children[0].material.color.clone());
+      const sceneBackground=scene.background.clone();
+      scene.children.forEach((child)=>{child.visible=child===root;});
+      root.children.forEach((group)=>group.children.slice(1).forEach((child)=>{child.visible=false;}));
+      root.children[0].children[0].material.color.set(0xff0000);
+      root.children[1].children[0].material.color.set(0x0000ff);
+      scene.background.set(0x00ff00);
+      const bufferSize=renderer.getDrawingBufferSize(new THREE.Vector2());
+      const gl=renderer.getContext();
+      const readCenter=()=>{
+        renderer.render(scene,camera);
+        const pixel=new Uint8Array(4);
+        gl.readPixels(
+          Math.floor(bufferSize.x/2),Math.floor(bufferSize.y/2),1,1,
+          gl.RGBA,gl.UNSIGNED_BYTE,pixel,
+        );
+        return Array.from(pixel);
+      };
+      const backdropState=()=>root.children.map((group)=>{
+        const backdrop=group.children[0];
+        return {
+          visible:group.visible,
+          opacity:Number(backdrop.material.opacity.toFixed(3)),
+          transparent:backdrop.material.transparent,
+          renderOrder:backdrop.renderOrder,
+          depthTest:backdrop.material.depthTest,
+          depthWrite:backdrop.material.depthWrite,
+        };
+      });
+      controller.setRealm(0,true);
+      const abyssPixel=readCenter();
+      controller.setRealm(1,true);
+      const cityPixel=readCenter();
+      controller.setRealm(0,true);
+      controller.setRealm(1,false);
+      controller.update({elapsed:30,dt:0,reducedMotion:false});
+      const start={pixel:readCenter(),state:backdropState()};
+      controller.update({elapsed:30.45,dt:0.45,reducedMotion:false});
+      const mid={pixel:readCenter(),state:backdropState()};
+      controller.update({elapsed:30.9,dt:0.45,reducedMotion:false});
+      const end={pixel:readCenter(),state:backdropState()};
+      scene.children.forEach((child,index)=>{child.visible=sceneVisibility[index];});
+      root.children.forEach((group,groupIndex)=>group.children.forEach((child,childIndex)=>{
+        child.visible=decorationVisibility[groupIndex][childIndex];
+      }));
+      root.children.forEach((group,index)=>group.children[0].material.color.copy(backdropColors[index]));
+      scene.background.copy(sceneBackground);
+      controller.reset();
+      return {abyssPixel,cityPixel,start,mid,end};
+    `);
+    const expectedMidPixel = backdropBlend.abyssPixel.map((channel,index) => (
+      index === 3 ? 255 : Math.round((channel + backdropBlend.cityPixel[index]) / 2)
+    ));
+    assert.deepEqual(backdropBlend.start.pixel, backdropBlend.abyssPixel);
+    assert.deepEqual(backdropBlend.end.pixel, backdropBlend.cityPixel);
+    backdropBlend.mid.pixel.forEach((channel,index) => {
+      assert.ok(Math.abs(channel-expectedMidPixel[index]) <= 3,
+        `midpoint framebuffer channel ${index} was ${channel}, expected ${expectedMidPixel[index]}`);
+    });
+    assert.equal(backdropBlend.mid.pixel[3], 255);
+    assert.deepEqual(backdropBlend.start.state.slice(0,2).map((state)=>state.opacity), [1,0]);
+    assert.deepEqual(backdropBlend.mid.state.slice(0,2).map((state)=>state.opacity), [1,0.5]);
+    assert.equal(backdropBlend.mid.state[0].transparent, false);
+    assert.equal(backdropBlend.mid.state[1].transparent, true);
+    assert.ok(backdropBlend.mid.state[0].renderOrder < backdropBlend.mid.state[1].renderOrder);
+    assert.equal(backdropBlend.mid.state[0].depthTest, false);
+    assert.equal(backdropBlend.mid.state[1].depthTest, false);
+    assert.equal(backdropBlend.mid.state[0].depthWrite, false);
+    assert.equal(backdropBlend.mid.state[1].depthWrite, false);
+    assert.deepEqual(backdropBlend.end.state.filter((state)=>state.visible).map((state)=>({
+      opacity:state.opacity,transparent:state.transparent,renderOrder:state.renderOrder,
+    })), [{opacity:1,transparent:false,renderOrder:-100}]);
+
+    assert.deepEqual(redirected.afterQueueTwo, redirected.beforeQueue,
+      'queuing a third realm changed the current pair presentation on the request frame');
+    assert.deepEqual(redirected.afterQueueThree, redirected.beforeQueue,
+      'overwriting the queued realm changed the current pair presentation on the request frame');
+    assert.equal(redirected.afterQueueTwo[2].visible, false);
+    assert.equal(redirected.afterQueueThree[3].visible, false);
+    assert.equal(redirected.afterQueueTwo.filter((realm)=>realm.visible).length, 2);
+    assert.equal(redirected.afterQueueThree.filter((realm)=>realm.visible).length, 2);
+    assert.deepEqual(redirected.afterIncomingRequest, redirected.beforeIncomingRequest,
+      'requesting the current incoming realm changed presentation on the request frame');
+    assert.deepEqual(redirected.afterReverseRequest, redirected.beforeReverse,
+      'requesting the current outgoing realm reversed presentation on the request frame');
+    for (const [before,after,label] of [
+      [redirected.beforeHandoff,redirected.afterHandoff,'queued handoff'],
+      [redirected.beforeReverseHandoff,redirected.afterReverseHandoff,'reverse handoff'],
+    ]) {
+      for (let realm = 0; realm < 4; realm += 1) {
+        if (!before[realm].visible && !after[realm].visible) continue;
+        assert.ok(Math.abs(before[realm].decorationWeight-after[realm].decorationWeight) <= 0.01,
+          `${label} realm ${realm} opacity jumped`);
+        if (before[realm].visible && after[realm].visible) {
+          assert.ok(Math.abs(before[realm].position[0]-after[realm].position[0]) <= 0.01,
+            `${label} realm ${realm} crossed position discontinuously`);
+          assert.ok(Math.abs(before[realm].position[1]-after[realm].position[1]) <= 0.01,
+            `${label} realm ${realm} changed vertical position discontinuously`);
+        }
+      }
+      assert.ok(after.filter((realm)=>realm.visible).length <= 2, `${label} displayed a third realm`);
+    }
+    assert.deepEqual(redirected.afterHandoff.filter((realm)=>realm.visible).map((realm)=>realm.realm),
+      ['data-city','void-cathedral']);
+    assert.equal(redirected.afterHandoff[3].decorationWeight, 0);
+    assert.equal(redirected.afterHandoff[3].backdropOpacity, 0);
+    for (let realm = 0; realm < 4; realm += 1) {
+      if (!redirected.afterReverseHandoff[realm].visible || !redirected.afterReverseFirstFrame[realm].visible) continue;
+      assert.ok(Math.abs(
+        redirected.afterReverseHandoff[realm].position[0]
+        - redirected.afterReverseFirstFrame[realm].position[0]
+      ) <= 0.01, `reverse realm ${realm} moved across center on its first frame`);
+    }
+    assert.deepEqual(redirected.queuedMid.filter((realm)=>realm.visible).map((realm)=>realm.realm),
+      ['data-city','void-cathedral']);
+    assert.deepEqual(redirected.end.filter((realm)=>realm.visible).map((realm)=>realm.realm), ['void-cathedral']);
+    assert.deepEqual(redirected.reverseEnd.filter((realm)=>realm.visible).map((realm)=>realm.realm), ['abyss']);
+    assert.deepEqual(redirected.reducedLatest.filter((realm)=>realm.visible).map((realm)=>realm.realm), ['void-cathedral']);
+    for (const snapshot of Object.values(redirected).filter(Array.isArray)) {
+      assert.ok(snapshot.filter((realm)=>realm.visible).length <= 2, 'redirect snapshot displayed more than two realms');
+    }
+    assert.equal(redirected.finalStats.activeRealm, 3);
+    assert.equal(redirected.finalStats.visibleGroups, 1);
     const resetRegression = await page.gameEvaluate(`
       const controller=realmBackgrounds;
       const root=scene.children.find((child)=>child.userData?.realmBackgroundRoot);
@@ -1470,6 +1642,7 @@ async function realmArtDirectionsScenario() {
         return true;
       `);
       await page.waitForPage(`document.documentElement.dataset.realm===${JSON.stringify(expectedDatasets[target - 1])} && document.querySelector('#stage-banner').classList.contains('show')`, 2500);
+      await sleep(320);
       const entry = await page.gameEvaluate(`
         const banner=dom.stageBanner.getBoundingClientRect();
         const hud=dom.hud.getBoundingClientRect();
@@ -1506,7 +1679,8 @@ async function realmArtDirectionsScenario() {
       assert.equal(entry.banner.label, expectedLabels[target - 1]);
       assert.equal(entry.banner.shown, true);
       assert.ok(entry.banner.left >= 8 && entry.banner.right <= entry.banner.viewportWidth - 8);
-      assert.ok(entry.banner.top >= entry.banner.hudBottom + 4, 'desktop banner overlapped the HUD');
+      assert.ok(entry.banner.top >= entry.banner.hudBottom + 4,
+        `desktop banner ${target} top ${entry.banner.top} overlapped HUD bottom ${entry.banner.hudBottom}`);
       assert.ok(entry.banner.top >= entry.banner.bossBottom + 4, 'boss banner overlapped the boss health panel');
       assert.ok(entry.banner.bottom < entry.banner.viewportHeight * 0.34, 'desktop banner covered the combat center');
       assert.equal(entry.banner.centerOverlap, 0);
@@ -1657,6 +1831,7 @@ async function realmArtDirectionsScenario() {
       return true;
     `);
     await page.waitForPage(`document.documentElement.dataset.realm==='data-city' && document.querySelector('#stage-banner').classList.contains('show')`, 2500);
+    await sleep(320);
     const mobileBanner = await page.gameEvaluate(`
       const banner=dom.stageBanner.getBoundingClientRect();
       const hud=dom.hud.getBoundingClientRect();

@@ -22,8 +22,8 @@ function getLayout(width, height) {
 }
 
 function ownMaterial(materials, material) {
-  material.transparent = true;
   material.userData.realmBaseOpacity = Number.isFinite(material.opacity) ? material.opacity : 1;
+  material.userData.realmBaseTransparent = material.transparent;
   materials.add(material);
   return material;
 }
@@ -93,10 +93,14 @@ function createShapeGeometry(points) {
 }
 
 function createBackdrop(materials, color) {
+  const material = meshMaterial(materials, { color });
+  material.depthTest = false;
+  material.userData.realmBackdrop = true;
   const backdrop = new THREE.Mesh(
     new THREE.PlaneGeometry(80, 36),
-    meshMaterial(materials, { color }),
+    material,
   );
+  backdrop.userData.realmBackdrop = true;
   backdrop.position.z = BACKDROP_Z;
   backdrop.renderOrder = -100;
   return backdrop;
@@ -777,24 +781,48 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
 
   let activeRealm = 0;
   let transition = null;
+  let queuedRealm = null;
   let disposed = false;
   const realmWeights = [1, 0, 0, 0];
   const updateCounts = [0, 0, 0, 0];
   const objectCounts = builders.map((builder) => builder.objectCount);
 
+  function setTransparent(material, transparent) {
+    if (material.transparent === transparent) return;
+    material.transparent = transparent;
+    material.needsUpdate = true;
+  }
+
   function restoreBuilderMaterials(builder) {
     for (const material of builder.materials) {
       material.opacity = material.userData.realmBaseOpacity ?? 1;
+      setTransparent(material, material.userData.realmBaseTransparent ?? false);
     }
+    const backdrop = builder.group.children[0];
+    backdrop.renderOrder = -100;
   }
 
-  function applyBuilderPresentation(builder, weight, direction = 1) {
+  function applyBuilderPresentation(builder, weight, realmIndex) {
     const safeWeight = THREE.MathUtils.clamp(weight, 0, 1);
     for (const material of builder.materials) {
+      if (material.userData.realmBackdrop) continue;
+      setTransparent(material, true);
       material.opacity = (material.userData.realmBaseOpacity ?? 1) * safeWeight;
     }
+    const direction = realmIndex % 2 === 0 ? -1 : 1;
     builder.group.scale.setScalar(0.94 + safeWeight * 0.06);
     builder.group.position.set(direction * (1 - safeWeight) * 0.32, (1 - safeWeight) * 0.08, 0);
+  }
+
+  function applyBackdropPresentation(outgoingRealm, incomingRealm, incomingWeight) {
+    const outgoing = builders[outgoingRealm].group.children[0];
+    const incoming = builders[incomingRealm].group.children[0];
+    outgoing.material.opacity = outgoing.material.userData.realmBaseOpacity ?? 1;
+    setTransparent(outgoing.material, false);
+    outgoing.renderOrder = -102;
+    incoming.material.opacity = THREE.MathUtils.clamp(incomingWeight, 0, 1);
+    setTransparent(incoming.material, true);
+    incoming.renderOrder = -101;
   }
 
   function normalizeBuilder(builder, visible = false) {
@@ -807,76 +835,54 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
   function finishTransition(realm = activeRealm) {
     activeRealm = clampRealm(realm);
     transition = null;
+    queuedRealm = null;
     builders.forEach((builder, index) => {
       realmWeights[index] = index === activeRealm ? 1 : 0;
       normalizeBuilder(builder, index === activeRealm);
     });
   }
 
+  function beginTransition(nextRealm) {
+    const outgoingRealm = activeRealm;
+    activeRealm = clampRealm(nextRealm);
+    queuedRealm = null;
+    builders.forEach((builder, builderIndex) => {
+      normalizeBuilder(builder, builderIndex === outgoingRealm || builderIndex === activeRealm);
+    });
+    realmWeights[outgoingRealm] = 1;
+    realmWeights[activeRealm] = 0;
+    transition = {
+      outgoingRealm,
+      incomingRealm: activeRealm,
+      elapsed: 0,
+    };
+    applyBuilderPresentation(builders[outgoingRealm], 1, outgoingRealm);
+    applyBuilderPresentation(builders[activeRealm], 0, activeRealm);
+    applyBackdropPresentation(outgoingRealm, activeRealm, 0);
+  }
+
+  function completeTransition() {
+    const completedRealm = transition.incomingRealm;
+    const nextRealm = queuedRealm;
+    finishTransition(completedRealm);
+    if (nextRealm !== null && nextRealm !== completedRealm) beginTransition(nextRealm);
+  }
+
   function setRealm(index, immediate = false) {
     if (disposed) return activeRealm;
     const nextRealm = clampRealm(index);
-    if (nextRealm === activeRealm) {
-      if (immediate) {
-        finishTransition(activeRealm);
-        builders[activeRealm].update(0, 0, true);
-        restoreBuilderMaterials(builders[activeRealm]);
-      }
-      return activeRealm;
-    }
-
     if (immediate) {
       finishTransition(nextRealm);
       builders[activeRealm].update(0, 0, true);
       restoreBuilderMaterials(builders[activeRealm]);
       return activeRealm;
     }
-
-    const visibleRealms = builders
-      .map((builder, builderIndex) => (builder.group.visible ? builderIndex : -1))
-      .filter((builderIndex) => builderIndex >= 0);
-    let outgoingRealm = activeRealm;
     if (transition) {
-      if (visibleRealms.includes(nextRealm)) {
-        outgoingRealm = visibleRealms.find((realm) => realm !== nextRealm) ?? activeRealm;
-      } else {
-        outgoingRealm = visibleRealms.reduce((best, realm) => (
-          realmWeights[realm] > realmWeights[best] ? realm : best
-        ), visibleRealms[0] ?? activeRealm);
-      }
+      queuedRealm = nextRealm === activeRealm ? null : nextRealm;
+      return activeRealm;
     }
-
-    const outgoingWeight = THREE.MathUtils.clamp(
-      Number.isFinite(realmWeights[outgoingRealm]) ? realmWeights[outgoingRealm] : 1,
-      0,
-      1,
-    );
-    const incomingWeight = visibleRealms.includes(nextRealm)
-      ? THREE.MathUtils.clamp(realmWeights[nextRealm], 0, 1)
-      : 1 - outgoingWeight;
-
-    activeRealm = nextRealm;
-    builders.forEach((builder, builderIndex) => {
-      const participates = builderIndex === outgoingRealm || builderIndex === activeRealm;
-      if (!participates) {
-        realmWeights[builderIndex] = 0;
-        normalizeBuilder(builder, false);
-      } else {
-        restoreBuilderMaterials(builder);
-        builder.group.visible = true;
-      }
-    });
-    realmWeights[outgoingRealm] = outgoingWeight;
-    realmWeights[activeRealm] = incomingWeight;
-    transition = {
-      outgoingRealm,
-      incomingRealm: activeRealm,
-      outgoingWeight,
-      incomingWeight,
-      elapsed: 0,
-    };
-    applyBuilderPresentation(builders[outgoingRealm], outgoingWeight, -1);
-    applyBuilderPresentation(builders[activeRealm], incomingWeight, 1);
+    if (nextRealm === activeRealm) return activeRealm;
+    beginTransition(nextRealm);
     return activeRealm;
   }
 
@@ -885,7 +891,7 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     const safeElapsed = Number.isFinite(elapsed) ? elapsed : 0;
     const safeDt = Math.max(0, Number.isFinite(dt) ? dt : 0);
 
-    if (transition && reducedMotion) finishTransition(activeRealm);
+    if (transition && reducedMotion) finishTransition(queuedRealm ?? activeRealm);
     if (!transition) {
       const builder = builders[activeRealm];
       builder.update(safeElapsed, safeDt, Boolean(reducedMotion));
@@ -902,11 +908,12 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     transition.elapsed = Math.min(REALM_TRANSITION_DURATION, transition.elapsed + safeDt);
     const progress = transition.elapsed / REALM_TRANSITION_DURATION;
     const eased = progress * progress * (3 - 2 * progress);
-    realmWeights[outgoingRealm] = THREE.MathUtils.lerp(transition.outgoingWeight, 0, eased);
-    realmWeights[incomingRealm] = THREE.MathUtils.lerp(transition.incomingWeight, 1, eased);
-    applyBuilderPresentation(builders[outgoingRealm], realmWeights[outgoingRealm], -1);
-    applyBuilderPresentation(builders[incomingRealm], realmWeights[incomingRealm], 1);
-    if (transition.elapsed >= REALM_TRANSITION_DURATION) finishTransition(incomingRealm);
+    realmWeights[outgoingRealm] = 1 - eased;
+    realmWeights[incomingRealm] = eased;
+    applyBuilderPresentation(builders[outgoingRealm], realmWeights[outgoingRealm], outgoingRealm);
+    applyBuilderPresentation(builders[incomingRealm], realmWeights[incomingRealm], incomingRealm);
+    applyBackdropPresentation(outgoingRealm, incomingRealm, realmWeights[incomingRealm]);
+    if (transition.elapsed >= REALM_TRANSITION_DURATION) completeTransition();
     return true;
   }
 
@@ -925,6 +932,7 @@ export function createRealmBackgrounds({ scene, quality, width, height }) {
     });
     activeRealm = 0;
     transition = null;
+    queuedRealm = null;
     updateCounts.fill(0);
     return true;
   }
