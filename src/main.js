@@ -73,6 +73,7 @@ const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
 const MAX_FLOATING_TEXTS = 24;
 const PROJECTILE_POOL_SIZE = COMBAT.projectilePoolSize;
+const MAX_ENVIRONMENT_STEPS_PER_FRAME = 64;
 const enemyScratch = {
   toPlayer: new THREE.Vector2(),
   nearMissDirection: new THREE.Vector2(),
@@ -984,6 +985,59 @@ function applyEnvironmentForce(frame, target, simulationDt) {
   target.velocity.y += force.y * simulationDt;
 }
 
+function clearEnemyEnvironmentMotion() {
+  for (const enemy of enemies) enemy?.environmentVelocity?.set(0, 0);
+}
+
+function applyEnemyEnvironmentMotion(frame, enemy, simulationDt) {
+  if (!enemy?.group?.position || !enemy.environmentVelocity?.isVector2) return;
+  const force = frame.type === "current"
+    ? getCurrentForce(frame, enemy.group.position)
+    : getGravityForce(frame, enemy.group.position);
+  enemy.environmentVelocity.x += force.x * simulationDt;
+  enemy.environmentVelocity.y += force.y * simulationDt;
+  enemy.group.position.x += enemy.environmentVelocity.x * simulationDt;
+  enemy.group.position.y += enemy.environmentVelocity.y * simulationDt;
+}
+
+function advanceEnvironmentTimeline(realm, wallDt) {
+  let remaining = wallDt;
+  let steps = 0;
+  while (steps < MAX_ENVIRONMENT_STEPS_PER_FRAME) {
+    steps += 1;
+    if (!state.environmentActive) {
+      if (state.environmentTimer === Infinity) break;
+      const delayRemaining = Math.max(0, finiteOr(state.environmentTimer, 0));
+      if (remaining < delayRemaining) {
+        state.environmentTimer = delayRemaining - remaining;
+        remaining = 0;
+        break;
+      }
+      remaining = Math.max(0, remaining - delayRemaining);
+      state.environmentActive = true;
+      state.environmentElapsed = 0;
+      state.environmentTimer = 0;
+      state.stats.environmentEvents += 1;
+      audio.event("environment");
+      if (remaining <= 0) break;
+    }
+
+    const frame = getEnvironmentFrame(realm.id, state.environmentElapsed);
+    const eventDuration = Math.max(0, finiteOr(frame.telegraph, 0) + finiteOr(frame.activeDuration, 0));
+    const eventRemaining = Math.max(0, eventDuration - state.environmentElapsed);
+    if (remaining < eventRemaining) {
+      state.environmentElapsed += remaining;
+      remaining = 0;
+      break;
+    }
+    state.environmentElapsed = eventDuration;
+    remaining = Math.max(0, remaining - eventRemaining);
+    clearEnemyEnvironmentMotion();
+    scheduleEnvironmentForStage();
+    if (remaining <= 0) break;
+  }
+}
+
 function applyEnvironment(dt, simulationDt = Math.min(Math.max(0, finiteOr(dt, 0)), 0.05)) {
   const wallDt = Math.max(0, finiteOr(dt, 0));
   const forceDt = Math.min(0.05, Math.max(0, finiteOr(simulationDt, 0)));
@@ -993,34 +1047,30 @@ function applyEnvironment(dt, simulationDt = Math.min(Math.max(0, finiteOr(dt, 0
     state.environmentActive = false;
     environmentFrame = getEnvironmentFrame(realm.id, 0);
     hideEnvironmentVisuals();
+    clearEnemyEnvironmentMotion();
     return environmentFrame;
   }
+  advanceEnvironmentTimeline(realm, wallDt);
   if (!state.environmentActive) {
-    state.environmentTimer -= wallDt;
-    if (state.environmentTimer > 0) return environmentFrame;
-    state.environmentActive = true;
-    state.environmentElapsed = Math.max(0, -state.environmentTimer);
-    state.environmentTimer = 0;
-    state.stats.environmentEvents += 1;
-    audio.event("environment");
-  } else {
-    state.environmentElapsed += wallDt;
+    environmentFrame = getEnvironmentFrame(realm.id, 0);
+    hideEnvironmentVisuals();
+    clearEnemyEnvironmentMotion();
+    return environmentFrame;
   }
   environmentFrame = getEnvironmentFrame(realm.id, state.environmentElapsed);
   updateEnvironmentVisual(environmentFrame);
   if (environmentFrame.phase === "active") {
     state.stats.environmentActiveFrames += 1;
     applyEnvironmentForce(environmentFrame, player, forceDt);
-    for (const enemy of enemies) applyEnvironmentForce(environmentFrame, { position: enemy.group.position, velocity: enemy.velocity }, forceDt);
+    for (const enemy of enemies) applyEnemyEnvironmentMotion(environmentFrame, enemy, forceDt);
     for (const shard of shards) applyEnvironmentForce(environmentFrame, { position: shard.group.position, velocity: shard.velocity }, forceDt);
-  } else if (environmentFrame.phase === "cooldown") {
-    scheduleEnvironmentForStage();
-  }
+  } else clearEnemyEnvironmentMotion();
   return environmentFrame;
 }
 
 function clearEnvironmentAndProjectiles() {
   projectiles.forEach(resetProjectile);
+  clearEnemyEnvironmentMotion();
   state.environmentActive = false;
   state.environmentElapsed = 0;
   state.environmentTimer = Infinity;
@@ -1373,6 +1423,7 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
     type,
     group,
     velocity: new THREE.Vector2(),
+    environmentVelocity: new THREE.Vector2(),
     speed: config.speed,
     radius: config.radius,
     hp: config.hp,
@@ -3722,6 +3773,17 @@ function sanitizeRuntimeState() {
     }
     const position = enemy.group.position;
     const velocity = enemy.velocity;
+    if (!enemy.environmentVelocity?.isVector2) {
+      enemy.environmentVelocity = new THREE.Vector2();
+      runtimeStats.orphanGuards += 1;
+      corrected = true;
+    }
+    const environmentVelocity = enemy.environmentVelocity;
+    if (!Number.isFinite(environmentVelocity.x) || !Number.isFinite(environmentVelocity.y)) {
+      environmentVelocity.set(0, 0);
+      runtimeStats.orphanGuards += 1;
+      corrected = true;
+    }
     const valid = Number.isFinite(position.x) && Number.isFinite(position.y)
       && Number.isFinite(velocity.x) && Number.isFinite(velocity.y)
       && Number.isFinite(enemy.hp) && Number.isFinite(enemy.stateTimer);

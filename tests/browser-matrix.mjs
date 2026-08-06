@@ -1226,7 +1226,7 @@ async function realmHazardsAndAttackVariantsScenario() {
       const environmentActive={
         phase:environmentFrame.phase,elapsed:$state.environmentElapsed,activeFrames:$state.stats.environmentActiveFrames,
         health:$state.health,visual:environmentVisual.current.group.visible,playerVelocity:$player.velocity.x,
-        enemyVelocity:currentEnemy.velocity.x,shardVelocity:currentShard.velocity.x,
+        enemyPosition:currentEnemy.group.position.x,enemyEnvironment:currentEnemy.environmentVelocity.x,shardVelocity:currentShard.velocity.x,
       };
       const visualShapes={
         current:environmentVisual.current.meshes[0].isMesh&&environmentVisual.current.meshes[1].isLineSegments,
@@ -1243,8 +1243,34 @@ async function realmHazardsAndAttackVariantsScenario() {
       const gravityShard=spawnShard(new THREE.Vector2(4,0));gravityShard.velocity.set(0,0);
       applyEnvironment(1.1,0.05);
       const gravity={
-        phase:environmentFrame.phase,player:$player.velocity.x,enemy:gravityEnemy.velocity.x,shard:gravityShard.velocity.x,
+        phase:environmentFrame.phase,player:$player.velocity.x,enemyPosition:gravityEnemy.group.position.x,enemyEnvironment:gravityEnemy.environmentVelocity.x,shard:gravityShard.velocity.x,
         visual:environmentVisual.gravity.group.visible,health:$state.health,
+      };
+      const runEnvironmentTimeline=(steps)=>{
+        clearEnvironmentAndProjectiles();
+        $state.stageIndex=0;
+        $state.environmentSeed=0x4e544944;
+        $state.environmentSequence=0;
+        $state.stats.environmentEvents=0;
+        scheduleEnvironmentForStage();
+        $state.environmentTimer=0.1;
+        for(const step of steps) applyEnvironment(step,0);
+        return {
+          phase:$state.environmentActive?environmentFrame.phase:'delay',active:$state.environmentActive,
+          elapsed:$state.environmentElapsed,timer:$state.environmentTimer,
+          events:$state.stats.environmentEvents,sequence:$state.environmentSequence,
+        };
+      };
+      const largeEnvironmentStep=runEnvironmentTimeline([30]);
+      const smallEnvironmentSteps=runEnvironmentTimeline(Array.from({length:3000},()=>0.01));
+      gravityEnemy.group.position.set(0,5,2);gravityEnemy.velocity.set(0,0);gravityEnemy.environmentVelocity.set(5,0);
+      $state.stageIndex=0;$state.environmentSeed=0x4e544944;$state.environmentSequence=1;$state.stats.environmentEvents=0;
+      $state.environmentActive=true;$state.environmentElapsed=3.9;$state.environmentTimer=0;
+      environmentFrame=getEnvironmentFrame('abyss',$state.environmentElapsed);
+      applyEnvironment(9.4,0.05);
+      const environmentRollover={
+        phase:environmentFrame.phase,active:$state.environmentActive,events:$state.stats.environmentEvents,
+        enemyX:gravityEnemy.group.position.x,environmentVelocity:gravityEnemy.environmentVelocity.x,
       };
       spawnProjectile('lancerBolt',new THREE.Vector2(0,0),new THREE.Vector2(1,0));
       enterStage(1,false);
@@ -1257,6 +1283,7 @@ async function realmHazardsAndAttackVariantsScenario() {
       };
       return {pressure,poolStart,poolPressure,projectileHealth,projectileMid,projectileHit,healthRelief,lancerBolts,strikerTelegraph,strikerExecute,firstChain,beforeNeighborExecute,secondChain,
         bulwarkFirst,bulwarkSameHit,bulwarkShockState,bossWindows,bossShards,healthBefore,environmentTelegraph,environmentActive,visualShapes,dataLane,gravity,
+        largeEnvironmentStep,smallEnvironmentSteps,environmentRollover,
         stageClear,roles,restart};
     `);
     assert.deepEqual(contracts.pressure, { cap:42,targets:[15,24,34],bursts:[2,3,4] });
@@ -1295,12 +1322,13 @@ async function realmHazardsAndAttackVariantsScenario() {
     assert.ok(contracts.environmentActive.phase==='active'&&contracts.environmentActive.elapsed>=2.1&&contracts.environmentActive.activeFrames>=1);
     assert.equal(contracts.environmentActive.health, contracts.healthBefore, 'environment event directly damaged the player');
     assert.equal(contracts.environmentActive.visual, true);
-    assert.ok(contracts.environmentActive.playerVelocity>0&&contracts.environmentActive.enemyVelocity>0&&contracts.environmentActive.shardVelocity>0,
+    assert.ok(contracts.environmentActive.playerVelocity>0&&contracts.environmentActive.enemyPosition>-5&&contracts.environmentActive.enemyEnvironment>0&&contracts.environmentActive.shardVelocity>0,
       `current did not influence all runtime bodies: ${JSON.stringify(contracts.environmentActive)}`);
     assert.deepEqual(contracts.visualShapes, { current:true,data:true,gravity:true });
     assert.deepEqual(contracts.dataLane, { phase:'active',dashRecovery:0.65,visual:true });
     assert.equal(contracts.gravity.phase, 'active');
-    assert.ok(contracts.gravity.player<0&&contracts.gravity.enemy<0&&contracts.gravity.shard<0, `gravity did not pull all runtime bodies: ${JSON.stringify(contracts.gravity)}`);
+    assert.ok(contracts.gravity.player<0&&contracts.gravity.enemyPosition<3&&contracts.gravity.enemyEnvironment<0&&contracts.gravity.shard<0,
+      `gravity did not pull all runtime bodies: ${JSON.stringify(contracts.gravity)}`);
     assert.equal(contracts.gravity.visual, true);
     assert.equal(contracts.gravity.health, contracts.healthBefore, 'gravity event directly damaged the player');
     assert.equal(contracts.stageClear.active, 0);
@@ -1340,6 +1368,80 @@ async function realmHazardsAndAttackVariantsScenario() {
     assert.deepEqual(upgrading, { eventElapsed:upgradeStart.eventElapsed,gameElapsed:upgradeStart.gameElapsed,active:upgradeStart.active,visuals:upgradeStart.visuals,mode:'upgrade' });
     await page.click('.upgrade-option');
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
+
+    const currentStart = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=0;$state.stageQueue=[];$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      input.keys.clear();input.touch.set(0,0);$player.position.set(-7,4);$player.velocity.set(0,0);syncPlayerTransform();
+      const mine=createMine(new THREE.Vector2(-3,3));mine.stateTimer=10;mine.velocity.set(0,0);
+      const lancer=createLancer(new THREE.Vector2(-3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
+      const shard=spawnShard(new THREE.Vector2(-7,-4));shard.velocity.set(0,0);
+      $state.environmentActive=true;$state.environmentElapsed=3.8;$state.environmentTimer=0;
+      environmentFrame=getEnvironmentFrame('abyss',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);
+      return {player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x};
+    `);
+    await sleep(90);
+    const currentMoved = await page.gameEvaluate(`
+      const mine=$enemies.find((enemy)=>enemy.type==='mine'),lancer=$enemies.find((enemy)=>enemy.type==='lancer'),shard=shards[0];
+      return {active:$state.environmentActive,player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x,
+        mineAi:mine.velocity.x,lancerAi:lancer.velocity.x,mineEnvironment:mine.environmentVelocity?.x,lancerEnvironment:lancer.environmentVelocity?.x};
+    `);
+    assert.equal(currentMoved.active, true);
+    for(const body of ['player','mine','lancer','shard']) assert.ok(currentMoved[body]>currentStart[body], `current did not move ${body}: ${JSON.stringify({currentStart,currentMoved})}`);
+    assert.ok(Math.abs(currentMoved.mineAi)<1e-9&&Math.abs(currentMoved.lancerAi)<1e-9, `current leaked into AI velocity: ${JSON.stringify(currentMoved)}`);
+    assert.ok(currentMoved.mineEnvironment>0&&currentMoved.lancerEnvironment>0, `current environment velocity missing: ${JSON.stringify(currentMoved)}`);
+    await sleep(180);
+    const currentEnded = await page.gameEvaluate(`
+      const mine=$enemies.find((enemy)=>enemy.type==='mine'),lancer=$enemies.find((enemy)=>enemy.type==='lancer');
+      return {active:$state.environmentActive,mine:mine.group.position.x,lancer:lancer.group.position.x,mineAi:mine.velocity.x,lancerAi:lancer.velocity.x,
+        mineEnvironment:mine.environmentVelocity?.x,lancerEnvironment:lancer.environmentVelocity?.x};
+    `);
+    await sleep(90);
+    const currentSettled = await page.gameEvaluate(`
+      const mine=$enemies.find((enemy)=>enemy.type==='mine'),lancer=$enemies.find((enemy)=>enemy.type==='lancer');
+      return {mine:mine.group.position.x,lancer:lancer.group.position.x,mineAi:mine.velocity.x,lancerAi:lancer.velocity.x};
+    `);
+    assert.equal(currentEnded.active, false);
+    assert.deepEqual({ mineAi:currentEnded.mineAi,lancerAi:currentEnded.lancerAi,mineEnvironment:currentEnded.mineEnvironment,lancerEnvironment:currentEnded.lancerEnvironment },
+      { mineAi:0,lancerAi:0,mineEnvironment:0,lancerEnvironment:0 });
+    assert.ok(Math.abs(currentSettled.mine-currentEnded.mine)<1e-6&&Math.abs(currentSettled.lancer-currentEnded.lancer)<1e-6,
+      `stationary enemies jumped after current ended: ${JSON.stringify({currentEnded,currentSettled})}`);
+
+    const gravityStart = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=2;$state.stageQueue=[];$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      input.keys.clear();input.touch.set(0,0);$player.position.set(7,4);$player.velocity.set(0,0);syncPlayerTransform();
+      const mine=createMine(new THREE.Vector2(3,3));mine.stateTimer=10;mine.velocity.set(0,0);
+      const lancer=createLancer(new THREE.Vector2(3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
+      const shard=spawnShard(new THREE.Vector2(7,-4));shard.velocity.set(0,0);
+      $state.environmentActive=true;$state.environmentElapsed=4;$state.environmentTimer=0;
+      environmentFrame=getEnvironmentFrame('star-forge',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);
+      return {player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x};
+    `);
+    await sleep(90);
+    const gravityMoved = await page.gameEvaluate(`
+      const mine=$enemies.find((enemy)=>enemy.type==='mine'),lancer=$enemies.find((enemy)=>enemy.type==='lancer'),shard=shards[0];
+      return {active:$state.environmentActive,player:$player.position.x,mine:mine.group.position.x,lancer:lancer.group.position.x,shard:shard.group.position.x,
+        mineAi:mine.velocity.x,lancerAi:lancer.velocity.x,mineEnvironment:mine.environmentVelocity?.x,lancerEnvironment:lancer.environmentVelocity?.x};
+    `);
+    assert.equal(gravityMoved.active, true);
+    for(const body of ['player','mine','lancer','shard']) assert.ok(gravityMoved[body]<gravityStart[body], `gravity did not move ${body}: ${JSON.stringify({gravityStart,gravityMoved})}`);
+    assert.ok(Math.abs(gravityMoved.mineAi)<1e-9&&Math.abs(gravityMoved.lancerAi)<1e-9, `gravity leaked into AI velocity: ${JSON.stringify(gravityMoved)}`);
+    assert.ok(gravityMoved.mineEnvironment<0&&gravityMoved.lancerEnvironment<0, `gravity environment velocity missing: ${JSON.stringify(gravityMoved)}`);
+
+    assert.deepEqual({ ...contracts.largeEnvironmentStep,timer:Number(contracts.largeEnvironmentStep.timer.toFixed(3)) }, {
+      phase:'delay',active:false,elapsed:0,timer:7.026,events:3,sequence:4,
+    });
+    assert.equal(contracts.smallEnvironmentSteps.phase, contracts.largeEnvironmentStep.phase);
+    assert.equal(contracts.smallEnvironmentSteps.active, contracts.largeEnvironmentStep.active);
+    assert.equal(contracts.smallEnvironmentSteps.events, contracts.largeEnvironmentStep.events);
+    assert.equal(contracts.smallEnvironmentSteps.sequence, contracts.largeEnvironmentStep.sequence);
+    assert.ok(Math.abs(contracts.smallEnvironmentSteps.elapsed-contracts.largeEnvironmentStep.elapsed)<0.02,
+      `large environment step lost local elapsed: ${JSON.stringify({large:contracts.largeEnvironmentStep,small:contracts.smallEnvironmentSteps})}`);
+    assert.ok(Math.abs(contracts.smallEnvironmentSteps.timer-contracts.largeEnvironmentStep.timer)<0.02,
+      `large environment step lost next delay: ${JSON.stringify({large:contracts.largeEnvironmentStep,small:contracts.smallEnvironmentSteps})}`);
+    assert.deepEqual({ ...contracts.environmentRollover,enemyX:Number(contracts.environmentRollover.enemyX.toFixed(5)),environmentVelocity:Number(contracts.environmentRollover.environmentVelocity.toFixed(3)) },
+      { phase:'active',active:true,events:1,enemyX:0.00175,environmentVelocity:0.035 });
   });
 }
 
@@ -2147,6 +2249,8 @@ async function runtimeGuardScenario() {
       bad.velocity.y=Infinity;
       const missingVelocity=spawnEnemy('chaser',new THREE.Vector2(0,0));
       delete missingVelocity.velocity;
+      const badEnvironmentVelocity=spawnEnemy('chaser',new THREE.Vector2(4,4));
+      badEnvironmentVelocity.environmentVelocity.set(NaN,Infinity);
       $enemies.push({type:'orphan',dead:false,velocity:null});
       $player.position.x=NaN;
       $state.enemySpawnTimer=Infinity;
@@ -2209,6 +2313,7 @@ async function runtimeGuardScenario() {
       orphans:runtimeStats.orphanGuards,
       cleanup:$state.stats.activeCleanupCount,
       enemies:$enemies.length,
+      environmentVelocityFinite:$enemies.every((enemy)=>Number.isFinite(enemy.environmentVelocity?.x)&&Number.isFinite(enemy.environmentVelocity?.y)),
       playerFinite:Number.isFinite($player.position.x)&&Number.isFinite($player.position.y),
       spawnSentinel:Number.isFinite($state.enemySpawnTimer)?'finite':String($state.enemySpawnTimer),
       particles:particles.length,
@@ -2232,7 +2337,8 @@ async function runtimeGuardScenario() {
     }`);
     assert.ok(healed.guards > 0, `finite guard did not run: ${JSON.stringify(healed)}`);
     assert.ok(healed.orphans > 0 && healed.cleanup > 0, `orphan entity was not cleaned: ${JSON.stringify(healed)}`);
-    assert.equal(healed.enemies, 0);
+    assert.equal(healed.enemies, 1);
+    assert.equal(healed.environmentVelocityFinite, true);
     assert.equal(healed.playerFinite, true);
     assert.equal(healed.spawnSentinel, 'Infinity');
     assert.ok(healed.particles <= 300 && healed.trails <= 48);
@@ -2244,6 +2350,22 @@ async function runtimeGuardScenario() {
     assert.ok(Number.isInteger(healed.environment.combatFrame) && healed.environment.combatFrame >= 0);
     assert.ok(healed.particles === 0, `malformed particle remained active: ${JSON.stringify(healed)}`);
     assert.deepEqual(healed.retiredTrail, { visible:false, life:0, maxLife:0, transform:[0,1,0], opacity:0 });
+    await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.stageIndex=0;$state.enemySpawnTimer=9999;$state.formationTimer=9999;$state.shardSpawnTimer=9999;
+      const enemy=spawnEnemy('chaser',new THREE.Vector2(4,4));
+      enemy.environmentProbe=true;enemy.velocity.set(0,0);enemy.environmentVelocity.set(NaN,Infinity);
+      $state.environmentActive=true;$state.environmentElapsed=1;$state.environmentTimer=0;
+      environmentFrame=getEnvironmentFrame('abyss',1);updateEnvironmentVisual(environmentFrame);
+      return true;
+    `);
+    await sleep(80);
+    const environmentVelocityRepair = await page.gameEvaluate(`
+      const enemy=$enemies.find((candidate)=>candidate.environmentProbe);
+      return {present:Boolean(enemy),positionFinite:Boolean(enemy&&Number.isFinite(enemy.group.position.x)&&Number.isFinite(enemy.group.position.y)),
+        velocityFinite:Boolean(enemy&&Number.isFinite(enemy.environmentVelocity.x)&&Number.isFinite(enemy.environmentVelocity.y))};
+    `);
+    assert.deepEqual(environmentVelocityRepair, { present:true,positionFinite:true,velocityFinite:true });
     const qualityLifecycle = await page.gameEvaluate(`const before={dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount};const runtimeHooks=globalThis.__NEON_TIDE_RUNTIME_HOOKS__;runtimeHooks.applyReducedMotionPreference(true);const reduced={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};runtimeHooks.applyReducedMotionPreference(false);const desktop={tier:renderQuality.tier,composer:Boolean(postProcessing?.enabled)};return {before,reduced,desktop,dispose:runtimeStats.composerDisposeCount,refresh:runtimeStats.composerRefreshCount}`);
     assert.deepEqual(qualityLifecycle.reduced, { tier:'reduced-motion', composer:false });
     assert.deepEqual(qualityLifecycle.desktop, { tier:'desktop', composer:true });
