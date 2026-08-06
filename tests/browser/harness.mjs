@@ -447,14 +447,33 @@ export class GamePage {
   }
 
   async tap(selector) {
+    const selectorLiteral = JSON.stringify(selector);
+    const requiresHitTarget = await this.evaluate(`(()=>{
+      const element=document.querySelector(${selectorLiteral});
+      const style=element&&getComputedStyle(element);
+      const rect=element?.getBoundingClientRect();
+      return Boolean(style?.display!=='none'&&style?.visibility!=='hidden'&&rect?.width&&rect?.height);
+    })()`);
+    if (requiresHitTarget) {
+      await this.waitForPage(`(()=>{
+        const element=document.querySelector(${selectorLiteral});
+        const rect=element.getBoundingClientRect();
+        const target=document.elementFromPoint(rect.left+rect.width/2,rect.top+rect.height/2);
+        return target===element||element.contains(target);
+      })()`);
+    }
     const point = await this.evaluate(`(()=>{
-      const rect=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
+      const rect=document.querySelector(${selectorLiteral}).getBoundingClientRect();
       return {x:rect.left+rect.width/2,y:rect.top+rect.height/2};
     })()`);
+    await this.client.send('Page.bringToFront');
     await this.client.send('Input.dispatchTouchEvent', {
       type: 'touchStart',
       touchPoints: [{ x: point.x, y: point.y, radiusX: 2, radiusY: 2, force: 1, id: 1 }],
     });
+    // Let Chrome's input pipeline observe the contact before ending it. This prevents
+    // a transition-covered control from intermittently losing its synthesized click.
+    await sleep(32);
     await this.client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   }
 

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { sleep, withPage } from './harness.mjs';
+import { PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_MS, withPage } from './harness.mjs';
 
 async function desktopCoreScenario() {
   await withPage('desktop-core', {}, async (page) => {
