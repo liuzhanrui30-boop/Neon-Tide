@@ -112,10 +112,10 @@ test('session reports authoritative hull effects and reset effects through onCha
   }]);
 
   changes.length = 0;
-  assert.equal(session.setHull(5, { maxHull: 6 }), true);
+  assert.equal(session.upgradeHullCapacity(6, { repair: 3 }), true);
   assert.equal(session.snapshot().hull, 5);
   assert.equal(session.snapshot().maxHull, 6);
-  assert.deepEqual(changes[0].detail, { hullSync: true });
+  assert.deepEqual(changes[0].detail, { hullCapacityUpgrade: { maxHull: 6, repair: 3 } });
 
   changes.length = 0;
   assert.equal(session.reset(), true);
@@ -124,4 +124,69 @@ test('session reports authoritative hull effects and reset effects through onCha
   assert.equal(changes[0].mode, 'menu');
   assert.equal(changes[0].hull, 3);
   assert.deepEqual(changes[0].detail, { reset: true });
+});
+
+test('hull capacity upgrades are scoped to one run', () => {
+  const session = createGameSession({ development: true, maxHull: 3 });
+  session.startRun('standard', 7);
+  session.startRoom({ id: 'room-1' });
+
+  assert.equal(session.damageHull(1), true);
+  assert.equal(session.upgradeHullCapacity(4, { repair: 1 }), true);
+  assert.deepEqual(
+    { hull: session.snapshot().hull, maxHull: session.snapshot().maxHull },
+    { hull: 3, maxHull: 4 },
+  );
+
+  session.completeRoom({ outcome: 'defeat', reason: 'test' });
+  assert.equal(session.startRun('standard', 8), true);
+  assert.deepEqual(
+    { hull: session.snapshot().hull, maxHull: session.snapshot().maxHull },
+    { hull: 3, maxHull: 3 },
+  );
+});
+
+test('compatibility hull reconciliation preserves defeat invariants', () => {
+  const session = createGameSession({ development: true });
+  session.startRun('standard', 7);
+  session.startRoom({ id: 'room-1' });
+
+  assert.equal(session.reconcileCompatibilityHull(0, { maxHull: 4 }), true);
+  assert.deepEqual(
+    { mode: session.snapshot().mode, hull: session.snapshot().hull, maxHull: session.snapshot().maxHull },
+    { mode: 'defeat', hull: 0, maxHull: 4 },
+  );
+  assert.throws(
+    () => session.reconcileCompatibilityHull(3, { maxHull: 4 }),
+    /Invalid GameSession transition defeat -> playing/,
+  );
+  assert.equal(session.snapshot().hull, 0);
+
+  const production = createGameSession({ development: false });
+  production.startRun('standard', 8);
+  production.startRoom({ id: 'room-2' });
+  production.reconcileCompatibilityHull(0);
+  assert.equal(production.reconcileCompatibilityHull(3), false);
+  assert.deepEqual(
+    { mode: production.snapshot().mode, hull: production.snapshot().hull },
+    { mode: 'defeat', hull: 0 },
+  );
+});
+
+test('authoritative hull APIs validate finite positive capacity', () => {
+  assert.throws(() => createGameSession({ maxHull: Number.POSITIVE_INFINITY }), /positive and finite/);
+  const session = createGameSession({ development: true });
+  session.startRun('standard', 7);
+  session.startRoom({ id: 'room-1' });
+
+  for (const invalidMaxHull of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => session.upgradeHullCapacity(invalidMaxHull, { repair: 1 }),
+      /maxHull must be positive and finite/,
+    );
+    assert.throws(
+      () => session.reconcileCompatibilityHull(2, { maxHull: invalidMaxHull }),
+      /maxHull must be positive and finite/,
+    );
+  }
 });

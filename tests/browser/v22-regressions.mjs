@@ -2395,6 +2395,15 @@ async function repairAndAriaScenario() {
       text: '船体 4 / 4',
     });
 
+    await page.gameEvaluate(`finishRun('gameover','hullBreach');return true`);
+    await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
+    await page.click('#primary-button');
+    await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    const replayHull = await page.gameEvaluate(`const snapshot=globalThis.__NEON_TIDE_V3__.session.snapshot();return {
+      maxHealth:$state.maxHealth,health:$state.health,maxHull:snapshot.maxHull,hull:snapshot.hull,mode:snapshot.mode,
+    }`);
+    assert.deepEqual(replayHull, { maxHealth:3,health:3,maxHull:3,hull:3,mode:'playing' });
+
     const bossAria = await page.gameEvaluate(`
       clearWorldEntities();
       $state.bossSpawned=false;

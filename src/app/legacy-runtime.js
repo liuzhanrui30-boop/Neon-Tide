@@ -2533,9 +2533,7 @@ function applyUpgrade(id) {
   if (!upgrade || state.ownedUpgrades.includes(id)) return false;
   state.ownedUpgrades.push(id);
   if (id === "repair-swarm") {
-    state.maxHealth = Math.max(state.maxHealth, 4);
-    state.health = Math.min(state.maxHealth, state.health + upgrade.effect);
-    session.setHull(state.health, { maxHull: state.maxHealth });
+    session.upgradeHullCapacity(Math.max(state.maxHealth, 4), { repair: upgrade.effect });
     syncHealthPips();
   }
   return true;
@@ -3823,7 +3821,8 @@ function destroyEnemy(enemy, source) {
 
 function damagePlayer(enemy) {
   if (projectedHull !== null && (state.health !== projectedHull || state.maxHealth !== projectedMaxHull)) {
-    session.setHull(state.health, { maxHull: state.maxHealth });
+    const reconciled = session.reconcileCompatibilityHull(state.health, { maxHull: state.maxHealth });
+    if (!reconciled || session.snapshot().mode === "defeat") return false;
   }
   if (!session.damageHull(1)) return false;
   enemy.nearMissCandidate = false;
@@ -4694,7 +4693,7 @@ function simulate(dt) {
   simulationSteps += 1;
   lastSimulationSeconds = dt;
   if (projectedHull !== null && (state.health !== projectedHull || state.maxHealth !== projectedMaxHull)) {
-    session.setHull(state.health, { maxHull: state.maxHealth });
+    session.reconcileCompatibilityHull(state.health, { maxHull: state.maxHealth });
   }
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
   const { wallDt, simDt } = computeFrameDeltas(dt, simulationScale);

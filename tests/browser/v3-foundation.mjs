@@ -103,6 +103,16 @@ async function v3FoundationLoopScenario() {
     assert.equal(replay.loop.paused, false);
     assert.ok(replay.events.dropped === 0, JSON.stringify(replay.events));
 
+    await page.gameEvaluate(`$state.health=0;return true`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'defeat'`);
+    const compatibilityDefeat = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.equal(compatibilityDefeat.session.hull, 0);
+    assert.equal(compatibilityDefeat.legacy.health, 0);
+    assert.equal(compatibilityDefeat.legacy.mode, 'gameover');
+
+    await page.trustedClick('#primary-button');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
+
     await page.gameEvaluate(`$state.elapsed=12;return $state.elapsed`);
     await page.click('#pause-button');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().loop.paused === true`);

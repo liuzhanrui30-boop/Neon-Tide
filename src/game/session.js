@@ -42,8 +42,8 @@ export function createGameSession(options = {}) {
   const events = options.events ?? null;
   const onTransition = options.onTransition ?? (() => {});
   const onChange = options.onChange ?? (() => {});
-  const maxHull = options.maxHull ?? 3;
-  if (!Number.isInteger(maxHull) || maxHull <= 0) throw new TypeError('maxHull must be a positive integer');
+  const baseMaxHull = options.maxHull ?? 3;
+  if (!Number.isFinite(baseMaxHull) || baseMaxHull <= 0) throw new TypeError('maxHull must be positive and finite');
   if (events && typeof events.emit !== 'function') throw new TypeError('events must expose emit(type, payload)');
   if (typeof onTransition !== 'function') throw new TypeError('onTransition must be a function');
   if (typeof onChange !== 'function') throw new TypeError('onChange must be a function');
@@ -55,8 +55,8 @@ export function createGameSession(options = {}) {
     chapterIndex: 0,
     room: null,
     build: {},
-    hull: maxHull,
-    maxHull,
+    hull: baseMaxHull,
+    maxHull: baseMaxHull,
     stats: createStats(),
     terminalReason: null,
     revision: 0,
@@ -107,7 +107,8 @@ export function createGameSession(options = {}) {
     state.chapterIndex = 0;
     state.room = null;
     state.build = {};
-    state.hull = state.maxHull;
+    state.hull = baseMaxHull;
+    state.maxHull = baseMaxHull;
     state.stats = createStats();
     state.terminalReason = null;
     events?.clear?.();
@@ -184,9 +185,33 @@ export function createGameSession(options = {}) {
     return true;
   }
 
-  function setHull(hull, { maxHull: requestedMaxHull = state.maxHull } = {}) {
+  function upgradeHullCapacity(requestedMaxHull, { repair = 0 } = {}) {
+    if (!Number.isFinite(requestedMaxHull) || requestedMaxHull <= 0) {
+      throw new TypeError('maxHull must be positive and finite');
+    }
+    if (!Number.isFinite(repair) || repair < 0) throw new TypeError('repair must be non-negative and finite');
+    if (!['playing', 'paused', 'upgrade'].includes(state.mode)) return invalid('playing');
+    if (requestedMaxHull < state.maxHull) throw new TypeError('hull capacity upgrades cannot reduce maxHull');
+    const previous = snapshot();
+    state.maxHull = requestedMaxHull;
+    state.hull = Math.min(state.maxHull, state.hull + repair);
+    state.revision += 1;
+    const changeRecord = Object.freeze({
+      previous,
+      current: snapshot(),
+      detail: Object.freeze({ hullCapacityUpgrade: Object.freeze({ maxHull: requestedMaxHull, repair }) }),
+    });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
+    return true;
+  }
+
+  function reconcileCompatibilityHull(hull, { maxHull: requestedMaxHull = state.maxHull } = {}) {
     if (!Number.isFinite(hull) || hull < 0) throw new TypeError('hull must be a non-negative finite number');
-    if (!Number.isInteger(requestedMaxHull) || requestedMaxHull <= 0) throw new TypeError('maxHull must be a positive integer');
+    if (!Number.isFinite(requestedMaxHull) || requestedMaxHull <= 0) {
+      throw new TypeError('maxHull must be positive and finite');
+    }
+    if (!['playing', 'paused', 'upgrade'].includes(state.mode)) return invalid('playing');
     const previous = snapshot();
     state.maxHull = requestedMaxHull;
     state.hull = Math.min(requestedMaxHull, hull);
@@ -194,10 +219,14 @@ export function createGameSession(options = {}) {
     const changeRecord = Object.freeze({
       previous,
       current: snapshot(),
-      detail: Object.freeze({ hullSync: true }),
+      detail: Object.freeze({ hullCompatibilitySync: true }),
     });
     events?.emit('session:changed', changeRecord);
     onChange(changeRecord);
+    if (state.hull <= 0) {
+      state.terminalReason = 'hullBreach';
+      return transition('defeat', { reason: 'hullBreach', compatibilitySync: true });
+    }
     return true;
   }
 
@@ -210,8 +239,8 @@ export function createGameSession(options = {}) {
       chapterIndex: 0,
       room: null,
       build: {},
-      hull: maxHull,
-      maxHull,
+      hull: baseMaxHull,
+      maxHull: baseMaxHull,
       stats: createStats(),
       terminalReason: null,
       revision: previous.revision + 1,
@@ -225,5 +254,16 @@ export function createGameSession(options = {}) {
     return true;
   }
 
-  return Object.freeze({ startRun, startRoom, pause, resume, completeRoom, damageHull, setHull, reset, snapshot });
+  return Object.freeze({
+    startRun,
+    startRoom,
+    pause,
+    resume,
+    completeRoom,
+    damageHull,
+    upgradeHullCapacity,
+    reconcileCompatibilityHull,
+    reset,
+    snapshot,
+  });
 }
