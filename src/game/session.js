@@ -84,10 +84,7 @@ export function createGameSession(options = {}) {
     return false;
   }
 
-  function transition(nextMode, detail = {}) {
-    if (!MODE_SET.has(nextMode)) return invalid(nextMode);
-    if (nextMode === state.mode || !ALLOWED_TRANSITIONS[state.mode]?.has(nextMode)) return invalid(nextMode);
-    const previous = snapshot();
+  function publishTransition(previous, nextMode, detail = {}) {
     state.mode = nextMode;
     state.revision += 1;
     const current = snapshot();
@@ -96,6 +93,12 @@ export function createGameSession(options = {}) {
     onTransition(transitionRecord);
     onChange(transitionRecord);
     return true;
+  }
+
+  function transition(nextMode, detail = {}) {
+    if (!MODE_SET.has(nextMode)) return invalid(nextMode);
+    if (nextMode === state.mode || !ALLOWED_TRANSITIONS[state.mode]?.has(nextMode)) return invalid(nextMode);
+    return publishTransition(snapshot(), nextMode, detail);
   }
 
   function startRun(runMode, seed) {
@@ -215,6 +218,13 @@ export function createGameSession(options = {}) {
     const previous = snapshot();
     state.maxHull = requestedMaxHull;
     state.hull = Math.min(requestedMaxHull, hull);
+    if (state.hull <= 0) {
+      state.terminalReason = 'hullBreach';
+      return publishTransition(previous, 'defeat', {
+        reason: 'hullBreach',
+        hullCompatibilitySync: true,
+      });
+    }
     state.revision += 1;
     const changeRecord = Object.freeze({
       previous,
@@ -223,10 +233,6 @@ export function createGameSession(options = {}) {
     });
     events?.emit('session:changed', changeRecord);
     onChange(changeRecord);
-    if (state.hull <= 0) {
-      state.terminalReason = 'hullBreach';
-      return transition('defeat', { reason: 'hullBreach', compatibilitySync: true });
-    }
     return true;
   }
 

@@ -173,6 +173,52 @@ test('compatibility hull reconciliation preserves defeat invariants', () => {
   );
 });
 
+test('terminal compatibility reconciliation exposes only an atomic defeat snapshot', () => {
+  const events = createEventQueue();
+  const changes = [];
+  let session;
+  session = createGameSession({
+    development: true,
+    events,
+    onChange: ({ previous, current, detail }) => changes.push({
+      previous,
+      current,
+      detail,
+      observed: session.snapshot(),
+    }),
+  });
+  session.startRun('standard', 9);
+  session.startRoom({ id: 'room-atomic' });
+  changes.length = 0;
+  events.clear();
+  const revisionBefore = session.snapshot().revision;
+
+  assert.equal(session.reconcileCompatibilityHull(0, { maxHull: 4 }), true);
+
+  assert.equal(changes.length, 1);
+  assert.deepEqual(
+    changes.map(({ current, observed }) => ({
+      current: { mode: current.mode, hull: current.hull },
+      observed: { mode: observed.mode, hull: observed.hull },
+    })),
+    [{ current: { mode: 'defeat', hull: 0 }, observed: { mode: 'defeat', hull: 0 } }],
+  );
+  assert.equal(changes[0].current.revision, revisionBefore + 1);
+
+  const drained = [];
+  events.drain((event) => drained.push(event));
+  assert.deepEqual(drained.map(({ type }) => type), ['session:transition']);
+  assert.deepEqual(
+    drained.map(({ payload }) => ({ mode: payload.current.mode, hull: payload.current.hull })),
+    [{ mode: 'defeat', hull: 0 }],
+  );
+  assert.equal(
+    [...changes.map(({ current }) => current), ...drained.map(({ payload }) => payload.current)]
+      .some(({ mode, hull }) => ['playing', 'paused', 'upgrade'].includes(mode) && hull === 0),
+    false,
+  );
+});
+
 test('authoritative hull APIs validate finite positive capacity', () => {
   assert.throws(() => createGameSession({ maxHull: Number.POSITIVE_INFINITY }), /positive and finite/);
   const session = createGameSession({ development: true });
