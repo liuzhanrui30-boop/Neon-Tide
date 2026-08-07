@@ -228,9 +228,18 @@ export class GamePage {
       ],
     });
 
+    // Browser scenarios share one Chrome profile. Keep v3 checkpoint state
+    // scoped to each scenario's initial document while allowing a scenario to
+    // verify its own reload/resume path below.
+    const checkpointCleanup = await this.client.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `try { localStorage.removeItem('neon-tide:v3:checkpoint'); } catch {}`,
+    });
     const loaded = this.client.waitFor('Page.loadEventFired');
     await this.client.send('Page.navigate', { url: APP_URL });
     await loaded;
+    await this.client.send('Page.removeScriptToEvaluateOnNewDocument', {
+      identifier: checkpointCleanup.identifier,
+    });
     await this.waitForPage(`document.readyState === 'complete' && Boolean(document.querySelector('canvas'))`);
     await this.evaluate(`document.fonts?.ready?.then(()=>true) ?? true`);
     await this.waitForPage(`document.activeElement?.id === 'primary-button'`);

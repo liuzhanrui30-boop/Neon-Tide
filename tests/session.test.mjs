@@ -109,10 +109,11 @@ test('Standard saves only completed chapter entries and restores that snapshot o
   session.startRoom({ id: 'chapter-0-room', chapterIndex: 0 });
   assert.equal(runSave.getStatus().saves, 0, 'a room start is not a checkpoint');
   session.upgradeHullCapacity(4, { repair: 1 });
+  session.setBuild({ ownedUpgrades: ['repair-swarm'], maxHull: 4 });
   assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 2, score: 50 }), true);
   assert.equal(session.snapshot().mode, 'chapterComplete');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed: 77, chapterIndex: 2, build: {}, hull: 4, maxHull: 4,
+    version: 1, mode: 'standard', seed: 77, chapterIndex: 2, build: { ownedUpgrades: ['repair-swarm'], maxHull: 4 }, hull: 4,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 50 }, savedAt: 1234,
   });
   const savesAfterTransition = runSave.getStatus().saves;
@@ -124,6 +125,30 @@ test('Standard saves only completed chapter entries and restores that snapshot o
     { mode: session.snapshot().mode, runMode: session.snapshot().runMode, chapterIndex: session.snapshot().chapterIndex, hull: session.snapshot().hull, maxHull: session.snapshot().maxHull, room: session.snapshot().room },
     { mode: 'briefing', runMode: 'standard', chapterIndex: 2, hull: 4, maxHull: 4, room: null },
   );
+});
+
+
+test('chapter checkpoint is persisted before transition observers can start the next room', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  let session;
+  session = createGameSession({
+    development: true,
+    runSave,
+    now: () => 22,
+    onChange: ({ current }) => {
+      if (current.mode === 'chapterComplete') session.startRoom({ id: 'reentrant-next-room', chapterIndex: 1 });
+    },
+  });
+  session.startRun('standard', 12);
+  session.startRoom({ id: 'chapter-0', chapterIndex: 0 });
+
+  assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 1 }), true);
+  assert.equal(session.snapshot().mode, 'playing');
+  assert.deepEqual(runSave.load(), {
+    version: 1, mode: 'standard', seed: 12, chapterIndex: 1, build: {}, hull: 3,
+    stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 22,
+  });
 });
 
 test('checkpoint restore and corrupt storage keep session snapshots valid', () => {

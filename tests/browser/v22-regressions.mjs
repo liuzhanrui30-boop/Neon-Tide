@@ -366,21 +366,36 @@ async function desktopCoreScenario() {
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
     await page.waitForPage(`document.activeElement?.tagName === 'CANVAS'`);
 
-    // v3 checkpoints are saved only at the completed chapter boundary. Verify
-    // the real browser storage path through a reload, then prove corrupt data
-    // falls back to a usable menu instead of booting a partial session.
-    const checkpointSaved = await page.evaluate(`(()=>{
-      const session=globalThis.__NEON_TIDE_V3__.session;
-      const completed=session.completeRoom({nextMode:'chapterComplete',chapterIndex:2});
-      return {completed,session:session.snapshot(),saved:JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'))};
+    // Trigger a real compatibility realm handoff. The legacy selection API is
+    // used only to make Repair Swarm deterministic; updateStage performs the
+    // actual chapterComplete -> checkpoint -> next-room routing.
+    await page.gameEvaluate(`
+      applyUpgrade('repair-swarm');
+      $state.stageIndex=1;
+      $state.stageQueue=[];
+      $state.upgradeTriggered=[true,false];
+      $state.elapsed=GAME.stageBoundaries[2];
+      $state.timeLeft=GAME.bossStart-$state.elapsed;
+      return {owned:[...$state.ownedUpgrades],health:$state.health,maxHealth:$state.maxHealth};
+    `);
+    await page.waitForPage(`(()=>{
+      const raw=localStorage.getItem('neon-tide:v3:checkpoint');
+      if(!raw) return false;
+      try { return JSON.parse(raw).chapterIndex===2; } catch { return false; }
     })()`);
-    assert.equal(checkpointSaved.completed, true);
-    assert.deepEqual(
-      { mode:checkpointSaved.session.mode, chapterIndex:checkpointSaved.session.chapterIndex },
-      { mode:'chapterComplete', chapterIndex:2 },
-    );
+    const checkpointSaved = await page.evaluate(`(()=>{
+      const saved=JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'));
+      const live=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();
+      return {saved,live};
+    })()`);
     assert.equal(checkpointSaved.saved.chapterIndex, 2);
     assert.equal(checkpointSaved.saved.mode, 'standard');
+    assert.equal('maxHull' in checkpointSaved.saved, false, 'v1 checkpoint must have the exact schema');
+    assert.ok(checkpointSaved.saved.build.ownedUpgrades.includes('repair-swarm'));
+    assert.equal(checkpointSaved.saved.build.maxHull, 4);
+    assert.equal(checkpointSaved.saved.hull, 4);
+    assert.ok(checkpointSaved.live.session.stats.roomsStarted > checkpointSaved.saved.stats.roomsStarted,
+      'next room began before the chapter-entry checkpoint was written');
 
     let loaded = page.client.waitFor('Page.loadEventFired');
     await page.client.send('Page.navigate', { url: APP_URL });
@@ -393,7 +408,36 @@ async function desktopCoreScenario() {
     );
     assert.ok(restored.persistence.loads >= 1, JSON.stringify(restored.persistence));
     await page.startGame();
-    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.snapshot().chapterIndex === 2`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
+    const continued = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.deepEqual(
+      {
+        mode: continued.session.mode,
+        runMode: continued.session.runMode,
+        chapterIndex: continued.session.chapterIndex,
+        build: continued.session.build,
+        hull: continued.session.hull,
+        maxHull: continued.session.maxHull,
+        legacyMode: continued.legacy.mode,
+        legacyStage: continued.legacy.stageIndex,
+        legacyHull: continued.legacy.health,
+        legacyMaxHull: continued.legacy.maxHealth,
+        legacyBuild: continued.legacy.ownedUpgrades,
+      },
+      {
+        mode: 'playing',
+        runMode: 'standard',
+        chapterIndex: 2,
+        build: checkpointSaved.saved.build,
+        hull: 4,
+        maxHull: 4,
+        legacyMode: 'playing',
+        legacyStage: 2,
+        legacyHull: 4,
+        legacyMaxHull: 4,
+        legacyBuild: checkpointSaved.saved.build.ownedUpgrades,
+      },
+    );
 
     await page.evaluate(`localStorage.setItem('neon-tide:v3:checkpoint','{broken')`);
     loaded = page.client.waitFor('Page.loadEventFired');

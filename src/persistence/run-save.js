@@ -1,5 +1,6 @@
 const CURRENT_VERSION = 1;
 const DEFAULT_KEY = 'neon-tide:v3:checkpoint';
+const CHECKPOINT_KEYS = new Set(['version', 'mode', 'seed', 'chapterIndex', 'build', 'hull', 'stats', 'savedAt']);
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -18,13 +19,14 @@ function isFiniteNonNegativeInteger(value) {
 
 export function isRunCheckpoint(value) {
   if (!isRecord(value)
+    || Object.keys(value).length !== CHECKPOINT_KEYS.size
+    || Object.keys(value).some((key) => !CHECKPOINT_KEYS.has(key))
     || value.version !== CURRENT_VERSION
     || value.mode !== 'standard'
     || !Number.isFinite(value.seed)
     || !isFiniteNonNegativeInteger(value.chapterIndex)
     || !isRecord(value.build)
     || !Number.isFinite(value.hull) || value.hull <= 0
-    || (value.maxHull !== undefined && (!Number.isFinite(value.maxHull) || value.maxHull < value.hull))
     || !isRecord(value.stats)
     || !Number.isFinite(value.savedAt) || value.savedAt < 0) {
     return false;

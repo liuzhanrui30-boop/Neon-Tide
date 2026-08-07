@@ -2361,11 +2361,18 @@ function transitionTo(nextMode, payload = {}) {
   return changed;
 }
 
+function applySessionBuild(build) {
+  const requested = Array.isArray(build?.ownedUpgrades) ? build.ownedUpgrades : [];
+  const known = new Set(UPGRADES.map((upgrade) => upgrade.id));
+  state.ownedUpgrades = [...new Set(requested.filter((id) => typeof id === "string" && known.has(id)))];
+}
+
 function applySession(snapshot) {
   const nextMode = SESSION_TO_LEGACY_MODE[snapshot.mode];
   if (!nextMode) return false;
   state.health = snapshot.hull;
   state.maxHealth = snapshot.maxHull;
+  applySessionBuild(snapshot.build);
   projectedHull = snapshot.hull;
   projectedMaxHull = snapshot.maxHull;
   state.terminalReason = snapshot.terminalReason;
@@ -2548,8 +2555,13 @@ function applyUpgrade(id) {
   const upgrade = UPGRADES.find((candidate) => candidate.id === id);
   if (!upgrade || state.ownedUpgrades.includes(id)) return false;
   state.ownedUpgrades.push(id);
+  const requestedMaxHull = id === "repair-swarm" ? Math.max(state.maxHealth, 4) : state.maxHealth;
+  session.setBuild({
+    ownedUpgrades: [...state.ownedUpgrades],
+    maxHull: requestedMaxHull,
+  });
   if (id === "repair-swarm") {
-    session.upgradeHullCapacity(Math.max(state.maxHealth, 4), { repair: upgrade.effect });
+    session.upgradeHullCapacity(requestedMaxHull, { repair: upgrade.effect });
     syncHealthPips();
   }
   return true;
@@ -4497,6 +4509,18 @@ function updateStage() {
   if (state.mode !== "playing" || state.stageQueue.length === 0) return;
 
   const nextStageIndex = state.stageQueue.shift();
+  // Compatibility stages now respect the authoritative campaign boundary:
+  // persist the completed chapter, then create the next room. This keeps the
+  // legacy presentation from silently skipping Standard checkpoints.
+  if (!session.completeRoom({
+    nextMode: "chapterComplete",
+    chapterIndex: nextStageIndex,
+    score: 0,
+  })) return;
+  if (!session.startRoom({
+    id: `v2.2-compatibility-chapter-${nextStageIndex}`,
+    chapterIndex: nextStageIndex,
+  })) return;
   enterStage(nextStageIndex);
   if ((nextStageIndex === 1 || nextStageIndex === 2) && !state.upgradeTriggered[nextStageIndex - 1]) {
     state.upgradeTriggered[nextStageIndex - 1] = true;
@@ -4855,7 +4879,9 @@ function getDebugSnapshot() {
     mode: state.mode,
     elapsed: state.elapsed,
     health: state.health,
+    maxHealth: state.maxHealth,
     stageIndex: state.stageIndex,
+    ownedUpgrades: [...state.ownedUpgrades],
     runFinished: state.runFinished,
     simulationSteps,
     renderCalls,

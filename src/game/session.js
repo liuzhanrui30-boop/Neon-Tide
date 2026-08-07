@@ -93,10 +93,13 @@ export function createGameSession(options = {}) {
     return false;
   }
 
-  function publishTransition(previous, nextMode, detail = {}) {
+  function publishTransition(previous, nextMode, detail = {}, beforeNotify = null) {
     state.mode = nextMode;
     state.revision += 1;
     const current = snapshot();
+    // The checkpoint is part of committing a chapter boundary. Write it before
+    // callbacks can synchronously start the following room.
+    beforeNotify?.(current);
     const transitionRecord = Object.freeze({ previous, current, detail: cloneValue(detail) });
     events?.emit('session:transition', transitionRecord);
     onTransition(transitionRecord);
@@ -104,10 +107,10 @@ export function createGameSession(options = {}) {
     return true;
   }
 
-  function transition(nextMode, detail = {}) {
+  function transition(nextMode, detail = {}, beforeNotify = null) {
     if (!MODE_SET.has(nextMode)) return invalid(nextMode);
     if (nextMode === state.mode || !ALLOWED_TRANSITIONS[state.mode]?.has(nextMode)) return invalid(nextMode);
-    return publishTransition(snapshot(), nextMode, detail);
+    return publishTransition(snapshot(), nextMode, detail, beforeNotify);
   }
 
   function checkpointFromState() {
@@ -120,20 +123,22 @@ export function createGameSession(options = {}) {
       chapterIndex: state.chapterIndex,
       build: cloneValue(state.build),
       hull: state.hull,
-      // `maxHull` is an additive compatibility field. The required v1 schema
-      // remains readable by consumers that only need current hull.
-      maxHull: state.maxHull,
       stats: cloneValue(state.stats),
       savedAt,
     };
   }
 
-  function saveChapterCheckpoint() {
+  function saveChapterCheckpoint({ emit = true } = {}) {
     if (state.runMode !== 'standard' || state.mode !== 'chapterComplete' || !runSave) return false;
     const checkpoint = checkpointFromState();
     const saved = runSave.save(checkpoint);
-    if (saved) events?.emit('session:checkpoint-saved', { checkpoint: cloneValue(checkpoint) });
-    return saved;
+    if (saved && emit) events?.emit('session:checkpoint-saved', { checkpoint: cloneValue(checkpoint) });
+    return saved ? checkpoint : null;
+  }
+
+  function maxHullFromBuild(build) {
+    const configured = build?.maxHull;
+    return Number.isFinite(configured) && configured >= baseMaxHull ? configured : baseMaxHull;
   }
 
   function isCheckpoint(checkpoint) {
@@ -144,7 +149,6 @@ export function createGameSession(options = {}) {
       && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
       && checkpoint.build && typeof checkpoint.build === 'object' && !Array.isArray(checkpoint.build)
       && Number.isFinite(checkpoint.hull) && checkpoint.hull > 0
-      && Number.isFinite(checkpoint.maxHull ?? checkpoint.hull) && (checkpoint.maxHull ?? checkpoint.hull) >= checkpoint.hull
       && checkpoint.stats && typeof checkpoint.stats === 'object' && !Array.isArray(checkpoint.stats)
       && Number.isFinite(checkpoint.savedAt) && checkpoint.savedAt >= 0;
   }
@@ -157,8 +161,8 @@ export function createGameSession(options = {}) {
     state.chapterIndex = checkpoint.chapterIndex;
     state.room = null;
     state.build = cloneValue(checkpoint.build);
-    state.hull = checkpoint.hull;
-    state.maxHull = checkpoint.maxHull ?? Math.max(baseMaxHull, checkpoint.hull);
+    state.maxHull = maxHullFromBuild(state.build);
+    state.hull = Math.min(state.maxHull, checkpoint.hull);
     state.stats = cloneValue(checkpoint.stats);
     state.terminalReason = null;
     const restored = publishTransition(previous, 'briefing', {
@@ -250,9 +254,14 @@ export function createGameSession(options = {}) {
     }
     if (nextMode === 'victory' || nextMode === 'defeat') state.terminalReason = result.reason ?? nextMode;
     if (nextMode === 'defeat') state.hull = 0;
-    const changed = transition(nextMode, { result: cloneValue(result) });
+    let checkpoint = null;
+    const changed = transition(
+      nextMode,
+      { result: cloneValue(result) },
+      nextMode === 'chapterComplete' ? () => { checkpoint = saveChapterCheckpoint({ emit: false }); } : null,
+    );
     if (changed) events?.emit('room:completed', { result: cloneValue(result), nextMode });
-    if (changed && nextMode === 'chapterComplete') saveChapterCheckpoint();
+    if (checkpoint) events?.emit('session:checkpoint-saved', { checkpoint: cloneValue(checkpoint) });
     if (changed && nextMode === 'victory') runSave?.clear();
     if (changed && nextMode === 'defeat') applyDefeatRule();
     return changed;
@@ -298,6 +307,27 @@ export function createGameSession(options = {}) {
       previous,
       current: snapshot(),
       detail: Object.freeze({ hullCapacityUpgrade: Object.freeze({ maxHull: requestedMaxHull, repair }) }),
+    });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
+    return true;
+  }
+
+  function setBuild(build) {
+    if (!build || typeof build !== 'object' || Array.isArray(build)) throw new TypeError('build must be an object');
+    if (!['briefing', 'playing', 'paused', 'upgrade', 'chapterComplete'].includes(state.mode)) return invalid('playing');
+    const previous = snapshot();
+    state.build = cloneValue(build);
+    // Capacity is derived from the versioned build, never from an extra
+    // checkpoint field. Do not let an older/lower build reduce a live run.
+    const buildMaxHull = maxHullFromBuild(state.build);
+    if (buildMaxHull < state.maxHull) state.build.maxHull = state.maxHull;
+    else state.maxHull = buildMaxHull;
+    state.revision += 1;
+    const changeRecord = Object.freeze({
+      previous,
+      current: snapshot(),
+      detail: Object.freeze({ buildChanged: true }),
     });
     events?.emit('session:changed', changeRecord);
     onChange(changeRecord);
@@ -365,6 +395,7 @@ export function createGameSession(options = {}) {
     completeRoom,
     damageHull,
     upgradeHullCapacity,
+    setBuild,
     reconcileCompatibilityHull,
     reset,
     restoreCheckpoint,

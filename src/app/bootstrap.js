@@ -38,10 +38,21 @@ export function bootstrapNeonTide(options = {}) {
       }
       if (current.mode === 'paused') loop?.pause(nowMs);
       else if (previous.mode === 'paused') loop?.resume(nowMs);
+      else if (current.mode === 'chapterComplete' && previous.mode === 'playing') {
+        // The compatibility campaign immediately starts the next authoritative
+        // room after its checkpoint commit. Keep the legacy projection alive
+        // during that synchronous handoff rather than suspending/restarting
+        // audio and render state for a transient mode.
+        return;
+      }
       else if (current.mode === 'briefing' && previous.mode === 'defeat') {
         // Checkpoint restores and Abyss retries both replace the complete run;
         // do not leave compatibility entities, timers, or upgrades alive.
         loop?.reset(nowMs);
+        // Preserve the inherited defeat dialog until the player explicitly
+        // continues a Standard checkpoint. `startGame()` performs the runtime
+        // reset immediately before it opens the restored room.
+        if (current.runMode === 'standard' && detail?.checkpointRestored) return;
         runtime?.reset(current);
         return;
       } else if (current.mode === 'briefing' && ['menu', 'victory'].includes(previous.mode)) loop?.reset(nowMs);

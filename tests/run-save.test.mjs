@@ -18,7 +18,6 @@ function checkpoint(overrides = {}) {
     chapterIndex: 2,
     build: { weapons: ['arc'] },
     hull: 3,
-    maxHull: 4,
     stats: { roomsCompleted: 7 },
     savedAt: 1_725_000_000_000,
     ...overrides,
@@ -55,6 +54,7 @@ test('checkpoint rejects mismatched schemas and storage failures without throwin
   storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(checkpoint({ version: 2 })));
   assert.equal(save.load(), null);
   assert.equal(save.getStatus().corruptions, 1);
+  assert.equal(save.save(checkpoint({ maxHull: 4 })), false, 'v1 rejects unversioned top-level extensions');
 
   const unavailable = createRunSave(null);
   assert.equal(unavailable.save(checkpoint()), false);
