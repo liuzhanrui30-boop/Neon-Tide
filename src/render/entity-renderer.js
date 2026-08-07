@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {
+  createEntityReadTarget,
   DEFAULT_ENTITY_CAPACITIES,
   ENTITY_KINDS,
 } from '../game/entity-world.js';
@@ -145,6 +146,7 @@ function createRenderPool({ kind, capacity, quality, root, geometries, materials
     positionArray: object.isPoints ? geometry.attributes.position.array : null,
     colorAttribute: object.isPoints ? geometry.attributes.color : null,
     colorArray: object.isPoints ? geometry.attributes.color.array : null,
+    readTarget: createEntityReadTarget(),
   });
 }
 
@@ -158,16 +160,6 @@ function markDisposed(resource) {
   resource.userData ??= {};
   resource.userData.entityRendererDisposed = true;
   resource.dispose?.();
-}
-
-function resourceReferencedElsewhere(scene, ignoredObject, resource, key) {
-  let referenced = false;
-  scene.traverse((object) => {
-    if (referenced || object === ignoredObject) return;
-    const value = object[key];
-    if (Array.isArray(value) ? value.includes(resource) : value === resource) referenced = true;
-  });
-  return referenced;
 }
 
 function repairFiniteArray(array, fillValue = 0) {
@@ -219,15 +211,17 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   let corrections = 0;
   let clippedEntities = 0;
 
-  function syncInstanced(pool, query, alpha) {
+  function syncInstanced(pool, query, world, alpha) {
     const { object, capacity } = pool;
-    const count = Math.min(query.length, capacity);
-    if (count === 0) {
+    const candidateCount = Math.min(query.length, capacity);
+    if (candidateCount === 0) {
       object.count = 0;
       return 0;
     }
-    for (let index = 0; index < count; index += 1) {
-      const entity = query.at(index);
+    let count = 0;
+    for (let index = 0; index < candidateCount; index += 1) {
+      const entity = world.readInto(query.at(index), pool.readTarget);
+      if (!entity) continue;
       const x = interpolate(entity.previousX, entity.x, alpha);
       const y = interpolate(entity.previousY, entity.y, alpha);
       const z = interpolate(entity.previousZ, entity.z, alpha);
@@ -254,9 +248,10 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         clampFinite(entity.scaleZ, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
       );
       scratch.updateMatrix();
-      object.setMatrixAt(index, scratch.matrix);
+      object.setMatrixAt(count, scratch.matrix);
       color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS[pool.kind]);
-      setColorComponents(object.instanceColor.array, index * 3, color);
+      setColorComponents(object.instanceColor.array, count * 3, color);
+      count += 1;
     }
     object.count = count;
     object.instanceMatrix.needsUpdate = true;
@@ -264,24 +259,27 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     return count;
   }
 
-  function syncPoints(pool, query, alpha) {
+  function syncPoints(pool, query, world, alpha) {
     const { object, geometry, capacity } = pool;
-    const count = Math.min(query.length, capacity);
-    if (count === 0) {
+    const candidateCount = Math.min(query.length, capacity);
+    if (candidateCount === 0) {
       geometry.setDrawRange(0, 0);
       object.visible = false;
       return 0;
     }
     const positions = pool.positionArray;
     const colors = pool.colorArray;
-    for (let index = 0; index < count; index += 1) {
-      const entity = query.at(index);
-      const offset = index * 3;
+    let count = 0;
+    for (let index = 0; index < candidateCount; index += 1) {
+      const entity = world.readInto(query.at(index), pool.readTarget);
+      if (!entity) continue;
+      const offset = count * 3;
       positions[offset] = interpolate(entity.previousX, entity.x, alpha);
       positions[offset + 1] = interpolate(entity.previousY, entity.y, alpha);
       positions[offset + 2] = interpolate(entity.previousZ, entity.z, alpha);
       color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS[pool.kind]);
       setColorComponents(colors, offset, color);
+      count += 1;
     }
     geometry.setDrawRange(0, count);
     pool.positionAttribute.needsUpdate = true;
@@ -292,15 +290,17 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
 
   function sync(world, interpolationAlpha = 0) {
     if (disposed) return false;
-    if (!world || typeof world.query !== 'function') throw new TypeError('entity renderer sync requires an EntityWorld');
+    if (!world || typeof world.query !== 'function' || typeof world.readInto !== 'function') {
+      throw new TypeError('entity renderer sync requires an EntityWorld');
+    }
     const alpha = clampAlpha(interpolationAlpha);
     let nextActive = 0;
     for (const kind of ENTITY_KINDS) {
       const pool = pools[kind];
       const query = world.query(kind);
       const rendered = PROJECTILE_KINDS.has(kind)
-        ? syncPoints(pool, query, alpha)
-        : syncInstanced(pool, query, alpha);
+        ? syncPoints(pool, query, world, alpha)
+        : syncInstanced(pool, query, world, alpha);
       nextActive += rendered;
       if (query.length > pool.capacity) clippedEntities += query.length - pool.capacity;
     }
@@ -349,21 +349,12 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         corrections += 1;
       }
       if (object.geometry !== geometry) {
-        const foreign = object.geometry;
         object.geometry = geometry;
         corrections += 1;
-        if (foreign?.isBufferGeometry && !geometries.has(foreign)
-          && !resourceReferencedElsewhere(scene, object, foreign, 'geometry')) markDisposed(foreign);
       }
       if (object.material !== material) {
-        const foreign = object.material;
         object.material = material;
         corrections += 1;
-        const foreignList = Array.isArray(foreign) ? foreign : [foreign];
-        for (const candidate of foreignList) {
-          if (candidate?.isMaterial && !materials.has(candidate)
-            && !resourceReferencedElsewhere(scene, object, candidate, 'material')) markDisposed(candidate);
-        }
       }
       corrections += auditTransform(object, {
         position: { x: 0, y: 0, z: 0 },

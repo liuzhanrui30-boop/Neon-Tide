@@ -19,6 +19,7 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
 });
 
 const MAX_KIND_CAPACITY = 1_000_000;
+const CALLBACK_SCRATCH_DEPTH = 8;
 const KIND_SET = new Set(ENTITY_KINDS);
 const POSITION_LIMIT = 1_000_000;
 const VELOCITY_LIMIT = 100_000;
@@ -111,6 +112,22 @@ const DEFAULT_COLORS = Object.freeze({
 
 export const ENTITY_COMPONENT_FIELDS = Object.freeze([...COMPONENT_FIELDS]);
 
+export function createEntityReadTarget() {
+  const target = {
+    id: null,
+    kind: null,
+    slot: -1,
+    active: false,
+    dashCharge0: 0,
+    dashCharge1: 0,
+  };
+  for (const field of FLOAT_FIELDS) target[field] = FLOAT_RULES[field][2];
+  for (const field of UINT_FIELDS) target[field] = 0;
+  for (const field of BOOLEAN_FIELDS) target[field] = false;
+  for (const field of STRING_FIELDS) target[field] = null;
+  return target;
+}
+
 function assertKind(kind) {
   if (!KIND_SET.has(kind)) throw new RangeError(`unknown entity kind: ${String(kind)}`);
 }
@@ -143,114 +160,55 @@ function sanitizeColor(value, fallback) {
 
 function sanitizeString(value) {
   if (value == null) return null;
-  if (typeof value !== 'string') throw new TypeError('string entity components must be strings or null');
   return value.length <= STRING_LIMIT ? value : value.slice(0, STRING_LIMIT);
+}
+
+function validateVector(key, value) {
+  if (value == null) return;
+  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${key} must be a vector object`);
 }
 
 function validateData(data) {
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new TypeError('entity data must be an object');
-  for (const key of Object.keys(data)) {
+  for (const key in data) {
+    if (!Object.hasOwn(data, key)) continue;
     if (!COMPONENT_FIELDS.has(key)) throw new TypeError(`unknown entity component: ${key}`);
+    if (STRING_FIELDS.includes(key) && data[key] != null && typeof data[key] !== 'string') {
+      throw new TypeError(`${key} must be a string or null`);
+    }
+    if (SPECIAL_FIELDS.has(key) && key !== 'dashCharges') validateVector(key, data[key]);
+    if (key === 'dashCharges' && data[key] != null
+      && (!Array.isArray(data[key]) || data[key].length !== 2)) {
+      throw new TypeError('dashCharges must contain exactly two values');
+    }
   }
 }
 
-function createVectorRecord(pool, slot, fields) {
-  const vector = {};
-  for (const [axis, field] of Object.entries(fields)) {
-    Object.defineProperty(vector, axis, {
-      enumerable: true,
-      get: () => pool[field][slot],
-      set: (value) => { pool[field][slot] = sanitizeFloat(field, value); },
-    });
-  }
-  return Object.seal(vector);
-}
-
-function createDashChargesRecord(pool, slot) {
-  const charges = {};
-  Object.defineProperties(charges, {
-    0: {
-      enumerable: true,
-      get: () => pool.dashCharge0[slot],
-      set: (value) => { pool.dashCharge0[slot] = sanitizeFloat('value', value); },
-    },
-    1: {
-      enumerable: true,
-      get: () => pool.dashCharge1[slot],
-      set: (value) => { pool.dashCharge1[slot] = sanitizeFloat('value', value); },
-    },
-    length: { enumerable: false, value: 2 },
-  });
-  return Object.seal(charges);
-}
-
-function createSlotRecord(pool, slot) {
-  const entity = {};
-  Object.defineProperties(entity, {
-    id: {
-      enumerable: true,
-      get: () => pool.alive[slot]
-        ? pool.generations[slot] * pool.idStride + pool.offset + slot
-        : null,
-    },
-    kind: { enumerable: true, value: pool.kind },
-    slot: { enumerable: true, value: slot },
-    active: { enumerable: true, get: () => pool.alive[slot] === 1 },
-  });
-  for (const field of FLOAT_FIELDS) {
-    Object.defineProperty(entity, field, {
-      enumerable: true,
-      get: () => pool[field][slot],
-      set: (value) => { pool[field][slot] = sanitizeFloat(field, value); },
-    });
-  }
-  for (const field of UINT_FIELDS) {
-    Object.defineProperty(entity, field, {
-      enumerable: true,
-      get: () => pool[field][slot],
-      set: (value) => {
-        pool[field][slot] = field === 'color'
-          ? sanitizeColor(value, DEFAULT_COLORS[pool.kind])
-          : sanitizeUint(value);
-      },
-    });
-  }
-  for (const field of BOOLEAN_FIELDS) {
-    Object.defineProperty(entity, field, {
-      enumerable: true,
-      get: () => pool[field][slot] === 1,
-      set: (value) => { pool[field][slot] = value ? 1 : 0; },
-    });
-  }
-  for (const field of STRING_FIELDS) {
-    Object.defineProperty(entity, field, {
-      enumerable: true,
-      get: () => pool[field][slot],
-      set: (value) => { pool[field][slot] = sanitizeString(value); },
-    });
-  }
-  for (const [key, fields] of Object.entries(VECTOR_FIELDS)) {
-    Object.defineProperty(entity, key, {
-      enumerable: true,
-      value: createVectorRecord(pool, slot, fields),
-    });
-  }
-  Object.defineProperty(entity, 'dashCharges', {
-    enumerable: true,
-    value: createDashChargesRecord(pool, slot),
-  });
-  return Object.seal(entity);
-}
-
-function setVector(entity, key, value) {
+function setVector(pool, slot, key, value) {
   if (value == null) return;
-  if (typeof value !== 'object' || Array.isArray(value)) throw new TypeError(`${key} must be a vector object`);
-  if ('x' in value) entity[key].x = value.x;
-  if ('y' in value) entity[key].y = value.y;
-  if ('z' in value && 'z' in entity[key]) entity[key].z = value.z;
+  const fields = VECTOR_FIELDS[key];
+  for (const axis in fields) {
+    if (Object.hasOwn(value, axis)) {
+      const field = fields[axis];
+      pool[field][slot] = sanitizeFloat(field, value[axis]);
+    }
+  }
 }
 
-function resetSlot(pool, slot, data) {
+function setComponent(pool, slot, key, value) {
+  if (Object.hasOwn(FLOAT_RULES, key)) pool[key][slot] = sanitizeFloat(key, value);
+  else if (UINT_FIELDS.includes(key)) {
+    pool[key][slot] = key === 'color' ? sanitizeColor(value, DEFAULT_COLORS[pool.kind]) : sanitizeUint(value);
+  } else if (BOOLEAN_FIELDS.includes(key)) pool[key][slot] = value ? 1 : 0;
+  else if (STRING_FIELDS.includes(key)) pool[key][slot] = sanitizeString(value);
+  else if (Object.hasOwn(VECTOR_FIELDS, key)) setVector(pool, slot, key, value);
+  else if (key === 'dashCharges' && value != null) {
+    pool.dashCharge0[slot] = sanitizeFloat('value', value[0]);
+    pool.dashCharge1[slot] = sanitizeFloat('value', value[1]);
+  }
+}
+
+function initializeSlot(pool, slot, data) {
   for (const field of FLOAT_FIELDS) pool[field][slot] = FLOAT_RULES[field][2];
   for (const field of UINT_FIELDS) pool[field][slot] = 0;
   for (const field of BOOLEAN_FIELDS) pool[field][slot] = 0;
@@ -258,160 +216,43 @@ function resetSlot(pool, slot, data) {
   pool.dashCharge0[slot] = 0;
   pool.dashCharge1[slot] = 0;
 
-  const entity = pool.views[slot];
   const x = sanitizeFloat('x', data.x ?? data.position?.x ?? 0);
   const y = sanitizeFloat('y', data.y ?? data.position?.y ?? 0);
   const z = sanitizeFloat('z', data.z ?? data.position?.z ?? 0);
-  entity.x = x;
-  entity.y = y;
-  entity.z = z;
-  entity.previousX = data.previousX ?? data.previousPosition?.x ?? x;
-  entity.previousY = data.previousY ?? data.previousPosition?.y ?? y;
-  entity.previousZ = data.previousZ ?? data.previousPosition?.z ?? z;
-  entity.vx = data.vx ?? data.velocity?.x ?? 0;
-  entity.vy = data.vy ?? data.velocity?.y ?? 0;
-  entity.vz = data.vz ?? data.velocity?.z ?? 0;
-  entity.rotation = data.rotation ?? 0;
-  entity.previousRotation = data.previousRotation ?? entity.rotation;
-  entity.scale = data.scale ?? 1;
-  entity.scaleX = data.scaleX ?? 1;
-  entity.scaleY = data.scaleY ?? 1;
-  entity.scaleZ = data.scaleZ ?? 1;
-  entity.hp = data.hp ?? 1;
-  entity.maxHp = data.maxHp ?? entity.hp;
-  entity.radius = data.radius ?? 0.5;
-  entity.opacity = data.opacity ?? 1;
-  entity.color = data.color ?? DEFAULT_COLORS[pool.kind];
+  pool.x[slot] = x;
+  pool.y[slot] = y;
+  pool.z[slot] = z;
+  pool.previousX[slot] = sanitizeFloat('previousX', data.previousX ?? data.previousPosition?.x ?? x);
+  pool.previousY[slot] = sanitizeFloat('previousY', data.previousY ?? data.previousPosition?.y ?? y);
+  pool.previousZ[slot] = sanitizeFloat('previousZ', data.previousZ ?? data.previousPosition?.z ?? z);
+  pool.vx[slot] = sanitizeFloat('vx', data.vx ?? data.velocity?.x ?? 0);
+  pool.vy[slot] = sanitizeFloat('vy', data.vy ?? data.velocity?.y ?? 0);
+  pool.vz[slot] = sanitizeFloat('vz', data.vz ?? data.velocity?.z ?? 0);
+  pool.rotation[slot] = sanitizeFloat('rotation', data.rotation ?? 0);
+  pool.previousRotation[slot] = sanitizeFloat('previousRotation', data.previousRotation ?? pool.rotation[slot]);
+  pool.scale[slot] = sanitizeFloat('scale', data.scale ?? 1);
+  pool.scaleX[slot] = sanitizeFloat('scaleX', data.scaleX ?? 1);
+  pool.scaleY[slot] = sanitizeFloat('scaleY', data.scaleY ?? 1);
+  pool.scaleZ[slot] = sanitizeFloat('scaleZ', data.scaleZ ?? 1);
+  pool.hp[slot] = sanitizeFloat('hp', data.hp ?? 1);
+  pool.maxHp[slot] = sanitizeFloat('maxHp', data.maxHp ?? pool.hp[slot]);
+  pool.radius[slot] = sanitizeFloat('radius', data.radius ?? 0.5);
+  pool.opacity[slot] = sanitizeFloat('opacity', data.opacity ?? 1);
+  pool.color[slot] = sanitizeColor(data.color, DEFAULT_COLORS[pool.kind]);
 
-  for (const field of FLOAT_FIELDS) {
-    if (field in data && !['x', 'y', 'z', 'previousX', 'previousY', 'previousZ', 'vx', 'vy', 'vz',
-      'rotation', 'previousRotation', 'scale', 'scaleX', 'scaleY', 'scaleZ', 'hp', 'maxHp', 'radius', 'opacity'].includes(field)) {
-      entity[field] = data[field];
-    }
-  }
-  for (const field of UINT_FIELDS) if (field in data && field !== 'color') entity[field] = data[field];
-  for (const field of BOOLEAN_FIELDS) if (field in data) entity[field] = data[field];
-  for (const field of STRING_FIELDS) if (field in data) entity[field] = data[field];
-  setVector(entity, 'position', data.position);
-  setVector(entity, 'previousPosition', data.previousPosition);
-  setVector(entity, 'velocity', data.velocity);
-  setVector(entity, 'cameraLead', data.cameraLead);
-  if (data.dashCharges != null) {
-    if (!Array.isArray(data.dashCharges) || data.dashCharges.length !== 2) {
-      throw new TypeError('dashCharges must contain exactly two values');
-    }
-    entity.dashCharges[0] = data.dashCharges[0];
-    entity.dashCharges[1] = data.dashCharges[1];
+  for (const key in data) {
+    if (Object.hasOwn(data, key)) setComponent(pool, slot, key, data[key]);
   }
 }
 
-function acquireSnapshot(pool) {
-  if (pool.iterationActive) throw new Error(`nested ${pool.kind} query iteration is not supported`);
-  pool.iterationActive = true;
-  pool.snapshotCount = pool.count;
-  for (let index = 0; index < pool.snapshotCount; index += 1) {
-    const slot = pool.activeSlots[index];
-    pool.snapshotSlots[index] = slot;
-    pool.snapshotGenerations[index] = pool.generations[slot];
+function patchSlot(pool, slot, patch) {
+  for (const key in patch) {
+    if (Object.hasOwn(patch, key)) setComponent(pool, slot, key, patch[key]);
   }
 }
 
-function releaseSnapshot(pool) {
-  pool.iterationActive = false;
-  pool.snapshotCount = 0;
-  pool.iteratorCursor = 0;
-}
-
-function nextSnapshotEntity(pool) {
-  while (pool.iteratorCursor < pool.snapshotCount) {
-    const slot = pool.snapshotSlots[pool.iteratorCursor];
-    const generation = pool.snapshotGenerations[pool.iteratorCursor];
-    pool.iteratorCursor += 1;
-    if (pool.alive[slot] && pool.generations[slot] === generation) {
-      return pool.views[slot];
-    }
-  }
-  return null;
-}
-
-function createQueryView(pool) {
-  pool.iteratorResult = Object.seal({ value: undefined, done: false });
-  pool.iterator = Object.freeze({
-    next() {
-      const entity = nextSnapshotEntity(pool);
-      if (entity) {
-        pool.iteratorResult.value = entity;
-        pool.iteratorResult.done = false;
-      } else {
-        pool.iteratorResult.value = undefined;
-        pool.iteratorResult.done = true;
-        releaseSnapshot(pool);
-      }
-      return pool.iteratorResult;
-    },
-    return() {
-      pool.iteratorResult.value = undefined;
-      pool.iteratorResult.done = true;
-      releaseSnapshot(pool);
-      return pool.iteratorResult;
-    },
-    [Symbol.iterator]() {
-      return this;
-    },
-  });
-
-  return Object.freeze({
-    kind: pool.kind,
-    capacity: pool.capacity,
-    get length() {
-      return pool.count;
-    },
-    at(index) {
-      const normalized = index < 0 ? pool.count + index : index;
-      if (!Number.isInteger(normalized) || normalized < 0 || normalized >= pool.count) return undefined;
-      return pool.views[pool.activeSlots[normalized]];
-    },
-    forEach(callback, thisArg) {
-      if (typeof callback !== 'function') throw new TypeError('query callback must be a function');
-      acquireSnapshot(pool);
-      let visibleIndex = 0;
-      try {
-        for (let index = 0; index < pool.snapshotCount; index += 1) {
-          const slot = pool.snapshotSlots[index];
-          if (!pool.alive[slot] || pool.generations[slot] !== pool.snapshotGenerations[index]) continue;
-          callback.call(thisArg, pool.views[slot], visibleIndex, this);
-          visibleIndex += 1;
-        }
-      } finally {
-        releaseSnapshot(pool);
-      }
-    },
-    find(callback, thisArg) {
-      if (typeof callback !== 'function') throw new TypeError('query callback must be a function');
-      acquireSnapshot(pool);
-      let visibleIndex = 0;
-      try {
-        for (let index = 0; index < pool.snapshotCount; index += 1) {
-          const slot = pool.snapshotSlots[index];
-          if (!pool.alive[slot] || pool.generations[slot] !== pool.snapshotGenerations[index]) continue;
-          const entity = pool.views[slot];
-          if (callback.call(thisArg, entity, visibleIndex, this)) return entity;
-          visibleIndex += 1;
-        }
-        return undefined;
-      } finally {
-        releaseSnapshot(pool);
-      }
-    },
-    some(callback, thisArg) {
-      return this.find(callback, thisArg) !== undefined;
-    },
-    [Symbol.iterator]() {
-      acquireSnapshot(pool);
-      pool.iteratorCursor = 0;
-      return pool.iterator;
-    },
-  });
+function entityId(pool, slot) {
+  return pool.generations[slot] * pool.idStride + pool.offset + slot;
 }
 
 function createPool(kind, capacity, offset, idStride, maxGeneration) {
@@ -427,15 +268,11 @@ function createPool(kind, capacity, offset, idStride, maxGeneration) {
     freeSlots: new Uint32Array(capacity),
     activeSlots: new Uint32Array(capacity),
     activePositions: new Int32Array(capacity),
-    snapshotSlots: new Uint32Array(capacity),
-    snapshotGenerations: new Float64Array(capacity),
-    views: new Array(capacity),
+    callbackScratch: new Array(CALLBACK_SCRATCH_DEPTH),
+    callbackScratchLeases: new Uint8Array(CALLBACK_SCRATCH_DEPTH),
     count: 0,
     freeCount: capacity,
     retiredCount: 0,
-    iterationActive: false,
-    snapshotCount: 0,
-    iteratorCursor: 0,
   };
   for (const field of FLOAT_FIELDS) pool[field] = new Float64Array(capacity);
   for (const field of UINT_FIELDS) pool[field] = new Uint32Array(capacity);
@@ -445,11 +282,10 @@ function createPool(kind, capacity, offset, idStride, maxGeneration) {
   pool.dashCharge1 = new Float64Array(capacity);
   pool.generations.fill(1);
   pool.activePositions.fill(-1);
-  for (let slot = 0; slot < capacity; slot += 1) {
-    pool.freeSlots[slot] = capacity - slot - 1;
-    pool.views[slot] = createSlotRecord(pool, slot);
+  for (let slot = 0; slot < capacity; slot += 1) pool.freeSlots[slot] = capacity - slot - 1;
+  for (let index = 0; index < CALLBACK_SCRATCH_DEPTH; index += 1) {
+    pool.callbackScratch[index] = new Float64Array(capacity);
   }
-  pool.query = createQueryView(pool);
   return pool;
 }
 
@@ -520,18 +356,24 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
   let rejectedSpawns = 0;
   let resets = 0;
 
-  function decode(id) {
-    if (!Number.isSafeInteger(id) || id < totalCapacity) return null;
+  function resolveLivePool(id) {
+    if (disposed || !Number.isSafeInteger(id) || id < totalCapacity) return null;
     const generation = Math.floor(id / totalCapacity);
     const globalSlot = id - generation * totalCapacity;
     if (generation < 1 || globalSlot < 0 || globalSlot >= totalCapacity) return null;
     for (const kind of ENTITY_KINDS) {
       const pool = pools[kind];
       if (globalSlot >= pool.offset && globalSlot < pool.offset + pool.capacity) {
-        return { pool, slot: globalSlot - pool.offset, generation };
+        const slot = globalSlot - pool.offset;
+        return pool.alive[slot] && pool.generations[slot] === generation ? pool : null;
       }
     }
     return null;
+  }
+
+  function slotFromId(pool, id) {
+    const generation = Math.floor(id / totalCapacity);
+    return id - generation * totalCapacity - pool.offset;
   }
 
   function spawn(kind, data = {}) {
@@ -544,42 +386,161 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
       return null;
     }
     const slot = pool.freeSlots[--pool.freeCount];
+    initializeSlot(pool, slot, data);
     pool.alive[slot] = 1;
     pool.activePositions[slot] = pool.count;
     pool.activeSlots[pool.count] = slot;
     pool.count += 1;
-    try {
-      resetSlot(pool, slot, data);
-    } catch (error) {
-      removeActiveSlot(pool, slot);
-      pool.freeSlots[pool.freeCount++] = slot;
-      throw error;
-    }
     count += 1;
     spawned += 1;
-    return pool.views[slot].id;
+    return entityId(pool, slot);
   }
 
   function despawn(id) {
-    if (disposed) return false;
-    const decoded = decode(id);
-    if (!decoded) return false;
-    const { pool, slot, generation } = decoded;
-    if (!pool.alive[slot] || pool.generations[slot] !== generation) return false;
-    releaseSlot(pool, slot);
+    const pool = resolveLivePool(id);
+    if (!pool) return false;
+    releaseSlot(pool, slotFromId(pool, id));
     count -= 1;
     despawned += 1;
     return true;
   }
 
-  function get(id) {
-    if (disposed) return null;
-    const decoded = decode(id);
-    if (!decoded) return null;
-    const { pool, slot, generation } = decoded;
-    if (!pool.alive[slot] || pool.generations[slot] !== generation) return null;
-    return pool.views[slot];
+  function readInto(id, target) {
+    if (!target || typeof target !== 'object' || Array.isArray(target)) {
+      throw new TypeError('read target must be an object');
+    }
+    const pool = resolveLivePool(id);
+    if (!pool) return null;
+    const slot = slotFromId(pool, id);
+    target.id = id;
+    target.kind = pool.kind;
+    target.slot = slot;
+    target.active = true;
+    for (const field of FLOAT_FIELDS) target[field] = pool[field][slot];
+    for (const field of UINT_FIELDS) target[field] = pool[field][slot];
+    for (const field of BOOLEAN_FIELDS) target[field] = pool[field][slot] === 1;
+    for (const field of STRING_FIELDS) target[field] = pool[field][slot];
+    target.dashCharge0 = pool.dashCharge0[slot];
+    target.dashCharge1 = pool.dashCharge1[slot];
+    return target;
   }
+
+  function get(id) {
+    const snapshot = createEntityReadTarget();
+    if (!readInto(id, snapshot)) return null;
+    snapshot.position = Object.freeze({ x: snapshot.x, y: snapshot.y, z: snapshot.z });
+    snapshot.previousPosition = Object.freeze({
+      x: snapshot.previousX,
+      y: snapshot.previousY,
+      z: snapshot.previousZ,
+    });
+    snapshot.velocity = Object.freeze({ x: snapshot.vx, y: snapshot.vy, z: snapshot.vz });
+    snapshot.cameraLead = Object.freeze({ x: snapshot.cameraLeadX, y: snapshot.cameraLeadY });
+    snapshot.dashCharges = Object.freeze([snapshot.dashCharge0, snapshot.dashCharge1]);
+    return Object.freeze(snapshot);
+  }
+
+  function write(id, patch) {
+    const pool = resolveLivePool(id);
+    if (!pool) return false;
+    validateData(patch);
+    patchSlot(pool, slotFromId(pool, id), patch);
+    return true;
+  }
+
+  function acquireCallbackScratch(pool) {
+    for (let index = 0; index < CALLBACK_SCRATCH_DEPTH; index += 1) {
+      if (pool.callbackScratchLeases[index]) continue;
+      pool.callbackScratchLeases[index] = 1;
+      return index;
+    }
+    throw new RangeError(`${pool.kind} query callback nesting exceeds ${CALLBACK_SCRATCH_DEPTH}`);
+  }
+
+  function snapshotIds(pool, target) {
+    const snapshotCount = pool.count;
+    for (let index = 0; index < snapshotCount; index += 1) {
+      const slot = pool.activeSlots[index];
+      target[index] = entityId(pool, slot);
+    }
+    return snapshotCount;
+  }
+
+  function createIterator(pool) {
+    const ids = new Float64Array(pool.count);
+    const snapshotCount = snapshotIds(pool, ids);
+    let cursor = 0;
+    const result = { value: undefined, done: false };
+    return Object.freeze({
+      next() {
+        while (cursor < snapshotCount) {
+          const id = ids[cursor];
+          cursor += 1;
+          if (!resolveLivePool(id)) continue;
+          result.value = id;
+          result.done = false;
+          return result;
+        }
+        result.value = undefined;
+        result.done = true;
+        return result;
+      },
+      [Symbol.iterator]() {
+        return this;
+      },
+    });
+  }
+
+  function createQuery(pool) {
+    let queryView;
+    const traverse = (callback, thisArg, stopOnMatch) => {
+      if (typeof callback !== 'function') throw new TypeError('query callback must be a function');
+      const lease = acquireCallbackScratch(pool);
+      const ids = pool.callbackScratch[lease];
+      const snapshotCount = snapshotIds(pool, ids);
+      let visibleIndex = 0;
+      try {
+        for (let index = 0; index < snapshotCount; index += 1) {
+          const id = ids[index];
+          if (!resolveLivePool(id)) continue;
+          const matched = callback.call(thisArg, id, visibleIndex, queryView);
+          visibleIndex += 1;
+          if (stopOnMatch && matched) return id;
+        }
+        return undefined;
+      } finally {
+        pool.callbackScratchLeases[lease] = 0;
+      }
+    };
+
+    queryView = Object.freeze({
+      kind: pool.kind,
+      capacity: pool.capacity,
+      get length() {
+        return pool.count;
+      },
+      at(index) {
+        const normalized = index < 0 ? pool.count + index : index;
+        if (!Number.isInteger(normalized) || normalized < 0 || normalized >= pool.count) return undefined;
+        return entityId(pool, pool.activeSlots[normalized]);
+      },
+      forEach(callback, thisArg) {
+        traverse(callback, thisArg, false);
+      },
+      find(callback, thisArg) {
+        return traverse(callback, thisArg, true);
+      },
+      some(callback, thisArg) {
+        return traverse(callback, thisArg, true) !== undefined;
+      },
+      [Symbol.iterator]() {
+        return createIterator(pool);
+      },
+    });
+    return queryView;
+  }
+
+  for (const kind of ENTITY_KINDS) pools[kind].query = createQuery(pools[kind]);
 
   function query(kind) {
     assertKind(kind);
@@ -599,7 +560,6 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
         }
       }
       rebuildFreeSlots(pool);
-      releaseSnapshot(pool);
     }
     count = 0;
     if (incrementReset) resets += 1;
@@ -642,5 +602,5 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
     });
   }
 
-  return Object.freeze({ spawn, despawn, query, get, reset, dispose, getStats });
+  return Object.freeze({ spawn, despawn, query, get, readInto, write, reset, dispose, getStats });
 }

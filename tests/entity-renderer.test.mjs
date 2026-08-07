@@ -136,8 +136,10 @@ test('explicit recovery repairs repeated corruption without growing ownership', 
     assert.equal(enemy.material, ownedMaterial);
     assert.equal(Number.isFinite(enemy.instanceMatrix.array[0]), true);
     assert.equal(root.position.x, 0);
-    assert.equal(foreignGeometry.userData.entityRendererDisposed, true);
-    assert.equal(foreignMaterial.userData.entityRendererDisposed, true);
+    assert.equal(foreignGeometry.userData.entityRendererDisposed, undefined);
+    assert.equal(foreignMaterial.userData.entityRendererDisposed, undefined);
+    foreignGeometry.dispose();
+    foreignMaterial.dispose();
 
     renderer.reset();
     renderer.sync(world, 1);
@@ -151,6 +153,37 @@ test('explicit recovery repairs repeated corruption without growing ownership', 
 
   assert.ok(renderer.getStats().corrections >= 12 * 5);
   renderer.dispose();
+  world.dispose();
+});
+
+test('corruption recovery never disposes foreign resources owned outside its scene', () => {
+  const { world, renderer, root } = createFixture({ enemy: 1 });
+  const enemy = findKind(root, 'enemy');
+  const ownedGeometry = enemy.geometry;
+  const ownedMaterial = enemy.material;
+  const foreignGeometry = new THREE.BufferGeometry();
+  const foreignMaterial = new THREE.MeshBasicMaterial();
+  const otherScene = new THREE.Scene();
+  otherScene.add(new THREE.Mesh(foreignGeometry, foreignMaterial));
+  let geometryDisposals = 0;
+  let materialDisposals = 0;
+  foreignGeometry.dispose = () => { geometryDisposals += 1; };
+  foreignMaterial.dispose = () => { materialDisposals += 1; };
+  enemy.geometry = foreignGeometry;
+  enemy.material = foreignMaterial;
+
+  assert.equal(renderer.recoverCorruption(), true);
+  assert.equal(enemy.geometry, ownedGeometry);
+  assert.equal(enemy.material, ownedMaterial);
+  assert.equal(geometryDisposals, 0);
+  assert.equal(materialDisposals, 0);
+  renderer.dispose();
+  assert.equal(geometryDisposals, 0);
+  assert.equal(materialDisposals, 0);
+  foreignGeometry.dispose();
+  foreignMaterial.dispose();
+  assert.equal(geometryDisposals, 1);
+  assert.equal(materialDisposals, 1);
   world.dispose();
 });
 
