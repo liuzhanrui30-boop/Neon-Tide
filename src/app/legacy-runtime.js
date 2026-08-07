@@ -240,6 +240,7 @@ const state = {
   elapsed: 0,
   timeLeft: GAME.bossStart,
   score: 0,
+  campaignStats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 },
   highScore: Number.parseInt(localStorage.getItem(STORAGE_KEY) || "0", 10),
   health: BASE_MAX_HEALTH,
   maxHealth: BASE_MAX_HEALTH,
@@ -2101,6 +2102,7 @@ function resetState() {
   state.elapsed = 0;
   state.timeLeft = GAME.bossStart;
   state.score = 0;
+  state.campaignStats = { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 };
   state.maxHealth = BASE_MAX_HEALTH;
   state.health = state.maxHealth;
   state.weaponEnergy = 0;
@@ -2367,12 +2369,25 @@ function applySessionBuild(build) {
   state.ownedUpgrades = [...new Set(requested.filter((id) => typeof id === "string" && known.has(id)))];
 }
 
+function applySessionStats(stats) {
+  state.campaignStats = {
+    roomsStarted: stats.roomsStarted,
+    roomsCompleted: stats.roomsCompleted,
+    damageTaken: stats.damageTaken,
+    score: stats.score,
+  };
+  // Replace score rather than adding it so Continue cannot double-apply it.
+  state.score = stats.score;
+  dom.score.textContent = String(state.score).padStart(4, "0");
+}
+
 function applySession(snapshot) {
   const nextMode = SESSION_TO_LEGACY_MODE[snapshot.mode];
   if (!nextMode) return false;
   state.health = snapshot.hull;
   state.maxHealth = snapshot.maxHull;
   applySessionBuild(snapshot.build);
+  applySessionStats(snapshot.stats);
   projectedHull = snapshot.hull;
   projectedMaxHull = snapshot.maxHull;
   state.terminalReason = snapshot.terminalReason;
@@ -2556,10 +2571,7 @@ function applyUpgrade(id) {
   if (!upgrade || state.ownedUpgrades.includes(id)) return false;
   state.ownedUpgrades.push(id);
   const requestedMaxHull = id === "repair-swarm" ? Math.max(state.maxHealth, 4) : state.maxHealth;
-  session.setBuild({
-    ownedUpgrades: [...state.ownedUpgrades],
-    maxHull: requestedMaxHull,
-  });
+  session.setBuild({ ownedUpgrades: [...state.ownedUpgrades] });
   if (id === "repair-swarm") {
     session.upgradeHullCapacity(requestedMaxHull, { repair: upgrade.effect });
     syncHealthPips();
@@ -4512,6 +4524,8 @@ function updateStage() {
   // Compatibility stages now respect the authoritative campaign boundary:
   // persist the completed chapter, then create the next room. This keeps the
   // legacy presentation from silently skipping Standard checkpoints.
+  const campaign = session.snapshot().stats;
+  session.setStats({ ...campaign, score: Math.max(0, state.score) });
   if (!session.completeRoom({
     nextMode: "chapterComplete",
     chapterIndex: nextStageIndex,
@@ -4878,6 +4892,8 @@ function getDebugSnapshot() {
     disposed,
     mode: state.mode,
     elapsed: state.elapsed,
+    score: state.score,
+    campaignStats: { ...state.campaignStats },
     health: state.health,
     maxHealth: state.maxHealth,
     stageIndex: state.stageIndex,

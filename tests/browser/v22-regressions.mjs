@@ -371,6 +371,7 @@ async function desktopCoreScenario() {
     // actual chapterComplete -> checkpoint -> next-room routing.
     await page.gameEvaluate(`
       applyUpgrade('repair-swarm');
+      $state.score=735;
       $state.stageIndex=1;
       $state.stageQueue=[];
       $state.upgradeTriggered=[true,false];
@@ -392,8 +393,8 @@ async function desktopCoreScenario() {
     assert.equal(checkpointSaved.saved.mode, 'standard');
     assert.equal('maxHull' in checkpointSaved.saved, false, 'v1 checkpoint must have the exact schema');
     assert.ok(checkpointSaved.saved.build.ownedUpgrades.includes('repair-swarm'));
-    assert.equal(checkpointSaved.saved.build.maxHull, 4);
     assert.equal(checkpointSaved.saved.hull, 4);
+    assert.equal(checkpointSaved.saved.stats.score, 735);
     assert.ok(checkpointSaved.live.session.stats.roomsStarted > checkpointSaved.saved.stats.roomsStarted,
       'next room began before the chapter-entry checkpoint was written');
 
@@ -423,6 +424,8 @@ async function desktopCoreScenario() {
         legacyHull: continued.legacy.health,
         legacyMaxHull: continued.legacy.maxHealth,
         legacyBuild: continued.legacy.ownedUpgrades,
+        legacyScore: continued.legacy.score,
+        legacyCampaignStats: continued.legacy.campaignStats,
       },
       {
         mode: 'playing',
@@ -436,6 +439,8 @@ async function desktopCoreScenario() {
         legacyHull: 4,
         legacyMaxHull: 4,
         legacyBuild: checkpointSaved.saved.build.ownedUpgrades,
+        legacyScore: checkpointSaved.saved.stats.score,
+        legacyCampaignStats: continued.session.stats,
       },
     );
 

@@ -109,11 +109,11 @@ test('Standard saves only completed chapter entries and restores that snapshot o
   session.startRoom({ id: 'chapter-0-room', chapterIndex: 0 });
   assert.equal(runSave.getStatus().saves, 0, 'a room start is not a checkpoint');
   session.upgradeHullCapacity(4, { repair: 1 });
-  session.setBuild({ ownedUpgrades: ['repair-swarm'], maxHull: 4 });
+  session.setBuild({ ownedUpgrades: ['repair-swarm'] });
   assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 2, score: 50 }), true);
   assert.equal(session.snapshot().mode, 'chapterComplete');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed: 77, chapterIndex: 2, build: { ownedUpgrades: ['repair-swarm'], maxHull: 4 }, hull: 4,
+    version: 1, mode: 'standard', seed: 77, chapterIndex: 2, build: { ownedUpgrades: ['repair-swarm'] }, hull: 4,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 50 }, savedAt: 1234,
   });
   const savesAfterTransition = runSave.getStatus().saves;
@@ -146,7 +146,7 @@ test('chapter checkpoint is persisted before transition observers can start the 
   assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 1 }), true);
   assert.equal(session.snapshot().mode, 'playing');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed: 12, chapterIndex: 1, build: {}, hull: 3,
+    version: 1, mode: 'standard', seed: 12, chapterIndex: 1, build: { ownedUpgrades: [] }, hull: 3,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 22,
   });
 });
@@ -162,8 +162,8 @@ test('checkpoint restore and corrupt storage keep session snapshots valid', () =
   assert.equal(session.getPersistenceStatus().corruptions, 1);
 
   assert.equal(runSave.save({
-    version: 1, mode: 'standard', seed: 5, chapterIndex: 2, build: { beam: 1 }, hull: 3,
-    stats: { roomsStarted: 2 }, savedAt: 1,
+    version: 1, mode: 'standard', seed: 5, chapterIndex: 2, build: { ownedUpgrades: ['ion-drive'] }, hull: 3,
+    stats: { roomsStarted: 2, roomsCompleted: 1, damageTaken: 0, score: 25 }, savedAt: 1,
   }), true);
   assert.equal(session.restoreCheckpoint(), true);
   assert.deepEqual(
@@ -331,4 +331,32 @@ test('authoritative hull APIs validate finite positive capacity', () => {
       /maxHull must be positive and finite/,
     );
   }
+});
+
+test('malicious checkpoint build and stat payloads cannot mutate the session', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const session = createGameSession({ development: true, runSave });
+  const before = session.snapshot();
+
+  for (const checkpoint of [
+    { version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build: { ownedUpgrades: ['unknown'] }, hull: 3, stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1 },
+    { version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build: { ownedUpgrades: ['repair-swarm', 'repair-swarm'] }, hull: 4, stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1 },
+    { version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build: { ownedUpgrades: ['repair-swarm'], maxHull: 999 }, hull: 4, stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1 },
+    { version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build: { ownedUpgrades: [] }, hull: 4, stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1 },
+    { version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build: { ownedUpgrades: [] }, hull: 3, stats: { roomsStarted: 1, roomsCompleted: 2, damageTaken: 0, score: 0 }, savedAt: 1 },
+  ]) {
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(checkpoint));
+    assert.equal(session.restoreCheckpoint(), false);
+    assert.deepEqual(session.snapshot(), before);
+  }
+  assert.equal(runSave.getStatus().corruptions, 5);
+
+  session.startRun('standard', 2);
+  session.startRoom({ id: 'room' });
+  const activeBefore = session.snapshot();
+  assert.throws(() => session.setBuild({ ownedUpgrades: ['unknown'] }), /unique known upgrade IDs/);
+  assert.deepEqual(session.snapshot(), activeBefore);
+  assert.throws(() => session.setStats({ roomsStarted: 1, roomsCompleted: 2, damageTaken: 0, score: 0 }), /bounded finite campaign values/);
+  assert.deepEqual(session.snapshot(), activeBefore);
 });

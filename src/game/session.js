@@ -1,3 +1,5 @@
+import { maxHullForRunBuild, normalizeRunBuild } from './run-build.js';
+
 export const GAME_SESSION_MODES = Object.freeze([
   'menu',
   'briefing',
@@ -37,6 +39,15 @@ function createStats() {
   };
 }
 
+function isSessionStats(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Number.isInteger(value.roomsStarted) && value.roomsStarted >= 0
+    && Number.isInteger(value.roomsCompleted) && value.roomsCompleted >= 0
+    && value.roomsCompleted <= value.roomsStarted
+    && Number.isFinite(value.damageTaken) && value.damageTaken >= 0 && value.damageTaken <= 1_000_000_000
+    && Number.isFinite(value.score) && value.score >= 0 && value.score <= 1_000_000_000;
+}
+
 export function createGameSession(options = {}) {
   const development = options.development ?? true;
   const events = options.events ?? null;
@@ -63,7 +74,7 @@ export function createGameSession(options = {}) {
     seed: null,
     chapterIndex: 0,
     room: null,
-    build: {},
+    build: { ownedUpgrades: [] },
     hull: baseMaxHull,
     maxHull: baseMaxHull,
     stats: createStats(),
@@ -137,8 +148,7 @@ export function createGameSession(options = {}) {
   }
 
   function maxHullFromBuild(build) {
-    const configured = build?.maxHull;
-    return Number.isFinite(configured) && configured >= baseMaxHull ? configured : baseMaxHull;
+    return maxHullForRunBuild(build, baseMaxHull);
   }
 
   function isCheckpoint(checkpoint) {
@@ -147,21 +157,27 @@ export function createGameSession(options = {}) {
       && checkpoint.mode === 'standard'
       && Number.isFinite(checkpoint.seed)
       && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
-      && checkpoint.build && typeof checkpoint.build === 'object' && !Array.isArray(checkpoint.build)
+      && normalizeRunBuild(checkpoint.build)
       && Number.isFinite(checkpoint.hull) && checkpoint.hull > 0
-      && checkpoint.stats && typeof checkpoint.stats === 'object' && !Array.isArray(checkpoint.stats)
+      && isSessionStats(checkpoint.stats)
       && Number.isFinite(checkpoint.savedAt) && checkpoint.savedAt >= 0;
   }
 
   function restoreCheckpoint(checkpoint = runSave?.load()) {
     if (!isCheckpoint(checkpoint) || !['menu', 'defeat'].includes(state.mode)) return false;
+    const normalizedBuild = normalizeRunBuild(checkpoint.build);
+    const restoredMaxHull = maxHullFromBuild(normalizedBuild);
+    if (!normalizedBuild || !Number.isFinite(restoredMaxHull) || checkpoint.hull > restoredMaxHull) {
+      runSave?.clear({ corruption: true });
+      return false;
+    }
     const previous = snapshot();
     state.runMode = 'standard';
     state.seed = checkpoint.seed;
     state.chapterIndex = checkpoint.chapterIndex;
     state.room = null;
-    state.build = cloneValue(checkpoint.build);
-    state.maxHull = maxHullFromBuild(state.build);
+    state.build = cloneValue(normalizedBuild);
+    state.maxHull = restoredMaxHull;
     state.hull = Math.min(state.maxHull, checkpoint.hull);
     state.stats = cloneValue(checkpoint.stats);
     state.terminalReason = null;
@@ -200,7 +216,7 @@ export function createGameSession(options = {}) {
     state.seed = seed;
     state.chapterIndex = 0;
     state.room = null;
-    state.build = {};
+    state.build = { ownedUpgrades: [] };
     state.hull = baseMaxHull;
     state.maxHull = baseMaxHull;
     state.stats = createStats();
@@ -314,20 +330,39 @@ export function createGameSession(options = {}) {
   }
 
   function setBuild(build) {
-    if (!build || typeof build !== 'object' || Array.isArray(build)) throw new TypeError('build must be an object');
+    const normalizedBuild = normalizeRunBuild(build);
+    if (!normalizedBuild) throw new TypeError('build must contain unique known upgrade IDs');
     if (!['briefing', 'playing', 'paused', 'upgrade', 'chapterComplete'].includes(state.mode)) return invalid('playing');
+    const buildMaxHull = maxHullFromBuild(normalizedBuild);
+    if (!Number.isFinite(buildMaxHull) || buildMaxHull < state.maxHull) {
+      throw new TypeError('build cannot reduce hull capacity');
+    }
     const previous = snapshot();
-    state.build = cloneValue(build);
+    state.build = cloneValue(normalizedBuild);
     // Capacity is derived from the versioned build, never from an extra
-    // checkpoint field. Do not let an older/lower build reduce a live run.
-    const buildMaxHull = maxHullFromBuild(state.build);
-    if (buildMaxHull < state.maxHull) state.build.maxHull = state.maxHull;
-    else state.maxHull = buildMaxHull;
+    // checkpoint field. A live run cannot silently lose a capacity upgrade.
+    state.maxHull = buildMaxHull;
     state.revision += 1;
     const changeRecord = Object.freeze({
       previous,
       current: snapshot(),
       detail: Object.freeze({ buildChanged: true }),
+    });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
+    return true;
+  }
+
+  function setStats(stats) {
+    if (!isSessionStats(stats)) throw new TypeError('stats must contain bounded finite campaign values');
+    if (!['briefing', 'playing', 'paused', 'upgrade', 'chapterComplete'].includes(state.mode)) return invalid('playing');
+    const previous = snapshot();
+    state.stats = cloneValue(stats);
+    state.revision += 1;
+    const changeRecord = Object.freeze({
+      previous,
+      current: snapshot(),
+      detail: Object.freeze({ statsChanged: true }),
     });
     events?.emit('session:changed', changeRecord);
     onChange(changeRecord);
@@ -371,7 +406,7 @@ export function createGameSession(options = {}) {
       seed: null,
       chapterIndex: 0,
       room: null,
-      build: {},
+      build: { ownedUpgrades: [] },
       hull: baseMaxHull,
       maxHull: baseMaxHull,
       stats: createStats(),
@@ -396,6 +431,7 @@ export function createGameSession(options = {}) {
     damageHull,
     upgradeHullCapacity,
     setBuild,
+    setStats,
     reconcileCompatibilityHull,
     reset,
     restoreCheckpoint,

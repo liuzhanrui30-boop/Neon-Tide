@@ -1,3 +1,5 @@
+import { normalizeRunBuild } from '../game/run-build.js';
+
 const CURRENT_VERSION = 1;
 const DEFAULT_KEY = 'neon-tide:v3:checkpoint';
 const CHECKPOINT_KEYS = new Set(['version', 'mode', 'seed', 'chapterIndex', 'build', 'hull', 'stats', 'savedAt']);
@@ -17,6 +19,20 @@ function isFiniteNonNegativeInteger(value) {
   return Number.isInteger(value) && value >= 0;
 }
 
+const MAX_CHECKPOINT_STAT = 1_000_000_000;
+
+export function isCheckpointStats(value) {
+  const keys = ['roomsStarted', 'roomsCompleted', 'damageTaken', 'score'];
+  return isRecord(value)
+    && Object.keys(value).length === keys.length
+    && keys.every((key) => Object.hasOwn(value, key))
+    && isFiniteNonNegativeInteger(value.roomsStarted)
+    && isFiniteNonNegativeInteger(value.roomsCompleted)
+    && value.roomsCompleted <= value.roomsStarted
+    && Number.isFinite(value.damageTaken) && value.damageTaken >= 0 && value.damageTaken <= MAX_CHECKPOINT_STAT
+    && Number.isFinite(value.score) && value.score >= 0 && value.score <= MAX_CHECKPOINT_STAT;
+}
+
 export function isRunCheckpoint(value) {
   if (!isRecord(value)
     || Object.keys(value).length !== CHECKPOINT_KEYS.size
@@ -25,9 +41,9 @@ export function isRunCheckpoint(value) {
     || value.mode !== 'standard'
     || !Number.isFinite(value.seed)
     || !isFiniteNonNegativeInteger(value.chapterIndex)
-    || !isRecord(value.build)
+    || !normalizeRunBuild(value.build)
     || !Number.isFinite(value.hull) || value.hull <= 0
-    || !isRecord(value.stats)
+    || !isCheckpointStats(value.stats)
     || !Number.isFinite(value.savedAt) || value.savedAt < 0) {
     return false;
   }
@@ -116,7 +132,7 @@ export function createRunSave(storage, key = DEFAULT_KEY) {
     }
   }
 
-  function clear() {
+  function clear({ corruption = false } = {}) {
     if (!usable) {
       recordFailure('checkpoint storage is unavailable');
       return false;
@@ -124,7 +140,10 @@ export function createRunSave(storage, key = DEFAULT_KEY) {
     try {
       storage.removeItem(key);
       status.clears += 1;
-      status.lastError = null;
+      if (corruption) {
+        status.corruptions += 1;
+        status.lastError = 'checkpoint is incompatible with the active run configuration';
+      } else status.lastError = null;
       return true;
     } catch (error) {
       recordFailure(error);

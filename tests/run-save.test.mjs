@@ -16,9 +16,9 @@ function checkpoint(overrides = {}) {
     mode: 'standard',
     seed: 42,
     chapterIndex: 2,
-    build: { weapons: ['arc'] },
+    build: { ownedUpgrades: ['ion-drive'] },
     hull: 3,
-    stats: { roomsCompleted: 7 },
+    stats: { roomsStarted: 7, roomsCompleted: 7, damageTaken: 2, score: 900 },
     savedAt: 1_725_000_000_000,
     ...overrides,
   };
@@ -29,7 +29,7 @@ test('checkpoint round-trips a cloned, versioned Standard chapter entry', () => 
   const save = createRunSave(storage);
   const source = checkpoint();
   assert.equal(save.save(source), true);
-  source.build.weapons.push('mutated');
+  source.build.ownedUpgrades.push('mutated');
 
   assert.deepEqual(save.load(), checkpoint());
   assert.deepEqual(save.getStatus(), {
@@ -55,6 +55,14 @@ test('checkpoint rejects mismatched schemas and storage failures without throwin
   assert.equal(save.load(), null);
   assert.equal(save.getStatus().corruptions, 1);
   assert.equal(save.save(checkpoint({ maxHull: 4 })), false, 'v1 rejects unversioned top-level extensions');
+  for (const payload of [
+    checkpoint({ build: { ownedUpgrades: ['unknown-upgrade'] } }),
+    checkpoint({ build: { ownedUpgrades: ['ion-drive', 'ion-drive'] } }),
+    checkpoint({ build: { ownedUpgrades: ['repair-swarm'], maxHull: 999 } }),
+    checkpoint({ stats: { roomsStarted: 1, roomsCompleted: 2, damageTaken: 0, score: 0 } }),
+    checkpoint({ stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: Number.NaN, score: 0 } }),
+  ]) assert.equal(save.save(payload), false);
+
 
   const unavailable = createRunSave(null);
   assert.equal(unavailable.save(checkpoint()), false);
