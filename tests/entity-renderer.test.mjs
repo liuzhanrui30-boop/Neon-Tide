@@ -85,6 +85,30 @@ test('sync interpolates fixed slots without replacing owned resources', () => {
   world.dispose();
 });
 
+test('sync clamps extreme finite transforms before writing GPU buffers', () => {
+  const { world, renderer, root } = createFixture({ enemy: 1, friendlyProjectile: 1 });
+  world.spawn('enemy', {
+    previousX: -Number.MAX_VALUE,
+    previousY: Number.MAX_VALUE,
+    x: Number.MAX_VALUE,
+    y: -Number.MAX_VALUE,
+    scale: Number.MAX_VALUE,
+    rotation: Number.MAX_VALUE,
+  });
+  world.spawn('friendlyProjectile', {
+    previousX: Number.MAX_VALUE,
+    previousY: -Number.MAX_VALUE,
+    x: -Number.MAX_VALUE,
+    y: Number.MAX_VALUE,
+  });
+
+  assert.equal(renderer.sync(world, 0.5), true);
+  assert.equal(Array.from(findKind(root, 'enemy').instanceMatrix.array).every(Number.isFinite), true);
+  assert.equal(Array.from(findKind(root, 'friendlyProjectile').geometry.attributes.position.array).every(Number.isFinite), true);
+  renderer.dispose();
+  world.dispose();
+});
+
 test('explicit recovery repairs repeated corruption without growing ownership', () => {
   const { scene, world, renderer, root } = createFixture({ enemy: 2 });
   world.spawn('enemy', { x: 1, y: 2 });
@@ -147,5 +171,42 @@ test('reset and dispose are bounded and idempotent', () => {
   assert.equal(renderer.reset(), false);
   assert.equal(renderer.sync(world, 1), false);
   assert.equal(scene.children.includes(root), false);
+  world.dispose();
+});
+
+test('dispose releases owned instance and buffer resources exactly once', () => {
+  const { world, renderer, root } = createFixture();
+  const instances = root.children.filter((object) => object.isInstancedMesh);
+  const geometries = new Set(root.children.map((object) => object.geometry));
+  const materials = new Set(root.children.map((object) => object.material));
+  let instanceDisposals = 0;
+  let geometryDisposals = 0;
+  let materialDisposals = 0;
+  for (const object of instances) object.dispose = () => { instanceDisposals += 1; };
+  for (const geometry of geometries) geometry.dispose = () => { geometryDisposals += 1; };
+  for (const material of materials) material.dispose = () => { materialDisposals += 1; };
+
+  assert.equal(renderer.dispose(), true);
+  assert.equal(renderer.dispose(), false);
+  assert.equal(instanceDisposals, instances.length);
+  assert.equal(geometryDisposals, geometries.size);
+  assert.equal(materialDisposals, materials.size);
+  world.dispose();
+});
+
+test('dispose detaches every owned object after parent corruption', () => {
+  const { scene, world, renderer, root } = createFixture();
+  const wrapper = new THREE.Group();
+  const foreignParent = new THREE.Group();
+  scene.add(wrapper, foreignParent);
+  wrapper.add(root);
+  const enemy = findKind(root, 'enemy');
+  foreignParent.add(enemy);
+
+  assert.equal(renderer.dispose(), true);
+  assert.equal(root.parent, null);
+  assert.equal(enemy.parent, null);
+  assert.equal(wrapper.children.includes(root), false);
+  assert.equal(foreignParent.children.includes(enemy), false);
   world.dispose();
 });

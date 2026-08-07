@@ -23,12 +23,25 @@ const BASE_SIZES = Object.freeze({
   objective: 1,
   bossPart: 1,
 });
+const RENDER_POSITION_LIMIT = 1_000_000;
+const RENDER_SCALE_LIMIT = 10_000;
+const RENDER_ROTATION_LIMIT = 1_000_000;
 
 const finiteOr = (value, fallback = 0) => Number.isFinite(value) ? value : fallback;
 const clampAlpha = (alpha) => Math.min(1, Math.max(0, finiteOr(Number(alpha), 0)));
+const clampFinite = (value, minimum, maximum, fallback = 0) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.min(maximum, Math.max(minimum, number)) : fallback;
+};
 const interpolate = (previous, current, alpha) => {
-  const safeCurrent = finiteOr(Number(current), 0);
-  return finiteOr(Number(previous), safeCurrent) + (safeCurrent - finiteOr(Number(previous), safeCurrent)) * alpha;
+  const safeCurrent = clampFinite(current, -RENDER_POSITION_LIMIT, RENDER_POSITION_LIMIT, 0);
+  const safePrevious = clampFinite(previous, -RENDER_POSITION_LIMIT, RENDER_POSITION_LIMIT, safeCurrent);
+  return clampFinite(
+    safePrevious * (1 - alpha) + safeCurrent * alpha,
+    -RENDER_POSITION_LIMIT,
+    RENDER_POSITION_LIMIT,
+    safeCurrent,
+  );
 };
 
 function resolveCapacities(capacities) {
@@ -209,20 +222,36 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function syncInstanced(pool, query, alpha) {
     const { object, capacity } = pool;
     const count = Math.min(query.length, capacity);
+    if (count === 0) {
+      object.count = 0;
+      return 0;
+    }
     for (let index = 0; index < count; index += 1) {
       const entity = query.at(index);
       const x = interpolate(entity.previousX, entity.x, alpha);
       const y = interpolate(entity.previousY, entity.y, alpha);
       const z = interpolate(entity.previousZ, entity.z, alpha);
-      const rotation = interpolate(entity.previousRotation, entity.rotation, alpha);
-      const scale = Math.max(0, finiteOr(Number(entity.scale), 1));
+      const previousRotation = clampFinite(
+        entity.previousRotation,
+        -RENDER_ROTATION_LIMIT,
+        RENDER_ROTATION_LIMIT,
+        0,
+      );
+      const currentRotation = clampFinite(
+        entity.rotation,
+        -RENDER_ROTATION_LIMIT,
+        RENDER_ROTATION_LIMIT,
+        previousRotation,
+      );
+      const rotation = previousRotation * (1 - alpha) + currentRotation * alpha;
+      const scale = clampFinite(entity.scale, 0, RENDER_SCALE_LIMIT, 1);
       const baseSize = BASE_SIZES[pool.kind];
       scratch.position.set(x, y, z);
       scratch.rotation.set(0, 0, rotation);
       scratch.scale.set(
-        Math.max(0, finiteOr(Number(entity.scaleX), 1)) * scale * baseSize,
-        Math.max(0, finiteOr(Number(entity.scaleY), 1)) * scale * baseSize,
-        Math.max(0, finiteOr(Number(entity.scaleZ), 1)) * scale * baseSize,
+        clampFinite(entity.scaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
+        clampFinite(entity.scaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
+        clampFinite(entity.scaleZ, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
       );
       scratch.updateMatrix();
       object.setMatrixAt(index, scratch.matrix);
@@ -238,6 +267,11 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function syncPoints(pool, query, alpha) {
     const { object, geometry, capacity } = pool;
     const count = Math.min(query.length, capacity);
+    if (count === 0) {
+      geometry.setDrawRange(0, 0);
+      object.visible = false;
+      return 0;
+    }
     const positions = pool.positionArray;
     const colors = pool.colorArray;
     for (let index = 0; index < count; index += 1) {
@@ -443,7 +477,12 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function dispose() {
     if (disposed) return false;
     disposed = true;
-    scene.remove(root);
+    for (const kind of ENTITY_KINDS) {
+      const object = pools[kind].object;
+      object.removeFromParent();
+      object.dispose?.();
+    }
+    root.removeFromParent();
     for (const geometry of geometries) markDisposed(geometry);
     for (const material of materials) markDisposed(material);
     root.clear();

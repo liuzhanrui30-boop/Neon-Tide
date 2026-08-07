@@ -20,12 +20,48 @@ async function v3FoundationLoopScenario() {
     assert.equal(initial.renderer.ownership.geometries, 7);
     assert.equal(initial.renderer.ownership.materials, 7);
 
+    const restoredLifecycle = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;
+      api.world.spawn('enemy',{x:2,state:'checkpoint-probe'});
+      api.entityRenderer.sync(api.world,1);
+      const before=api.getDebugSnapshot();
+      const restored=api.session.restoreCheckpoint({
+        version:1,
+        mode:'standard',
+        seed:4404,
+        chapterIndex:2,
+        build:{ownedUpgrades:[]},
+        hull:3,
+        stats:{roomsStarted:2,roomsCompleted:2,damageTaken:0,score:0},
+        savedAt:1,
+      });
+      const after=api.getDebugSnapshot();
+      api.session.reset();
+      return {restored,before:{world:before.world.count,rendered:before.renderer.active},after};
+    })()`);
+    assert.deepEqual(restoredLifecycle.before, { world: 1, rendered: 1 });
+    assert.equal(restoredLifecycle.restored, true);
+    assert.equal(restoredLifecycle.after.session.mode, 'briefing');
+    assert.equal(restoredLifecycle.after.world.count, 0);
+    assert.equal(restoredLifecycle.after.renderer.active, 0);
+
+    const primedRun = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;
+      api.world.spawn('player',{state:'new-run-probe'});
+      api.entityRenderer.sync(api.world,1);
+      const snapshot=api.getDebugSnapshot();
+      return {world:snapshot.world.count,rendered:snapshot.renderer.active};
+    })()`);
+    assert.deepEqual(primedRun, { world: 1, rendered: 1 });
+
     await page.startGame();
     const playing = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
     assert.equal(playing.session.mode, 'playing');
     assert.equal(playing.legacy.mode, 'playing');
     assert.equal(playing.loop.paused, false);
     assert.equal(playing.session.revision >= 2, true);
+    assert.equal(playing.world.count, 0);
+    assert.equal(playing.renderer.active, 0);
 
     page.requireDev('fixed simulation and render separation probe');
     const renderOnly = await page.gameEvaluate(`
@@ -101,6 +137,15 @@ async function v3FoundationLoopScenario() {
     assert.deepEqual(fatalDamage, { accepted:true,legacy:0,session:0,mode:'defeat',legacyMode:'gameover' });
     await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
 
+    const primedRetry = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;
+      api.world.spawn('enemy',{state:'retry-probe'});
+      api.entityRenderer.sync(api.world,1);
+      const snapshot=api.getDebugSnapshot();
+      return {world:snapshot.world.count,rendered:snapshot.renderer.active};
+    })()`);
+    assert.deepEqual(primedRetry, { world: 1, rendered: 1 });
+
     await page.trustedClick('#primary-button');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
     const replay = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
@@ -109,6 +154,8 @@ async function v3FoundationLoopScenario() {
     assert.equal(replay.legacy.mode, 'playing');
     assert.equal(replay.loop.paused, false);
     assert.ok(replay.events.dropped === 0, JSON.stringify(replay.events));
+    assert.equal(replay.world.count, 0);
+    assert.equal(replay.renderer.active, 0);
 
     await page.gameEvaluate(`$state.health=0;return true`);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'defeat'`);
@@ -140,6 +187,28 @@ async function v3FoundationLoopScenario() {
     assert.equal(reset.renderer.active, 0);
     assert.equal(reset.renderer.sceneChildren, 1);
     assert.equal(reset.renderer.rootChildren, 7);
+
+    const abyssRetry = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;
+      api.world.spawn('enemy',{state:'abyss-start-probe'});
+      api.entityRenderer.sync(api.world,1);
+      api.session.startRun('abyss',9090);
+      const started=api.getDebugSnapshot();
+      api.session.startRoom({id:'abyss-probe',chapterIndex:0});
+      api.world.spawn('enemy',{state:'abyss-retry-probe'});
+      api.entityRenderer.sync(api.world,1);
+      api.session.damageHull(api.session.snapshot().hull);
+      const retried=api.getDebugSnapshot();
+      return {started,retried};
+    })()`);
+    assert.equal(abyssRetry.started.session.mode, 'briefing');
+    assert.equal(abyssRetry.started.session.runMode, 'abyss');
+    assert.equal(abyssRetry.started.world.count, 0);
+    assert.equal(abyssRetry.started.renderer.active, 0);
+    assert.equal(abyssRetry.retried.session.mode, 'briefing');
+    assert.equal(abyssRetry.retried.session.runMode, 'abyss');
+    assert.equal(abyssRetry.retried.world.count, 0);
+    assert.equal(abyssRetry.retried.renderer.active, 0);
   });
 }
 

@@ -42,6 +42,13 @@ export function bootstrapNeonTide(options = {}) {
     runSave,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
+      const startsNewAttempt = current.mode === 'briefing'
+        && (detail?.checkpointRestored
+          || (detail?.runMode && ['menu', 'victory', 'defeat'].includes(previous.mode)));
+      if (startsNewAttempt) {
+        world.reset();
+        entityRenderer.reset();
+      }
       if (detail?.reset) {
         loop?.reset(nowMs);
         runtime?.reset(current);
