@@ -42,11 +42,20 @@ export function createGameSession(options = {}) {
   const events = options.events ?? null;
   const onTransition = options.onTransition ?? (() => {});
   const onChange = options.onChange ?? (() => {});
+  const runSave = options.runSave ?? null;
+  const now = options.now ?? Date.now;
+  const deterministicTestMode = options.deterministicTestMode ?? options.deterministic ?? false;
+  const seedFactory = options.seedFactory ?? (() => Math.floor(Date.now() + Math.random() * 0x7fffffff));
   const baseMaxHull = options.maxHull ?? 3;
   if (!Number.isFinite(baseMaxHull) || baseMaxHull <= 0) throw new TypeError('maxHull must be positive and finite');
   if (events && typeof events.emit !== 'function') throw new TypeError('events must expose emit(type, payload)');
   if (typeof onTransition !== 'function') throw new TypeError('onTransition must be a function');
   if (typeof onChange !== 'function') throw new TypeError('onChange must be a function');
+  if (runSave && (typeof runSave.save !== 'function' || typeof runSave.load !== 'function' || typeof runSave.clear !== 'function')) {
+    throw new TypeError('runSave must expose save(checkpoint), load(), and clear()');
+  }
+  if (typeof now !== 'function') throw new TypeError('now must be a function');
+  if (typeof seedFactory !== 'function') throw new TypeError('seedFactory must be a function');
 
   let state = {
     mode: 'menu',
@@ -101,6 +110,84 @@ export function createGameSession(options = {}) {
     return publishTransition(snapshot(), nextMode, detail);
   }
 
+  function checkpointFromState() {
+    const savedAt = now();
+    if (!Number.isFinite(savedAt) || savedAt < 0) throw new TypeError('checkpoint clock must return a non-negative finite timestamp');
+    return {
+      version: 1,
+      mode: 'standard',
+      seed: state.seed,
+      chapterIndex: state.chapterIndex,
+      build: cloneValue(state.build),
+      hull: state.hull,
+      // `maxHull` is an additive compatibility field. The required v1 schema
+      // remains readable by consumers that only need current hull.
+      maxHull: state.maxHull,
+      stats: cloneValue(state.stats),
+      savedAt,
+    };
+  }
+
+  function saveChapterCheckpoint() {
+    if (state.runMode !== 'standard' || state.mode !== 'chapterComplete' || !runSave) return false;
+    const checkpoint = checkpointFromState();
+    const saved = runSave.save(checkpoint);
+    if (saved) events?.emit('session:checkpoint-saved', { checkpoint: cloneValue(checkpoint) });
+    return saved;
+  }
+
+  function isCheckpoint(checkpoint) {
+    return checkpoint
+      && checkpoint.version === 1
+      && checkpoint.mode === 'standard'
+      && Number.isFinite(checkpoint.seed)
+      && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
+      && checkpoint.build && typeof checkpoint.build === 'object' && !Array.isArray(checkpoint.build)
+      && Number.isFinite(checkpoint.hull) && checkpoint.hull > 0
+      && Number.isFinite(checkpoint.maxHull ?? checkpoint.hull) && (checkpoint.maxHull ?? checkpoint.hull) >= checkpoint.hull
+      && checkpoint.stats && typeof checkpoint.stats === 'object' && !Array.isArray(checkpoint.stats)
+      && Number.isFinite(checkpoint.savedAt) && checkpoint.savedAt >= 0;
+  }
+
+  function restoreCheckpoint(checkpoint = runSave?.load()) {
+    if (!isCheckpoint(checkpoint) || !['menu', 'defeat'].includes(state.mode)) return false;
+    const previous = snapshot();
+    state.runMode = 'standard';
+    state.seed = checkpoint.seed;
+    state.chapterIndex = checkpoint.chapterIndex;
+    state.room = null;
+    state.build = cloneValue(checkpoint.build);
+    state.hull = checkpoint.hull;
+    state.maxHull = checkpoint.maxHull ?? Math.max(baseMaxHull, checkpoint.hull);
+    state.stats = cloneValue(checkpoint.stats);
+    state.terminalReason = null;
+    const restored = publishTransition(previous, 'briefing', {
+      checkpointRestored: true,
+      chapterIndex: state.chapterIndex,
+    });
+    if (restored) events?.emit('session:checkpoint-restored', { checkpoint: cloneValue(checkpoint) });
+    return restored;
+  }
+
+  function restartAbyssAfterDefeat() {
+    if (state.runMode !== 'abyss') return false;
+    runSave?.clear();
+    const selectedSeed = state.seed;
+    const candidate = deterministicTestMode ? selectedSeed : seedFactory();
+    const nextSeed = deterministicTestMode
+      ? selectedSeed
+      : Number.isFinite(candidate) && candidate !== selectedSeed
+        ? candidate
+        : selectedSeed + 1;
+    return startRun('abyss', nextSeed);
+  }
+
+  function applyDefeatRule() {
+    if (state.runMode === 'standard') return restoreCheckpoint();
+    if (state.runMode === 'abyss') return restartAbyssAfterDefeat();
+    return false;
+  }
+
   function startRun(runMode, seed) {
     if (!RUN_MODES.has(runMode)) throw new TypeError('run mode must be standard or abyss');
     if (!Number.isFinite(seed)) throw new TypeError('run seed must be a finite seed');
@@ -114,6 +201,9 @@ export function createGameSession(options = {}) {
     state.maxHull = baseMaxHull;
     state.stats = createStats();
     state.terminalReason = null;
+    // A new attempt must never inherit an older Standard checkpoint. Abyss
+    // additionally guarantees that it cannot expose a stale Continue path.
+    runSave?.clear();
     events?.clear?.();
     const changed = transition('briefing', { runMode, seed });
     if (changed) events?.emit('session:started', { runMode, seed });
@@ -162,6 +252,9 @@ export function createGameSession(options = {}) {
     if (nextMode === 'defeat') state.hull = 0;
     const changed = transition(nextMode, { result: cloneValue(result) });
     if (changed) events?.emit('room:completed', { result: cloneValue(result), nextMode });
+    if (changed && nextMode === 'chapterComplete') saveChapterCheckpoint();
+    if (changed && nextMode === 'victory') runSave?.clear();
+    if (changed && nextMode === 'defeat') applyDefeatRule();
     return changed;
   }
 
@@ -183,7 +276,9 @@ export function createGameSession(options = {}) {
     onChange(changeRecord);
     if (state.hull <= 0) {
       state.terminalReason = 'hullBreach';
-      return transition('defeat', { reason: 'hullBreach' });
+      const defeated = transition('defeat', { reason: 'hullBreach' });
+      if (defeated) applyDefeatRule();
+      return defeated;
     }
     return true;
   }
@@ -220,10 +315,12 @@ export function createGameSession(options = {}) {
     state.hull = Math.min(requestedMaxHull, hull);
     if (state.hull <= 0) {
       state.terminalReason = 'hullBreach';
-      return publishTransition(previous, 'defeat', {
+      const defeated = publishTransition(previous, 'defeat', {
         reason: 'hullBreach',
         hullCompatibilitySync: true,
       });
+      if (defeated) applyDefeatRule();
+      return defeated;
     }
     state.revision += 1;
     const changeRecord = Object.freeze({
@@ -270,6 +367,8 @@ export function createGameSession(options = {}) {
     upgradeHullCapacity,
     reconcileCompatibilityHull,
     reset,
+    restoreCheckpoint,
+    getPersistenceStatus: () => runSave?.getStatus?.() ?? null,
     snapshot,
   });
 }

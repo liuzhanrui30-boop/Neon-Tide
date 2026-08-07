@@ -1,13 +1,24 @@
 import { createEventQueue } from '../game/events.js';
 import { createFixedLoop } from '../game/fixed-loop.js';
 import { createGameSession } from '../game/session.js';
+import { createRunSave } from '../persistence/run-save.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
 
-export function bootstrapNeonTide() {
+function getBrowserStorage() {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    // Private/blocked storage is a normal recovery path, not an app failure.
+    return null;
+  }
+}
+
+export function bootstrapNeonTide(options = {}) {
   const events = createEventQueue(256);
+  const runSave = createRunSave(options.storage ?? getBrowserStorage());
   let runtime = null;
   let loop = null;
   let animationFrameId = null;
@@ -17,6 +28,7 @@ export function bootstrapNeonTide() {
   const session = createGameSession({
     development: import.meta.env.DEV,
     events,
+    runSave,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
       if (detail?.reset) {
@@ -26,10 +38,21 @@ export function bootstrapNeonTide() {
       }
       if (current.mode === 'paused') loop?.pause(nowMs);
       else if (previous.mode === 'paused') loop?.resume(nowMs);
-      else if (current.mode === 'briefing' && ['menu', 'victory', 'defeat'].includes(previous.mode)) loop?.reset(nowMs);
+      else if (current.mode === 'briefing' && previous.mode === 'defeat') {
+        // Checkpoint restores and Abyss retries both replace the complete run;
+        // do not leave compatibility entities, timers, or upgrades alive.
+        loop?.reset(nowMs);
+        runtime?.reset(current);
+        return;
+      } else if (current.mode === 'briefing' && ['menu', 'victory'].includes(previous.mode)) loop?.reset(nowMs);
       runtime?.applySession(current);
     },
   });
+
+  // Restore only the validated chapter-entry snapshot. This happens before the
+  // compatibility runtime starts, so observers never see a partially restored
+  // gameplay session. The menu remains the explicit Continue boundary.
+  session.restoreCheckpoint();
 
   loop = createFixedLoop({
     stepSeconds: STEP_SECONDS,
@@ -58,6 +81,7 @@ export function bootstrapNeonTide() {
       loop: loop.getStats(),
       events: events.getStats(),
       legacy: runtime.getDebugSnapshot(),
+      persistence: runSave.getStatus(),
       disposed,
     });
   }
@@ -73,7 +97,7 @@ export function bootstrapNeonTide() {
     return true;
   }
 
-  const app = Object.freeze({ session, loop, events, dispose, getDebugSnapshot });
+  const app = Object.freeze({ session, loop, events, runSave, dispose, getDebugSnapshot });
   debugApi = app;
   Object.defineProperty(globalThis, '__NEON_TIDE_V3__', {
     configurable: true,

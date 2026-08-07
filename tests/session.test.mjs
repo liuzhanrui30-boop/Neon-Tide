@@ -2,6 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEventQueue } from '../src/game/events.js';
 import { createGameSession, GAME_SESSION_MODES } from '../src/game/session.js';
+import { createRunSave } from '../src/persistence/run-save.js';
+
+class MemoryStorage {
+  #values = new Map();
+
+  getItem(key) { return this.#values.get(key) ?? null; }
+  setItem(key, value) { this.#values.set(key, String(value)); }
+  removeItem(key) { this.#values.delete(key); }
+}
 
 const EXPECTED_MODES = ['menu', 'briefing', 'playing', 'upgrade', 'paused', 'chapterComplete', 'victory', 'defeat'];
 
@@ -57,23 +66,85 @@ test('invalid transitions throw in development and return false in production', 
   assert.equal(production.snapshot().mode, 'menu');
 });
 
-test('damageHull owns defeat and reset produces a fresh immutable snapshot', () => {
-  const session = createGameSession({ development: true, maxHull: 3 });
+test('Abyss death clears the run and begins a fresh chapter-zero attempt', () => {
+  const session = createGameSession({ development: true, maxHull: 3, deterministicTestMode: true });
   session.startRun('abyss', 99);
   session.startRoom({ id: 'abyss-01', chapterIndex: 0 });
   assert.equal(session.damageHull(2), true);
   assert.equal(session.snapshot().hull, 1);
   assert.equal(session.damageHull(1), true);
   const defeated = session.snapshot();
-  assert.equal(defeated.mode, 'defeat');
-  assert.equal(defeated.hull, 0);
-  assert.equal(defeated.stats.damageTaken, 3);
+  assert.equal(defeated.mode, 'briefing');
+  assert.equal(defeated.runMode, 'abyss');
+  assert.equal(defeated.seed, 99);
+  assert.equal(defeated.chapterIndex, 0);
+  assert.equal(defeated.hull, 3);
+  assert.equal(defeated.stats.damageTaken, 0);
   assert.equal(session.reset(), true);
   const reset = session.snapshot();
   assert.equal(reset.mode, 'menu');
   assert.equal(reset.hull, 3);
   assert.equal(reset.runMode, null);
   assert.notEqual(reset, defeated);
+});
+
+test('Abyss changes the selected seed outside deterministic test mode', () => {
+  const session = createGameSession({ development: true, seedFactory: () => 31 });
+  session.startRun('abyss', 31);
+  session.startRoom({ id: 'abyss-01', chapterIndex: 0 });
+  session.damageHull(3);
+  assert.deepEqual(
+    { mode: session.snapshot().mode, chapterIndex: session.snapshot().chapterIndex, seed: session.snapshot().seed },
+    { mode: 'briefing', chapterIndex: 0, seed: 32 },
+  );
+});
+
+
+test('Standard saves only completed chapter entries and restores that snapshot on death', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const session = createGameSession({ development: true, runSave, now: () => 1234, maxHull: 3 });
+
+  session.startRun('standard', 77);
+  session.startRoom({ id: 'chapter-0-room', chapterIndex: 0 });
+  assert.equal(runSave.getStatus().saves, 0, 'a room start is not a checkpoint');
+  session.upgradeHullCapacity(4, { repair: 1 });
+  assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 2, score: 50 }), true);
+  assert.equal(session.snapshot().mode, 'chapterComplete');
+  assert.deepEqual(runSave.load(), {
+    version: 1, mode: 'standard', seed: 77, chapterIndex: 2, build: {}, hull: 4, maxHull: 4,
+    stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 50 }, savedAt: 1234,
+  });
+  const savesAfterTransition = runSave.getStatus().saves;
+  session.startRoom({ id: 'chapter-2-room', chapterIndex: 2 });
+  assert.equal(runSave.getStatus().saves, savesAfterTransition, 'next room must not rewrite the chapter entry');
+
+  session.damageHull(4);
+  assert.deepEqual(
+    { mode: session.snapshot().mode, runMode: session.snapshot().runMode, chapterIndex: session.snapshot().chapterIndex, hull: session.snapshot().hull, maxHull: session.snapshot().maxHull, room: session.snapshot().room },
+    { mode: 'briefing', runMode: 'standard', chapterIndex: 2, hull: 4, maxHull: 4, room: null },
+  );
+});
+
+test('checkpoint restore and corrupt storage keep session snapshots valid', () => {
+  const storage = new MemoryStorage();
+  storage.setItem('neon-tide:v3:checkpoint', '{not json');
+  const runSave = createRunSave(storage);
+  const session = createGameSession({ development: true, runSave });
+  const before = session.snapshot();
+  assert.equal(session.restoreCheckpoint(), false);
+  assert.deepEqual(session.snapshot(), before);
+  assert.equal(session.getPersistenceStatus().corruptions, 1);
+
+  assert.equal(runSave.save({
+    version: 1, mode: 'standard', seed: 5, chapterIndex: 2, build: { beam: 1 }, hull: 3,
+    stats: { roomsStarted: 2 }, savedAt: 1,
+  }), true);
+  assert.equal(session.restoreCheckpoint(), true);
+  assert.deepEqual(
+    { mode: session.snapshot().mode, seed: session.snapshot().seed, chapterIndex: session.snapshot().chapterIndex, hull: session.snapshot().hull },
+    { mode: 'briefing', seed: 5, chapterIndex: 2, hull: 3 },
+  );
 });
 
 test('session validates run modes, seeds, rooms and damage', () => {

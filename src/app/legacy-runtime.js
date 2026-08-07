@@ -2212,6 +2212,22 @@ function resetState() {
 
 function startGame() {
   audio.unlock();
+  const resumable = session.snapshot();
+  if (resumable.mode === "briefing" && resumable.runMode) {
+    resetState();
+    enterStage(resumable.chapterIndex, false);
+    pendingTransitionPayload = { resumedCheckpoint: true };
+    const resumed = session.startRoom({
+      id: "v3-checkpoint-entry",
+      chapterIndex: resumable.chapterIndex,
+    });
+    pendingTransitionPayload = null;
+    if (resumed) {
+      toast("章节信号已恢复", "cyan");
+      audio.event("start");
+    }
+    return resumed;
+  }
   resetState();
   pendingTransitionPayload = { newRun: true };
   session.startRun("standard", Math.floor(performance.timeOrigin + performance.now()));

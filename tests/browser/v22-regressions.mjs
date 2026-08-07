@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_MS, withPage } from './harness.mjs';
+import { APP_URL, PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_MS, withPage } from './harness.mjs';
 
 async function desktopCoreScenario() {
   await withPage('desktop-core', {}, async (page) => {
@@ -365,6 +365,45 @@ async function desktopCoreScenario() {
     await page.pressKey('1', 'Digit1');
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
     await page.waitForPage(`document.activeElement?.tagName === 'CANVAS'`);
+
+    // v3 checkpoints are saved only at the completed chapter boundary. Verify
+    // the real browser storage path through a reload, then prove corrupt data
+    // falls back to a usable menu instead of booting a partial session.
+    const checkpointSaved = await page.evaluate(`(()=>{
+      const session=globalThis.__NEON_TIDE_V3__.session;
+      const completed=session.completeRoom({nextMode:'chapterComplete',chapterIndex:2});
+      return {completed,session:session.snapshot(),saved:JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'))};
+    })()`);
+    assert.equal(checkpointSaved.completed, true);
+    assert.deepEqual(
+      { mode:checkpointSaved.session.mode, chapterIndex:checkpointSaved.session.chapterIndex },
+      { mode:'chapterComplete', chapterIndex:2 },
+    );
+    assert.equal(checkpointSaved.saved.chapterIndex, 2);
+    assert.equal(checkpointSaved.saved.mode, 'standard');
+
+    let loaded = page.client.waitFor('Page.loadEventFired');
+    await page.client.send('Page.navigate', { url: APP_URL });
+    await loaded;
+    await page.waitForPage(`document.readyState === 'complete' && Boolean(globalThis.__NEON_TIDE_V3__)`);
+    const restored = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.deepEqual(
+      { mode:restored.session.mode, chapterIndex:restored.session.chapterIndex, hull:restored.session.hull },
+      { mode:'briefing', chapterIndex:2, hull:checkpointSaved.saved.hull },
+    );
+    assert.ok(restored.persistence.loads >= 1, JSON.stringify(restored.persistence));
+    await page.startGame();
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.snapshot().chapterIndex === 2`);
+
+    await page.evaluate(`localStorage.setItem('neon-tide:v3:checkpoint','{broken')`);
+    loaded = page.client.waitFor('Page.loadEventFired');
+    await page.client.send('Page.navigate', { url: APP_URL });
+    await loaded;
+    await page.waitForPage(`document.readyState === 'complete' && Boolean(globalThis.__NEON_TIDE_V3__)`);
+    const corruptRecovery = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.equal(corruptRecovery.session.mode, 'menu');
+    assert.equal(corruptRecovery.persistence.corruptions, 1);
+    assert.equal(await page.evaluate(`localStorage.getItem('neon-tide:v3:checkpoint')`), null);
   });
 }
 
