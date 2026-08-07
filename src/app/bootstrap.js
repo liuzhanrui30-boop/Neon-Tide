@@ -1,6 +1,9 @@
+import * as THREE from 'three';
+import { createEntityWorld, DEFAULT_ENTITY_CAPACITIES } from '../game/entity-world.js';
 import { createEventQueue } from '../game/events.js';
 import { createFixedLoop } from '../game/fixed-loop.js';
 import { createGameSession } from '../game/session.js';
+import { createEntityRenderer } from '../render/entity-renderer.js';
 import { createRunSave } from '../persistence/run-save.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
 
@@ -19,6 +22,14 @@ function getBrowserStorage() {
 export function bootstrapNeonTide(options = {}) {
   const events = createEventQueue(256);
   const runSave = createRunSave(options.storage ?? getBrowserStorage());
+  const entityCapacities = options.entityCapacities ?? DEFAULT_ENTITY_CAPACITIES;
+  const entityScene = new THREE.Scene();
+  const world = createEntityWorld({ capacities: entityCapacities });
+  const entityRenderer = createEntityRenderer({
+    scene: entityScene,
+    quality: options.entityQuality ?? { tier: 'desktop' },
+    capacities: entityCapacities,
+  });
   let runtime = null;
   let loop = null;
   let animationFrameId = null;
@@ -34,6 +45,8 @@ export function bootstrapNeonTide(options = {}) {
       if (detail?.reset) {
         loop?.reset(nowMs);
         runtime?.reset(current);
+        world.reset();
+        entityRenderer.reset();
         return;
       }
       if (current.mode === 'paused') loop?.pause(nowMs);
@@ -72,6 +85,7 @@ export function bootstrapNeonTide(options = {}) {
       runtime?.simulate(dt);
     },
     onRender(alpha) {
+      entityRenderer.sync(world, alpha);
       runtime?.render(alpha);
     },
   });
@@ -91,6 +105,8 @@ export function bootstrapNeonTide(options = {}) {
       session: session.snapshot(),
       loop: loop.getStats(),
       events: events.getStats(),
+      world: world.getStats(),
+      renderer: entityRenderer.getStats(),
       legacy: runtime.getDebugSnapshot(),
       persistence: runSave.getStatus(),
       disposed,
@@ -103,12 +119,23 @@ export function bootstrapNeonTide(options = {}) {
     if (animationFrameId !== null) window.cancelAnimationFrame(animationFrameId);
     animationFrameId = null;
     runtime.dispose();
+    entityRenderer.dispose();
+    world.dispose();
     events.clear();
     if (globalThis.__NEON_TIDE_V3__ === debugApi) delete globalThis.__NEON_TIDE_V3__;
     return true;
   }
 
-  const app = Object.freeze({ session, loop, events, runSave, dispose, getDebugSnapshot });
+  const app = Object.freeze({
+    session,
+    loop,
+    events,
+    runSave,
+    world,
+    entityRenderer,
+    dispose,
+    getDebugSnapshot,
+  });
   debugApi = app;
   Object.defineProperty(globalThis, '__NEON_TIDE_V3__', {
     configurable: true,

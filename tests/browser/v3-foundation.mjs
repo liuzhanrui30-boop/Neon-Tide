@@ -12,6 +12,13 @@ async function v3FoundationLoopScenario() {
     assert.equal(initial.legacy.mode, 'menu');
     assert.equal(initial.loop.stepSeconds, STEP_SECONDS);
     assert.equal(initial.loop.maxCatchUpSteps, 6);
+    assert.equal(initial.world.count, 0);
+    assert.equal(initial.world.capacity, initial.renderer.capacity);
+    assert.equal(initial.renderer.active, 0);
+    assert.equal(initial.renderer.sceneChildren, 1);
+    assert.equal(initial.renderer.rootChildren, 7);
+    assert.equal(initial.renderer.ownership.geometries, 7);
+    assert.equal(initial.renderer.ownership.materials, 7);
 
     await page.startGame();
     const playing = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
@@ -128,6 +135,11 @@ async function v3FoundationLoopScenario() {
     assert.equal(reset.legacy.elapsed, 0);
     assert.equal(reset.legacy.simulationSteps, 0);
     assert.equal(reset.legacy.renderCalls, 0);
+    assert.equal(reset.world.count, 0);
+    assert.equal(reset.world.resets > 0, true);
+    assert.equal(reset.renderer.active, 0);
+    assert.equal(reset.renderer.sceneChildren, 1);
+    assert.equal(reset.renderer.rootChildren, 7);
   });
 }
 
