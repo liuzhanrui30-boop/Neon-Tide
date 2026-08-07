@@ -17,8 +17,13 @@ export function bootstrapNeonTide() {
   const session = createGameSession({
     development: import.meta.env.DEV,
     events,
-    onTransition({ previous, current }) {
+    onChange({ previous, current, detail }) {
       const nowMs = performance.now();
+      if (detail?.reset) {
+        loop?.reset(nowMs);
+        runtime?.reset(current);
+        return;
+      }
       if (current.mode === 'paused') loop?.pause(nowMs);
       else if (previous.mode === 'paused') loop?.resume(nowMs);
       else if (current.mode === 'briefing' && ['menu', 'victory', 'defeat'].includes(previous.mode)) loop?.reset(nowMs);
@@ -29,9 +34,8 @@ export function bootstrapNeonTide() {
   loop = createFixedLoop({
     stepSeconds: STEP_SECONDS,
     maxCatchUpSteps: MAX_CATCH_UP_STEPS,
-    onStep() {
-      // The v3 systems claim these fixed steps in later tasks. The compatibility
-      // adapter intentionally remains a render projection during this bridge.
+    onStep(dt) {
+      runtime?.simulate(dt);
     },
     onRender(alpha) {
       runtime?.render(alpha);

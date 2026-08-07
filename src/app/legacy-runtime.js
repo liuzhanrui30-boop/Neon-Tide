@@ -53,6 +53,11 @@ if (!session || !loop || !events) throw new TypeError("legacy runtime requires s
 let started = false;
 let disposed = false;
 let pendingTransitionPayload = null;
+let simulationSteps = 0;
+let renderCalls = 0;
+let lastSimulationSeconds = 0;
+let projectedHull = null;
+let projectedMaxHull = null;
 const SESSION_TO_LEGACY_MODE = Object.freeze({
   menu: "menu",
   briefing: "menu",
@@ -2342,7 +2347,17 @@ function transitionTo(nextMode, payload = {}) {
 
 function applySession(snapshot) {
   const nextMode = SESSION_TO_LEGACY_MODE[snapshot.mode];
-  if (!nextMode || nextMode === state.mode) return false;
+  if (!nextMode) return false;
+  state.health = snapshot.hull;
+  state.maxHealth = snapshot.maxHull;
+  projectedHull = snapshot.hull;
+  projectedMaxHull = snapshot.maxHull;
+  state.terminalReason = snapshot.terminalReason;
+  syncHealthPips();
+  if (["gameover", "victory"].includes(nextMode) && !state.runFinished) {
+    finalizeRun(nextMode, snapshot.terminalReason ?? (nextMode === "victory" ? "bossDestroyed" : "hullBreach"));
+  }
+  if (nextMode === state.mode) return true;
   const previousMode = state.mode;
   state.mode = nextMode;
   if (nextMode !== "playing") {
@@ -2407,8 +2422,8 @@ function renderMode(mode, previousMode, payload = {}) {
   }
 }
 
-function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "hullBreach") {
-  if (state.runFinished || state.mode !== "playing" || !["gameover", "victory"].includes(outcome)) return false;
+function finalizeRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "hullBreach") {
+  if (state.runFinished || !["gameover", "victory"].includes(outcome)) return false;
   state.runFinished = true;
   state.terminalReason = reason;
   while (enemies.length) removeEnemy(enemies.length - 1);
@@ -2416,7 +2431,6 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
   state.stats.activeHazards = 0;
   if (outcome === "victory") state.score += 250;
   updateHighScore();
-  transitionTo(outcome);
   if (outcome === "victory") {
     triggerFeedback("large", {
       position: player.position,
@@ -2446,6 +2460,13 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
     });
     audio.event("defeat");
   }
+  return true;
+}
+
+function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "hullBreach") {
+  if (state.runFinished || state.mode !== "playing" || !["gameover", "victory"].includes(outcome)) return false;
+  if (!finalizeRun(outcome, reason)) return false;
+  transitionTo(outcome);
   return true;
 }
 
@@ -2514,6 +2535,7 @@ function applyUpgrade(id) {
   if (id === "repair-swarm") {
     state.maxHealth = Math.max(state.maxHealth, 4);
     state.health = Math.min(state.maxHealth, state.health + upgrade.effect);
+    session.setHull(state.health, { maxHull: state.maxHealth });
     syncHealthPips();
   }
   return true;
@@ -2807,11 +2829,14 @@ function startLaserCharge() {
   spawnRipple(player.position, paletteState.primary.getHex(), 0.72);
   toast("光矛蓄力", "cyan");
   laserAudio.onChargeStarted();
+  updateLaserHUD();
   return true;
 }
 
 function attemptLaser() {
   input.laserBuffer = 0;
+  const stageEnd = STAGES[state.stageIndex]?.end;
+  if (Number.isFinite(stageEnd) && stageEnd - state.elapsed <= loop.getStats().stepSeconds * 2) return false;
   return startLaserCharge();
 }
 
@@ -3797,7 +3822,10 @@ function destroyEnemy(enemy, source) {
 }
 
 function damagePlayer(enemy) {
-  state.health = Math.max(0, state.health - 1);
+  if (projectedHull !== null && (state.health !== projectedHull || state.maxHealth !== projectedMaxHull)) {
+    session.setHull(state.health, { maxHull: state.maxHealth });
+  }
+  if (!session.damageHull(1)) return false;
   enemy.nearMissCandidate = false;
   enemy.nearMissResolved = true;
   syncHealthPips();
@@ -3820,7 +3848,7 @@ function damagePlayer(enemy) {
   });
   toast("船体受损", "danger");
   audio.event("hurt");
-  if (state.health <= 0) finishRun("gameover", "hullBreach");
+  return true;
 }
 
 function updateSpawning(dt) {
@@ -4330,6 +4358,8 @@ function updateLaserHUD() {
   const roundedEnergy = Math.round(energy);
   dom.weaponEnergy.textContent = String(roundedEnergy);
   dom.weaponEnergyFill.style.width = `${energyPercent}%`;
+  dom.weaponEnergyFill.parentElement?.setAttribute("aria-valuenow", String(roundedEnergy));
+  dom.weaponEnergyFill.parentElement?.setAttribute("aria-valuetext", `光矛充能 ${roundedEnergy}%`);
   dom.laserStatus.classList.toggle("ready", ready);
   dom.laserStatus.classList.toggle("charging", charging || active || (!ready && energy > 0));
   const statusByReason = {
@@ -4659,12 +4689,15 @@ function resize() {
   requestRuntimeAudit("resize");
 }
 
-function animate() {
-  const loopStats = loop.getStats();
-  const postTickSeconds = loopStats.lastNowMs === null ? 0 : Math.max(0, (performance.now() - loopStats.lastNowMs) / 1000);
-  const rawWallDt = state.mode === "paused" ? 0 : loopStats.frameSeconds + postTickSeconds;
+function simulate(dt) {
+  if (!Number.isFinite(dt) || dt <= 0) throw new TypeError("simulation dt must be positive and finite");
+  simulationSteps += 1;
+  lastSimulationSeconds = dt;
+  if (projectedHull !== null && (state.health !== projectedHull || state.maxHealth !== projectedMaxHull)) {
+    session.setHull(state.health, { maxHull: state.maxHealth });
+  }
   const simulationScale = state.reducedMotion || state.slowMotionTimer <= 0 ? 1 : state.slowMotionScale;
-  const { wallDt, simDt } = computeFrameDeltas(rawWallDt, simulationScale);
+  const { wallDt, simDt } = computeFrameDeltas(dt, simulationScale);
   sanitizeRuntimeState();
   if (state.mode !== "paused" && state.slowMotionTimer > 0) {
     state.slowMotionTimer = Math.max(0, state.slowMotionTimer - wallDt);
@@ -4706,14 +4739,27 @@ function animate() {
     updateRipples(idleSimDt);
     updateTrails(idleSimDt);
   }
+  updateVisuals(state.mode === "paused" ? 0 : wallDt);
+  return true;
+}
+
+function animate() {
+  renderCalls += 1;
+  sanitizeRuntimeState();
+  updateVisuals(0);
   const energyIntensity = ["charge", "active"].includes(state.laserState) ? 1 : state.weaponEnergy / LASER_RULES.maxEnergy;
   const intensity = THREE.MathUtils.clamp((enemies.length / getEnemyCap()) * 0.7 + energyIntensity * 0.3, 0, 1);
   audio.update(state.elapsed, intensity, state.mode, {
     laserReady: canStartLaser(),
     bossPhase: state.stats.bossPhase,
   });
-  updateVisuals(state.mode === "paused" ? 0 : wallDt);
-  postProcessing?.render();
+  try {
+    postProcessing?.render();
+  } catch {
+    forceRuntimeAudit("render-recovery");
+    postProcessing?.render();
+  }
+  return true;
 }
 
 if (import.meta.env.DEV) {
@@ -4727,6 +4773,8 @@ if (import.meta.env.DEV) {
       resize,
       requestRuntimeAudit,
       forceRuntimeAudit,
+      renderCompatibilityFrame: animate,
+      simulateCompatibilityStep: simulate,
     }),
   });
 }
@@ -4758,10 +4806,13 @@ function render(alpha) {
   return true;
 }
 
-function reset() {
+function reset(snapshot = session.snapshot()) {
   if (disposed) return false;
   resetState();
-  session.reset();
+  simulationSteps = 0;
+  renderCalls = 0;
+  lastSimulationSeconds = 0;
+  applySession(snapshot);
   return true;
 }
 
@@ -4791,9 +4842,12 @@ function getDebugSnapshot() {
     health: state.health,
     stageIndex: state.stageIndex,
     runFinished: state.runFinished,
+    simulationSteps,
+    renderCalls,
+    lastSimulationSeconds,
     eventStats: events.getStats(),
   });
 }
 
-return Object.freeze({ start, render, applySession, reset, dispose, getDebugSnapshot });
+return Object.freeze({ start, simulate, render, applySession, reset, dispose, getDebugSnapshot });
 }

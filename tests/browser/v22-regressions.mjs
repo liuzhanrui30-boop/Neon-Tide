@@ -41,11 +41,16 @@ async function desktopCoreScenario() {
     assert.deepEqual(initialSpace, { mode: 'playing', sequence: 1 }, 'Space after starting did not produce exactly one gameplay dash');
 
     const before = await page.gameEvaluate('return $state.elapsed');
+    const loopBeforeStall = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().loop`);
     await page.gameEvaluate('return $state.elapsed', { stallMs: WALL_STALL_MS });
     await sleep(90);
     const after = await page.gameEvaluate('return $state.elapsed');
+    const loopAfterStall = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().loop`);
     const wallAdvance = after - before;
-    assert.ok(wallAdvance >= WALL_STALL_MS / 1000 * 0.8, `wall clock only advanced ${wallAdvance.toFixed(3)}s`);
+    assert.ok(wallAdvance >= 6 / 60 && wallAdvance < 0.3,
+      `fixed simulation advance after a long stall was abnormal: ${wallAdvance.toFixed(3)}s`);
+    assert.ok(loopAfterStall.droppedSteps > loopBeforeStall.droppedSteps,
+      `long stall did not report discarded fixed steps: ${JSON.stringify({loopBeforeStall,loopAfterStall})}`);
 
     page.requireDev('audio scheduler probe');
     await page.gameEvaluate(`
@@ -228,6 +233,7 @@ async function desktopCoreScenario() {
         const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
         return {
           mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
+          loop:globalThis.__NEON_TIDE_V3__.getDebugSnapshot().loop,
           environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
           projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
           laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
@@ -248,6 +254,7 @@ async function desktopCoreScenario() {
       const probe=projectiles.find((candidate)=>candidate.active&&candidate.resumeClockProbe);
       return {
         mode:$state.mode,elapsed:$state.elapsed,stage:$state.stageIndex,stageQueue:[...$state.stageQueue],
+        loop:globalThis.__NEON_TIDE_V3__.getDebugSnapshot().loop,
         environment:{active:$state.environmentActive,elapsed:$state.environmentElapsed,phase:environmentFrame.phase},
         projectile:{active:Boolean(probe?.active),x:probe?.mesh.position.x,life:probe?.life,vx:probe?.velocity.x},
         laser:{state:$state.laserState,elapsed:$state.laserElapsed,visible:$player.laser.group.visible},
@@ -260,8 +267,11 @@ async function desktopCoreScenario() {
     assert.ok(postResumeStallMs >= POST_RESUME_STALL_MS*0.95,
       `post-resume probe stalled only ${postResumeStallMs.toFixed(1)}ms`);
     assert.equal(immediate.mode, 'playing');
-    assert.deepEqual(immediate, resumeBefore,
+    const { loop: resumeBeforeLoop, ...resumeBeforeGameplay } = resumeBefore;
+    const { loop: immediateLoop, ...immediateGameplay } = immediate;
+    assert.deepEqual(immediateGameplay, resumeBeforeGameplay,
       'pause/resume changed gameplay state before the first production frame');
+    assert.equal(immediateLoop.steps, resumeBeforeLoop.steps);
 
     const firstElapsedAdvance = firstResumeFrame.elapsed-resumeBefore.elapsed;
     const firstEnvironmentAdvance = firstResumeFrame.environment.elapsed-resumeBefore.environment.elapsed;
@@ -273,12 +283,15 @@ async function desktopCoreScenario() {
     assert.deepEqual(firstResumeFrame.stageQueue, []);
     assert.ok(firstResumeFrame.environment.active&&firstResumeFrame.projectile.active&&firstResumeFrame.laser.visible,
       `first resumed frame cleared active systems: ${JSON.stringify(firstResumeFrame)}`);
-    assert.ok(firstElapsedAdvance >= POST_RESUME_STALL_MS/1000*0.85&&firstElapsedAdvance<0.4,
-      `first resumed frame lost post-resume time or included pause time: ${firstElapsedAdvance.toFixed(3)}s`);
+    const firstFixedSteps = firstResumeFrame.loop.steps-resumeBefore.loop.steps;
+    assert.equal(firstFixedSteps, 6,
+      `first resumed frame did not use the bounded six-step catch-up: ${JSON.stringify(firstResumeFrame.loop)}`);
+    assert.ok(Math.abs(firstElapsedAdvance-firstFixedSteps/60)<1e-9,
+      `first resumed frame was not exact fixed-step time: ${firstElapsedAdvance.toFixed(6)}s`);
     assert.ok(Math.abs(firstEnvironmentAdvance-firstElapsedAdvance)<0.025,
       `first-frame environment wall time mismatch: ${firstEnvironmentAdvance} vs ${firstElapsedAdvance}`);
-    assert.ok(firstProjectileAdvance>=0.045&&firstProjectileAdvance<=0.055,
-      `first-frame projectile simulation should cap at 0.05s, got ${firstProjectileAdvance}`);
+    assert.ok(Math.abs(firstProjectileAdvance-firstElapsedAdvance)<1e-9,
+      `first-frame projectile simulation was not fixed-step exact: ${firstProjectileAdvance}`);
     assert.ok(Math.abs(firstLaserAdvance-firstProjectileAdvance)<0.01,
       `first-frame laser/projectile simulation mismatch: ${firstLaserAdvance} vs ${firstProjectileAdvance}`);
     assert.ok(Math.abs(firstProjectileTravel-(firstResumeFrame.projectile.vx*firstProjectileAdvance))<0.025,
@@ -289,15 +302,18 @@ async function desktopCoreScenario() {
     const secondProjectileAdvance = firstResumeFrame.projectile.life-secondResumeFrame.projectile.life;
     const secondProjectileTravel = secondResumeFrame.projectile.x-firstResumeFrame.projectile.x;
     const secondLaserAdvance = secondResumeFrame.laser.elapsed-firstResumeFrame.laser.elapsed;
+    const secondFixedSteps = secondResumeFrame.loop.steps-firstResumeFrame.loop.steps;
     assert.equal(secondResumeFrame.mode, 'playing');
     assert.equal(secondResumeFrame.stage, 0);
     assert.deepEqual(secondResumeFrame.stageQueue, []);
     assert.ok(secondResumeFrame.environment.active&&secondResumeFrame.projectile.active&&secondResumeFrame.laser.visible);
-    assert.ok(secondElapsedAdvance>0&&secondElapsedAdvance<0.2,
-      `second resumed frame wall time was abnormal: ${secondElapsedAdvance}`);
+    assert.ok(secondFixedSteps>=1&&secondFixedSteps<=3,
+      `post-resume interval was replayed on the second frame: ${JSON.stringify(secondResumeFrame.loop)}`);
+    assert.ok(Math.abs(secondElapsedAdvance-secondFixedSteps/60)<1e-9,
+      `second resumed frame was not exact fixed-step time: ${secondElapsedAdvance}`);
     assert.ok(Math.abs(secondEnvironmentAdvance-secondElapsedAdvance)<0.025);
-    assert.ok(secondProjectileAdvance>0&&secondProjectileAdvance<=0.055,
-      `second resumed frame simulation was abnormal: ${secondProjectileAdvance}`);
+    assert.ok(Math.abs(secondProjectileAdvance-secondElapsedAdvance)<1e-9,
+      `second-frame projectile simulation was not fixed-step exact: ${secondProjectileAdvance}`);
     assert.ok(Math.abs(secondLaserAdvance-secondProjectileAdvance)<0.01);
     assert.ok(Math.abs(secondProjectileTravel-(secondResumeFrame.projectile.vx*secondProjectileAdvance))<0.025);
 
@@ -2836,7 +2852,7 @@ async function bossPhaseTwoScenario() {
 
     const restartedBoss = await jumpToBoss(page);
     assert.equal(restartedBoss.stage, 3);
-    await page.gameEvaluate('$state.elapsed=$state.bossDeadline-0.05;return $state.elapsed', { stallMs: WALL_STALL_MS });
+    await page.gameEvaluate('$state.elapsed=$state.bossDeadline-0.05;return $state.elapsed');
     await page.waitForPage(`document.querySelector('#overlay-kicker').textContent.includes('WINDOW CLOSED')`);
     const cleanup = await page.gameEvaluate(`return {
       enemies:$enemies.length,hazards:$state.stats.activeHazards,mode:$state.mode,
@@ -3415,4 +3431,3 @@ export const v22RegressionScenarios = [
   ['final runtime audits and projectile repair', finalRuntimeAuditAndProjectileRepairScenario],
   ['final production realm-shift audio', finalRealmShiftProductionScenario],
 ];
-

@@ -85,3 +85,43 @@ test('session validates run modes, seeds, rooms and damage', () => {
   session.startRoom({ id: 'room' });
   assert.throws(() => session.damageHull(-1), /non-negative finite/);
 });
+
+test('session reports authoritative hull effects and reset effects through onChange', () => {
+  const changes = [];
+  const session = createGameSession({
+    development: true,
+    onChange: ({ previous, current, detail }) => changes.push({
+      previousMode: previous.mode,
+      mode: current.mode,
+      previousHull: previous.hull,
+      hull: current.hull,
+      detail,
+    }),
+  });
+  session.startRun('standard', 7);
+  session.startRoom({ id: 'room' });
+  changes.length = 0;
+
+  assert.equal(session.damageHull(1), true);
+  assert.deepEqual(changes, [{
+    previousMode: 'playing',
+    mode: 'playing',
+    previousHull: 3,
+    hull: 2,
+    detail: { hullDamage: 1 },
+  }]);
+
+  changes.length = 0;
+  assert.equal(session.setHull(5, { maxHull: 6 }), true);
+  assert.equal(session.snapshot().hull, 5);
+  assert.equal(session.snapshot().maxHull, 6);
+  assert.deepEqual(changes[0].detail, { hullSync: true });
+
+  changes.length = 0;
+  assert.equal(session.reset(), true);
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].previousMode, 'playing');
+  assert.equal(changes[0].mode, 'menu');
+  assert.equal(changes[0].hull, 3);
+  assert.deepEqual(changes[0].detail, { reset: true });
+});

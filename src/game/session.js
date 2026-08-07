@@ -41,10 +41,12 @@ export function createGameSession(options = {}) {
   const development = options.development ?? true;
   const events = options.events ?? null;
   const onTransition = options.onTransition ?? (() => {});
+  const onChange = options.onChange ?? (() => {});
   const maxHull = options.maxHull ?? 3;
   if (!Number.isInteger(maxHull) || maxHull <= 0) throw new TypeError('maxHull must be a positive integer');
   if (events && typeof events.emit !== 'function') throw new TypeError('events must expose emit(type, payload)');
   if (typeof onTransition !== 'function') throw new TypeError('onTransition must be a function');
+  if (typeof onChange !== 'function') throw new TypeError('onChange must be a function');
 
   let state = {
     mode: 'menu',
@@ -92,6 +94,7 @@ export function createGameSession(options = {}) {
     const transitionRecord = Object.freeze({ previous, current, detail: cloneValue(detail) });
     events?.emit('session:transition', transitionRecord);
     onTransition(transitionRecord);
+    onChange(transitionRecord);
     return true;
   }
 
@@ -161,15 +164,40 @@ export function createGameSession(options = {}) {
   function damageHull(amount) {
     if (!Number.isFinite(amount) || amount < 0) throw new TypeError('damage amount must be non-negative finite');
     if (!['playing', 'paused', 'upgrade'].includes(state.mode)) return invalid(state.mode === 'defeat' ? 'defeat' : 'defeat');
+    const previous = snapshot();
     const applied = Math.min(state.hull, amount);
     state.hull = Math.max(0, state.hull - amount);
     state.stats.damageTaken += applied;
     state.revision += 1;
     events?.emit('session:hull-damaged', { amount: applied, hull: state.hull, maxHull: state.maxHull });
+    const changeRecord = Object.freeze({
+      previous,
+      current: snapshot(),
+      detail: Object.freeze({ hullDamage: applied }),
+    });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
     if (state.hull <= 0) {
       state.terminalReason = 'hullBreach';
       return transition('defeat', { reason: 'hullBreach' });
     }
+    return true;
+  }
+
+  function setHull(hull, { maxHull: requestedMaxHull = state.maxHull } = {}) {
+    if (!Number.isFinite(hull) || hull < 0) throw new TypeError('hull must be a non-negative finite number');
+    if (!Number.isInteger(requestedMaxHull) || requestedMaxHull <= 0) throw new TypeError('maxHull must be a positive integer');
+    const previous = snapshot();
+    state.maxHull = requestedMaxHull;
+    state.hull = Math.min(requestedMaxHull, hull);
+    state.revision += 1;
+    const changeRecord = Object.freeze({
+      previous,
+      current: snapshot(),
+      detail: Object.freeze({ hullSync: true }),
+    });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
     return true;
   }
 
@@ -193,8 +221,9 @@ export function createGameSession(options = {}) {
     const transitionRecord = Object.freeze({ previous, current, detail: { reset: true } });
     events?.emit('session:transition', transitionRecord);
     onTransition(transitionRecord);
+    onChange(transitionRecord);
     return true;
   }
 
-  return Object.freeze({ startRun, startRoom, pause, resume, completeRoom, damageHull, reset, snapshot });
+  return Object.freeze({ startRun, startRoom, pause, resume, completeRoom, damageHull, setHull, reset, snapshot });
 }
