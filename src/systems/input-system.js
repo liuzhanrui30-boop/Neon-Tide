@@ -241,18 +241,18 @@ export function createInputSystem(options = {}) {
     const dashButton = options.dashButton ?? hostDocument?.querySelector?.('#dash-button');
     const ultimateButton = options.ultimateButton ?? hostDocument?.querySelector?.('#laser-button');
     // Click is deliberate: native buttons retain keyboard/switch activation and
-    // pointer coordinates never enter the gameplay snapshot. Pointer provenance
-    // is tracked separately from movement ownership, so a touch/mouse/assistive
-    // action cannot erase a simultaneously held keyboard or stick vector.
+    // pointer coordinates never enter the gameplay snapshot. A tracked touch
+    // remains touch-only provenance; keyboard, mouse and switch-style clicks
+    // claim the keyboard action class without clearing held keyboard movement.
     const bindNativeAction = (button, action) => {
       let pointerDevice = null;
       bind(button, 'pointerdown', (event) => {
-        pointerDevice = event.pointerType === 'touch' ? 'touch' : lastActiveDevice;
+        pointerDevice = event.pointerType === 'touch' ? 'touch' : null;
       });
       bind(button, 'click', (event) => {
-        const device = pointerDevice ?? (event.detail === 0 ? lastActiveDevice : lastActiveDevice);
+        const device = event.detail === 0 ? 'keyboard' : (pointerDevice ?? 'keyboard');
         pointerDevice = null;
-        press(action, device, { claimMovement: false });
+        press(action, device, { claimMovement: device === 'keyboard' });
       });
     };
     bindNativeAction(dashButton, 'dash');

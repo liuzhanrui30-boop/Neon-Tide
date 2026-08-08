@@ -91,23 +91,52 @@ async function v3PlayerScenario() {
     page.requireDev('perfect phase semantic collision probe');
     const perfect = await page.gameEvaluate(`
       $state.perfectPhaseWindow=0.1;$state.dashCharges=[0,1];$state.slowMotionScale=1;$state.slowMotionTimer=0;
+      $state.autoFireRateBuffTimer=0;$state.autoPulseTimer=AUTO_PULSE_INTERVAL;
       const queuedBefore=globalThis.__NEON_TIDE_V3__.events.getStats().queued;
       const avoided=triggerPerfectPhase({nearMissCandidate:true,nearMissResolved:false,group:{position:new THREE.Vector3($player.position.x,$player.position.y,0)}});
       const queuedAfter=globalThis.__NEON_TIDE_V3__.events.getStats().queued;
-      return {avoided,charges:[...$state.dashCharges],buff:$state.autoFireRateBuffTimer,window:$state.perfectPhaseWindow,slow:$state.slowMotionTimer,queuedBefore,queuedAfter};
+      return {avoided,charges:[...$state.dashCharges],buff:$state.autoFireRateBuffTimer,pulseTimer:$state.autoPulseTimer,window:$state.perfectPhaseWindow,slow:$state.slowMotionTimer,queuedBefore,queuedAfter};
     `);
     assert.equal(perfect.avoided, true);
     assert.deepEqual(perfect.charges, [0.35, 1]);
     assert.equal(perfect.window, 0);
     assert.ok(perfect.buff > 0);
+    assert.ok(perfect.pulseTimer <= 0.55 * 0.75 + 1e-9, JSON.stringify(perfect));
     assert.equal(perfect.slow, 0);
     assert.equal(perfect.queuedAfter, perfect.queuedBefore + 1);
 
+    const pulseAttack = await page.gameEvaluate(`
+      clearWorldEntities();$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      const nearest=createChaser(new THREE.Vector2($player.position.x+1,$player.position.y));
+      const weak=createChaser(new THREE.Vector2($player.position.x-4,$player.position.y));
+      nearest.hp=4;nearest.maxHp=4;nearest.priority=0;
+      weak.hp=4;weak.maxHp=4;weak.priority=0;weak.weakPoint=true;
+      $state.autoFireRateBuffTimer=0;$state.autoPulseTimer=0;$state.stats.autoPulseShots=0;$state.stats.autoPulseLog=[];
+      const particlesBefore=particles.length;const ripplesBefore=ripples.length;
+      const queuedBefore=globalThis.__NEON_TIDE_V3__.events.getStats().queued;
+      const audioCalls=[];const originalAudioEvent=audio.event;
+      audio.event=(name,intensity)=>{audioCalls.push({name,intensity});return true;};
+      try{updateAutomaticPulse(0);}finally{audio.event=originalAudioEvent;}
+      const queuedAfter=globalThis.__NEON_TIDE_V3__.events.getStats().queued;
+      return {nearestHp:nearest.hp,weakHp:weak.hp,record:$state.stats.autoPulseLog.at(-1),particles:particles.length-particlesBefore,ripples:ripples.length-ripplesBefore,audioCalls,queuedBefore,queuedAfter};
+    `);
+    assert.equal(pulseAttack.nearestHp, 4, JSON.stringify(pulseAttack));
+    assert.equal(pulseAttack.weakHp, 3, JSON.stringify(pulseAttack));
+    assert.equal(pulseAttack.record.hit, true);
+    assert.equal(pulseAttack.record.targetIndex, 1);
+    assert.equal(pulseAttack.record.damage, 1);
+    assert.equal(pulseAttack.record.hpBefore, 4);
+    assert.equal(pulseAttack.record.hpAfter, 3);
+    assert.ok(pulseAttack.particles > 0 && pulseAttack.ripples > 0, JSON.stringify(pulseAttack));
+    assert.deepEqual(pulseAttack.audioCalls.map(({name})=>name), ['laserHit']);
+    assert.equal(pulseAttack.queuedAfter, pulseAttack.queuedBefore + 1);
+
     const cadence = await page.gameEvaluate(`
       clearWorldEntities();$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
-      const measure=(buff)=>{
-        $state.autoFireRateBuffTimer=buff;$state.autoPulseTimer=AUTO_PULSE_INTERVAL;
+      const measure=(activateBuff)=>{
+        $state.autoFireRateBuffTimer=0;$state.autoPulseTimer=AUTO_PULSE_INTERVAL;
         $state.stats.autoPulseShots=0;$state.stats.autoPulseLog=[];
+        if(activateBuff){$state.perfectPhaseWindow=0.1;triggerPerfectPhase({nearMissCandidate:true,nearMissResolved:false,group:{position:new THREE.Vector3($player.position.x,$player.position.y,0)}});}
         const startedAt=$state.elapsed;
         for(let guard=0;guard<120&&$state.stats.autoPulseLog.length<2;guard+=1){
           $state.elapsed+=1/60;
@@ -115,10 +144,11 @@ async function v3PlayerScenario() {
           $state.autoFireRateBuffTimer=Math.max(0,$state.autoFireRateBuffTimer-1/60);
         }
         const times=$state.stats.autoPulseLog.map((entry)=>entry.elapsed-startedAt);
-        return {times,interval:times[1]-times[0]};
+        return {times,first:times[0],interval:times[1]-times[0]};
       };
-      return {base:measure(0),buffed:measure(0.8)};
+      return {base:measure(false),buffed:measure(true)};
     `);
+    assert.ok(cadence.base.first > cadence.buffed.first, JSON.stringify(cadence));
     assert.ok(cadence.base.interval > cadence.buffed.interval, JSON.stringify(cadence));
     assert.ok(Math.abs(cadence.buffed.interval/cadence.base.interval-0.75)<0.08, JSON.stringify(cadence));
 
@@ -196,7 +226,14 @@ async function v3PlayerScenario() {
     const beforeSwitch = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.position.x`);
     await page.dispatchKey('rawKeyDown', 'd', 'KeyD');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.position.x > ${beforeSwitch + 0.03}`);
-    await page.click('#dash-button');
+    const provenance = await page.evaluate(`(()=>{
+      const system=globalThis.__NEON_TIDE_V3__.inputSystem;
+      system.setTouchVector(0,1);
+      const before=system.getLastActiveDevice();
+      document.querySelector('#dash-button').click();
+      return {before,after:system.getLastActiveDevice(),press:system.getLastPressDevice()};
+    })()`);
+    assert.deepEqual(provenance, {before:'touch',after:'keyboard',press:'keyboard'});
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player?.dashCharges.some((charge)=>charge<0.2)`);
     const switchDash = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
     await page.dispatchKey('keyUp', 'd', 'KeyD');

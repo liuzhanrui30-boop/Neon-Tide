@@ -174,5 +174,33 @@ test('native button provenance never erases held keyboard movement', () => {
   assert.equal(assistiveActivated.inputDevice, 'keyboard');
   assert.equal(assistiveActivated.ultimatePressed, true);
   assert.equal(system.getLastPressDevice(), 'keyboard');
+
+  system.setTouchVector(0, 1);
+  assert.equal(system.snapshot().inputDevice, 'touch');
+  dashButton.emit('click', { detail: 0 });
+  const switchAfterTouch = system.snapshot();
+  assert.deepEqual(switchAfterTouch, {
+    moveX: 1,
+    moveY: 0,
+    dashPressed: true,
+    ultimatePressed: false,
+    inputDevice: 'keyboard',
+  });
+  assert.equal(system.getLastPressDevice(), 'keyboard');
+  assert.equal(system.snapshot().dashPressed, false, 'one native activation must yield one edge');
+
+  system.setGamepadState({ connected: true, axes: [-1, 0], buttons: [] });
+  assert.equal(system.snapshot().inputDevice, 'gamepad');
+  ultimateButton.emit('click', { detail: 0 });
+  const enterAfterGamepad = system.snapshot();
+  assert.deepEqual(enterAfterGamepad, {
+    moveX: 1,
+    moveY: 0,
+    dashPressed: false,
+    ultimatePressed: true,
+    inputDevice: 'keyboard',
+  });
+  assert.equal(system.getLastPressDevice(), 'keyboard');
+  assert.equal(system.snapshot().ultimatePressed, false, 'keyboard click must not double-fire');
   system.dispose();
 });

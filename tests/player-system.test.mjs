@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { createEventQueue } from '../src/game/events.js';
 import {
+  AUTO_PULSE_INTERVAL,
   FIXED_PLAYER_STEP,
   PERFECT_PHASE_REFUND,
   createPlayerState,
@@ -167,4 +168,29 @@ test('perfect-phase buff measurably shortens automatic pulse cadence', () => {
   const buffed = collectIntervals(2);
   assert.ok(base > buffed, JSON.stringify({ base, buffed }));
   assert.ok(Math.abs(buffed / base - 0.75) < 0.08, JSON.stringify({ base, buffed }));
+});
+
+test('perfect phase immediately advances the current automatic pulse cooldown', () => {
+  const player = createPlayerState({
+    perfectPhaseWindow: 0.1,
+    autoFireTimer: AUTO_PULSE_INTERVAL,
+  });
+  const emitted = [];
+  const events = {
+    emit(type, payload) {
+      emitted.push({ type, payload });
+      return true;
+    },
+  };
+  assert.equal(resolvePlayerHit(player, { damageHull: () => true }, events), false);
+  assert.ok(player.autoFireTimer < AUTO_PULSE_INTERVAL, JSON.stringify(player));
+  assert.ok(player.autoFireTimer <= AUTO_PULSE_INTERVAL * 0.75 + 1e-9, JSON.stringify(player));
+
+  let elapsed = 0;
+  while (!emitted.some(({ type }) => type === 'player:autoPulse') && elapsed < 1) {
+    elapsed += FIXED_PLAYER_STEP;
+    updatePlayerState(player, input(), FIXED_PLAYER_STEP, events);
+  }
+  assert.ok(elapsed < AUTO_PULSE_INTERVAL, JSON.stringify({ elapsed, emitted }));
+  assert.ok(elapsed < 0.8, 'the 0.8 second surge must contain an accelerated shot opportunity');
 });

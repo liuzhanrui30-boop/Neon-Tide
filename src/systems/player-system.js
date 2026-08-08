@@ -260,6 +260,10 @@ export function resolvePlayerHit(player, session, events) {
     const refundIndex = player.dashCharges[0] <= player.dashCharges[1] ? 0 : 1;
     const before = player.dashCharges[refundIndex];
     player.dashCharges[refundIndex] = clamp(before + PERFECT_PHASE_REFUND, 0, 1);
+    player.autoFireTimer = Math.min(
+      player.autoFireTimer * AUTO_PULSE_BUFF_MULTIPLIER,
+      AUTO_PULSE_INTERVAL * AUTO_PULSE_BUFF_MULTIPLIER,
+    );
     player.autoFireRateBuffTimer = Math.max(player.autoFireRateBuffTimer, AUTO_FIRE_BUFF_DURATION);
     emit(events, 'perfectPhase', {
       refundIndex,

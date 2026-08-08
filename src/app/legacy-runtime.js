@@ -99,6 +99,7 @@ const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
 const MAX_FLOATING_TEXTS = 24;
+const AUTO_PULSE_DAMAGE = 1;
 const PROJECTILE_POOL_SIZE = COMBAT.projectilePoolSize;
 const MAX_ENVIRONMENT_STEPS_PER_FRAME = 64;
 const enemyScratch = {
@@ -2669,11 +2670,13 @@ function updateAutomaticPulse(dt) {
   let fired = 0;
   while (state.autoPulseTimer <= 1e-9 && fired < 4) {
     state.stats.autoPulseShots += 1;
+    const hit = fireAutomaticPulse(state.stats.autoPulseShots);
     const record = Object.freeze({
       sequence: state.stats.autoPulseShots,
       elapsed: state.elapsed,
       interval,
       buffed,
+      ...hit,
     });
     state.stats.autoPulseLog.push(record);
     if (state.stats.autoPulseLog.length > 16) state.stats.autoPulseLog.shift();
@@ -2940,6 +2943,7 @@ function selectTideLanceLock() {
     y: enemy.group.position.y,
     visible: enemy.group.visible !== false
       && !enemy.dead
+      && !enemy.pendingLaserDeath
       && Math.abs(enemy.group.position.x) <= view.halfWidth + 1
       && Math.abs(enemy.group.position.y) <= view.halfHeight + 1,
     dead: enemy.dead,
@@ -2951,6 +2955,56 @@ function selectTideLanceLock() {
   const selected = selectAutomaticTarget(candidates, player.position);
   if (!selected) return null;
   return Object.freeze({ ...selected, enemy: enemies[selected.target.id] ?? null });
+}
+
+function fireAutomaticPulse(sequence) {
+  const lock = selectTideLanceLock();
+  if (!lock?.enemy || lock.enemy.dead) {
+    return Object.freeze({
+      hit: false,
+      targetIndex: -1,
+      targetType: null,
+      damage: 0,
+      hpBefore: null,
+      hpAfter: null,
+      destroyed: false,
+    });
+  }
+  const enemy = lock.enemy;
+  const targetIndex = lock.target.id;
+  const hpBefore = Math.max(0, runtimeFinite(enemy.hp, 0));
+  const damage = Math.min(AUTO_PULSE_DAMAGE, hpBefore);
+  enemy.hp = Math.max(0, hpBefore - damage);
+  enemy.hitReactTimer = Math.max(runtimeFinite(enemy.hitReactTimer, 0), 0.12);
+  if (enemy.type === "boss") {
+    syncBossProgress(enemy);
+    if (enemy.hp > 0) enterBossPhaseTwo(enemy);
+  }
+  if (enemy.hp > 0) tryStartBulwarkArmorCounter(enemy, "autoPulse", sequence);
+  const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+  const destroyed = enemy.hp <= 0 ? destroyEnemy(enemy, "autoPulse") : false;
+  if (!destroyed) {
+    triggerFeedback("small", {
+      position,
+      color: paletteState.primary.getHex(),
+      particles: 4,
+      speed: 2.4,
+      size: 0.62,
+      rippleScale: 0.58,
+      text: `PULSE -${damage}`,
+      tone: "cyan",
+    });
+    audio.event("laserHit", 0.2);
+  }
+  return Object.freeze({
+    hit: damage > 0,
+    targetIndex,
+    targetType: enemy.type,
+    damage,
+    hpBefore,
+    hpAfter: enemy.hp,
+    destroyed: Boolean(destroyed),
+  });
 }
 
 function startLaserCharge() {
@@ -3993,6 +4047,10 @@ function triggerPerfectPhase(source) {
   const refundIndex = state.dashCharges[0] <= state.dashCharges[1] ? 0 : 1;
   const before = state.dashCharges[refundIndex];
   state.dashCharges[refundIndex] = Math.min(1, before + 0.35);
+  state.autoPulseTimer = Math.min(
+    state.autoPulseTimer * AUTO_PULSE_BUFF_MULTIPLIER,
+    AUTO_PULSE_INTERVAL * AUTO_PULSE_BUFF_MULTIPLIER,
+  );
   state.autoFireRateBuffTimer = Math.max(state.autoFireRateBuffTimer, 0.8);
   source.nearMissCandidate = false;
   source.nearMissResolved = true;
