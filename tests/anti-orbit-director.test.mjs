@@ -18,6 +18,7 @@ import { createCollisionSystem } from '../src/systems/collision-system.js';
 
 const STEP = 1 / 60;
 const TAU = Math.PI * 2;
+const PLAYER_COLLISION_RADIUS = 0.4;
 
 function circleHistory({ seconds = 4.5, radius = 8, direction = 1, progress = 0 } = {}) {
   const history = createRouteHistory();
@@ -272,27 +273,68 @@ test('objective shift renders a path before moving authoritative objective geome
   assert.deepEqual({ x: target.x, y: target.y }, preview.path.at(-1));
 });
 
-test('10,000 seeded objective shifts keep every translated route and target inside the arena and preview the committed geometry', () => {
+test('moving-zone objective shift materializes the exact authoritative activation point as a visible safe preview marker', () => {
+  const world = createEntityWorld({ capacities: { objective: 24 } });
+  const bridge = createObjectiveWorldBridge({ world });
+  const director = createAntiOrbitDirector({ seed: 222, preferredKind: 'objective-shift' });
+  const objective = createObjective(getEncounterTemplate('moving-sanctum'), 222);
+  const route = (time) => {
+    const angle = time * 1.4;
+    return {
+      x: Math.cos(angle) * 9.2, y: Math.sin(angle) * 5.5,
+      normalizedAngle: angle, normalizedRadius: 1,
+    };
+  };
+  stepDirector(director, objective, route, 3.65);
+  const preview = director.getSnapshot().activeCounter;
+  bridge.sync(objective);
+  const marker = [...world.query('objective')].map((id) => world.get(id))
+    .find(({ role }) => role === 'counter-shift-destination');
+  assert.ok(marker && !marker.collidable);
+  assert.ok(Math.hypot(marker.x - preview.destination.x, marker.y - preview.destination.y) <= 1e-6);
+  stepDirector(director, objective, route, preview.previewSeconds - preview.elapsed + STEP);
+  assert.deepEqual({ x: objective.safeZone.x, y: objective.safeZone.y }, preview.destination);
+  assert.ok(Math.hypot(objective.safeZone.x - marker.x, objective.safeZone.y - marker.y) <= 1e-6);
+});
+
+test('10,000 seeded objective shifts preview exact activation geometry in the opposite quadrant and preserve route semantics', () => {
   const cases = [
-    ['anchor-break', (objective) => objective.anchors.filter(({ completed }) => !completed), (entry) => entry.radius],
-    ['moving-sanctum', (objective) => objective.path, (entry, objective) => objective.safeZone.radius],
-    ['escort-skiff', (objective) => objective.escort.route, (entry, objective) => objective.escort.supportRadius],
-    ['core-harvest', (objective) => objective.cores.filter(({ collected }) => !collected), (entry) => entry.radius],
-    ['dual-crisis', (objective) => objective.crises.filter(({ completed }) => !completed), (entry) => entry.radius],
+    ['anchor-break', (objective) => objective.anchors.filter(({ completed }) => !completed), (objective) => objective.anchors.find(({ completed }) => !completed), (entry) => entry.radius],
+    ['moving-sanctum', (objective) => objective.path, (objective) => objective.safeZone, (entry, objective) => objective.safeZone.radius],
+    ['escort-skiff', (objective) => objective.escort.route, (objective) => objective.escort, (entry, objective) => objective.escort.supportRadius],
+    ['core-harvest', (objective) => objective.cores.filter(({ collected }) => !collected), (objective) => objective.cores.find(({ collected }) => !collected), (entry) => entry.radius],
+    ['dual-crisis', (objective) => objective.crises.filter(({ completed }) => !completed), (objective) => objective.crises.find(({ completed }) => !completed), (entry) => entry.radius],
   ];
   const safetyMargin = 0.35;
   for (let seed = 0; seed < 10_000; seed += 1) {
-    for (const [templateId, geometryFor, clearanceFor] of cases) {
+    for (const [templateId, geometryFor, targetFor, clearanceFor] of cases) {
       const objective = createObjective(getEncounterTemplate(templateId), seed);
       const beforeGeometry = geometryFor(objective);
       const before = beforeGeometry.map(({ x, y, sourceId }) => ({ x, y, sourceId }));
+      const targetBefore = { x: targetFor(objective).x, y: targetFor(objective).y };
+      const routeDistances = beforeGeometry.map(({ distance }) => distance);
+      const routeProgress = objective.type === 'moving-zone' ? objective.routeDistance
+        : objective.type === 'escort' ? objective.escort.routeDistance : null;
       const plan = createObjectiveShiftPlan(objective, { pathNodes: 7, variant: seed });
       assert.ok(plan, `${templateId} seed ${seed} must produce a shift`);
-      assert.ok(Number.isFinite(plan.translation?.x) && Number.isFinite(plan.translation?.y));
+      assert.ok(Number.isFinite(plan.transform?.translateX) && Number.isFinite(plan.transform?.translateY));
+      assert.deepEqual(plan.destinationQuadrant, {
+        x: -plan.sourceQuadrant.x,
+        y: -plan.sourceQuadrant.y,
+      });
+      assert.ok(Math.abs(plan.destination.x) >= plan.axisEpsilon - 1e-6);
+      assert.ok(Math.abs(plan.destination.y) >= plan.axisEpsilon - 1e-6);
+      assert.equal(Math.sign(plan.destination.x), plan.destinationQuadrant.x);
+      assert.equal(Math.sign(plan.destination.y), plan.destinationQuadrant.y);
+      if (Math.abs(targetBefore.x) >= plan.axisEpsilon) assert.equal(Math.sign(plan.destination.x), -Math.sign(targetBefore.x));
+      if (Math.abs(targetBefore.y) >= plan.axisEpsilon) assert.equal(Math.sign(plan.destination.y), -Math.sign(targetBefore.y));
+      const transformPoint = ({ x, y }) => ({
+        x: Math.round((x * plan.transform.scaleX + plan.transform.translateX) * 1e6) / 1e6,
+        y: Math.round((y * plan.transform.scaleY + plan.transform.translateY) * 1e6) / 1e6,
+      });
       const translatesWholeRoute = templateId === 'moving-sanctum' || templateId === 'escort-skiff';
       const expected = before.map(({ x, y, sourceId }) => ({
-        x: Math.round((x + (translatesWholeRoute || sourceId === plan.targetSourceId ? plan.translation.x : 0)) * 1e6) / 1e6,
-        y: Math.round((y + (translatesWholeRoute || sourceId === plan.targetSourceId ? plan.translation.y : 0)) * 1e6) / 1e6,
+        ...(translatesWholeRoute || sourceId === plan.targetSourceId ? transformPoint({ x, y }) : { x, y }),
       }));
       if (translatesWholeRoute) {
         assert.deepEqual(plan.path, expected, `${templateId} seed ${seed} preview must be the future route`);
@@ -300,9 +342,18 @@ test('10,000 seeded objective shifts keep every translated route and target insi
         const targetIndex = before.findIndex(({ sourceId }) => sourceId === plan.targetSourceId);
         assert.deepEqual(plan.path.at(-1), expected[targetIndex], `${templateId} seed ${seed} preview must end at the future target`);
       }
+      const destinationMarker = plan.previewGeometry.find(({ role }) => role === 'counter-shift-destination');
+      assert.ok(destinationMarker, `${templateId} seed ${seed} must visibly preview the activation point`);
+      assert.ok(Math.hypot(destinationMarker.x - plan.destination.x, destinationMarker.y - plan.destination.y) <= 1e-6);
       assert.equal(commitObjectiveShift(objective, plan), true);
       const committed = geometryFor(objective).map(({ x, y }) => ({ x, y }));
       assert.deepEqual(committed, expected, `${templateId} seed ${seed} preview and activation must agree`);
+      assert.deepEqual({ x: targetFor(objective).x, y: targetFor(objective).y }, plan.destination,
+        `${templateId} seed ${seed} authoritative target must activate on the visible destination marker`);
+      assert.deepEqual(beforeGeometry.map(({ distance }) => distance), routeDistances,
+        `${templateId} seed ${seed} route distances must retain progress semantics`);
+      if (objective.type === 'moving-zone') assert.equal(objective.routeDistance, routeProgress);
+      if (objective.type === 'escort') assert.equal(objective.escort.routeDistance, routeProgress);
       geometryFor(objective).forEach((entry) => {
         const clearance = clearanceFor(entry, objective) + safetyMargin;
         assert.ok(Math.abs(entry.x) <= objective.arena.halfWidth - clearance + 1e-6,
@@ -383,10 +434,63 @@ test('center pulse keeps the full advertised safe circle clear of collision geom
         assert.ok(marker && !marker.collidable);
         for (const hazard of counter.geometry.filter(({ collidable }) => collidable)) {
           const clearance = Math.hypot(hazard.x - marker.x, hazard.y - marker.y) - hazard.radius;
-          assert.ok(clearance >= marker.radius + counter.safeMargin - 1e-6,
+          assert.ok(clearance >= marker.radius + PLAYER_COLLISION_RADIUS + counter.safeMargin - 1e-6,
             `${quality} quality hp=${hp} tick=${tick} hazard clearance ${clearance} overlaps advertised ${marker.radius}`);
         }
       }
+    }
+  }
+});
+
+test('center pulse safe marker prevents real collision damage for player bodies tangent to every safe-boundary direction', () => {
+  for (const quality of ['high', 'low']) {
+    for (const hp of [5, 1]) {
+      const world = createEntityWorld({ capacities: { objective: 24 } });
+      const bridge = createObjectiveWorldBridge({ world });
+      const collision = createCollisionSystem();
+      const director = createAntiOrbitDirector({ seed: 505, preferredKind: 'center-pulse' });
+      const objective = createObjective(getEncounterTemplate('anchor-break'), 505);
+      const route = (time) => {
+        const angle = time * 1.35;
+        return {
+          x: Math.cos(angle) * 9.2,
+          y: Math.sin(angle) * 5.5,
+          normalizedAngle: angle,
+          normalizedRadius: 1,
+          hp,
+          maxHp: 5,
+          quality,
+        };
+      };
+      stepDirector(director, objective, route, 3.65);
+      const playerId = world.spawn('player', {
+        x: 0, y: 0, radius: PLAYER_COLLISION_RADIUS, hp: 5, maxHp: 5,
+        team: 1, collidable: true, invulnerable: false,
+      });
+      let hullDamage = 0;
+      for (let tick = 0; tick < Math.ceil(3.2 / STEP); tick += 1) {
+        stepDirector(director, objective, route, STEP);
+        const counter = director.getSnapshot().activeCounter;
+        if (!counter || counter.phase !== 'active') continue;
+        bridge.sync(objective);
+        const centerRadius = counter.centerSafeRadius;
+        const points = [{ x: 0, y: 0 }];
+        for (let index = 0; index < 16; index += 1) {
+          const angle = index / 16 * TAU;
+          for (const amount of [0.5, 1]) {
+            points.push({ x: Math.cos(angle) * centerRadius * amount, y: Math.sin(angle) * centerRadius * amount });
+          }
+        }
+        for (const point of points) {
+          world.write(playerId, point);
+          const summary = collision.resolve(world, {
+            damageHull(amount) { hullDamage += amount; return true; },
+          }, STEP);
+          assert.equal(summary.playerDamage, 0,
+            `${quality} quality hp=${hp} tick=${tick} safe point ${JSON.stringify(point)} took damage`);
+        }
+      }
+      assert.equal(hullDamage, 0);
     }
   }
 });

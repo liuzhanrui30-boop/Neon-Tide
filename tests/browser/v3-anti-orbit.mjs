@@ -163,11 +163,13 @@ export const v3AntiOrbitScenarios = [
     await withPage('v3-fixed-orbit-counter', { appUrl: TEST_URL }, async (page) => {
       await page.startGame();
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().encounter.objective?.type === 'anchors'`);
+      await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().player?.position)`);
       await fixedOrbitTriggersReadablePressure(page);
     });
     await withPage('v3-varied-route-no-counter', { appUrl: TEST_URL }, async (page) => {
       await page.startGame();
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().encounter.objective?.type === 'anchors'`);
+      await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().player?.position)`);
       await variedRouteAvoidsFalseCounter(page);
     });
   }],

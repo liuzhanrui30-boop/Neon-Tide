@@ -63,6 +63,8 @@ function shiftableTarget(objective) {
 }
 
 const OBJECTIVE_SHIFT_MARGIN = 0.35;
+const OBJECTIVE_SHIFT_AXIS_EPSILON = 0.25;
+const OBJECTIVE_SHIFT_CENTER_PLACEMENT = 0.75;
 
 function objectiveShiftGeometry(objective, target) {
   if (objective.type === 'moving-zone') {
@@ -74,27 +76,50 @@ function objectiveShiftGeometry(objective, target) {
   return { points: [target], clearance: positive(target.radius, 1), translatesRoute: false };
 }
 
-function translationBounds(points, arena, clearance) {
+function transformBounds(points, arena, clearance, scaleX, scaleY) {
   const minimumX = -finite(arena.halfWidth, 10.5) + clearance + OBJECTIVE_SHIFT_MARGIN;
   const maximumX = finite(arena.halfWidth, 10.5) - clearance - OBJECTIVE_SHIFT_MARGIN;
   const minimumY = -finite(arena.halfHeight, 7.2) + clearance + OBJECTIVE_SHIFT_MARGIN;
   const maximumY = finite(arena.halfHeight, 7.2) - clearance - OBJECTIVE_SHIFT_MARGIN;
   return points.reduce((bounds, entry) => ({
-    minimumDx: Math.max(bounds.minimumDx, minimumX - entry.x),
-    maximumDx: Math.min(bounds.maximumDx, maximumX - entry.x),
-    minimumDy: Math.max(bounds.minimumDy, minimumY - entry.y),
-    maximumDy: Math.min(bounds.maximumDy, maximumY - entry.y),
-  }), { minimumDx: -Infinity, maximumDx: Infinity, minimumDy: -Infinity, maximumDy: Infinity });
+    minimumTranslateX: Math.max(bounds.minimumTranslateX, minimumX - entry.x * scaleX),
+    maximumTranslateX: Math.min(bounds.maximumTranslateX, maximumX - entry.x * scaleX),
+    minimumTranslateY: Math.max(bounds.minimumTranslateY, minimumY - entry.y * scaleY),
+    maximumTranslateY: Math.min(bounds.maximumTranslateY, maximumY - entry.y * scaleY),
+  }), {
+    minimumTranslateX: -Infinity, maximumTranslateX: Infinity,
+    minimumTranslateY: -Infinity, maximumTranslateY: Infinity,
+  });
 }
 
-function chooseTranslation(coordinate, minimum, maximum, preferredSign, minimumDistance) {
-  if (minimum > maximum) return 0;
-  const opposite = Math.max(minimum, Math.min(maximum, -coordinate * 2));
-  if (Math.abs(opposite) >= minimumDistance) return opposite;
-  const preferred = preferredSign > 0 ? maximum : minimum;
-  const alternate = preferredSign > 0 ? minimum : maximum;
-  if (Math.abs(preferred) >= minimumDistance || Math.abs(preferred) >= Math.abs(alternate)) return preferred;
-  return alternate;
+function meaningfulAxisSign(coordinate, fallbackSign) {
+  if (coordinate >= OBJECTIVE_SHIFT_AXIS_EPSILON) return 1;
+  if (coordinate <= -OBJECTIVE_SHIFT_AXIS_EPSILON) return -1;
+  return fallbackSign;
+}
+
+function chooseOppositeAxisTransform(coordinate, minimumTranslation, maximumTranslation, fallbackSign) {
+  const sourceSign = meaningfulAxisSign(coordinate, fallbackSign);
+  const destinationSign = -sourceSign;
+  const baseDestination = -coordinate;
+  const minimumDestination = baseDestination + minimumTranslation;
+  const maximumDestination = baseDestination + maximumTranslation;
+  const preferredMagnitude = Math.abs(coordinate) >= OBJECTIVE_SHIFT_AXIS_EPSILON
+    ? Math.abs(coordinate)
+    : OBJECTIVE_SHIFT_CENTER_PLACEMENT;
+  const destination = destinationSign > 0
+    ? Math.max(Math.max(OBJECTIVE_SHIFT_AXIS_EPSILON, minimumDestination), Math.min(maximumDestination, preferredMagnitude))
+    : Math.min(Math.min(-OBJECTIVE_SHIFT_AXIS_EPSILON, maximumDestination), Math.max(minimumDestination, -preferredMagnitude));
+  if (destination < minimumDestination - EPSILON || destination > maximumDestination + EPSILON
+    || Math.sign(destination) !== destinationSign) return null;
+  return { sourceSign, destinationSign, destination, translation: destination - baseDestination };
+}
+
+function transformShiftPoint(entry, transform) {
+  return point(
+    entry.x * transform.scaleX + transform.translateX,
+    entry.y * transform.scaleY + transform.translateY,
+  );
 }
 
 export function createObjectiveShiftPlan(objective, { pathNodes = 7, variant = 0 } = {}) {
@@ -103,35 +128,56 @@ export function createObjectiveShiftPlan(objective, { pathNodes = 7, variant = 0
   const arena = objective.arena ?? { halfWidth: 10.5, halfHeight: 7.2 };
   const sign = (Math.trunc(finite(variant, 0)) & 1) === 0 ? 1 : -1;
   const geometry = objectiveShiftGeometry(objective, target);
-  const bounds = translationBounds(geometry.points, arena, geometry.clearance);
-  const translation = point(
-    chooseTranslation(target.x, bounds.minimumDx, bounds.maximumDx, sign, 2.5),
-    chooseTranslation(target.y, bounds.minimumDy, bounds.maximumDy, -sign, 1.8),
+  const scaleX = -1;
+  const scaleY = -1;
+  const bounds = transformBounds(geometry.points, arena, geometry.clearance, scaleX, scaleY);
+  const xTransform = chooseOppositeAxisTransform(
+    target.x, bounds.minimumTranslateX, bounds.maximumTranslateX, sign,
   );
-  const destination = point(target.x + translation.x, target.y + translation.y);
+  const yTransform = chooseOppositeAxisTransform(
+    target.y, bounds.minimumTranslateY, bounds.maximumTranslateY, -sign,
+  );
+  if (!xTransform || !yTransform) return null;
+  const transform = {
+    scaleX,
+    scaleY,
+    translateX: point(xTransform.translation, 0).x,
+    translateY: point(0, yTransform.translation).y,
+  };
+  const destination = transformShiftPoint(target, transform);
   const count = Math.max(3, Math.min(12, Math.trunc(positive(pathNodes, 7))));
   const path = geometry.translatesRoute
-    ? geometry.points.map((entry) => point(entry.x + translation.x, entry.y + translation.y))
+    ? geometry.points.map((entry) => transformShiftPoint(entry, transform))
     : Array.from({ length: count }, (_, index) => {
       const amount = index / (count - 1);
       const curve = Math.sin(amount * Math.PI) * 0.65 * sign;
       return point(
-        target.x + translation.x * amount + curve * translation.y * 0.12,
-        target.y + translation.y * amount - curve * translation.x * 0.12,
+        target.x + (destination.x - target.x) * amount + curve * (destination.y - target.y) * 0.12,
+        target.y + (destination.y - target.y) * amount - curve * (destination.x - target.x) * 0.12,
       );
     });
   if (!geometry.translatesRoute) {
     path[0] = point(target.x, target.y);
     path[path.length - 1] = destination;
   }
+  const destinationRadius = objective.type === 'moving-zone' ? positive(target.radius, 1)
+    : objective.type === 'escort' ? 0.8 : Math.max(0.55, positive(target.radius, 0.55));
+  const previewGeometry = [
+    ...path.map((entry) => ({ ...entry, radius: 0.32, role: 'counter-shift-path' })),
+    { ...destination, radius: destinationRadius, role: 'counter-shift-destination' },
+  ];
   return {
     targetSourceId: target.sourceId,
     targetType: objective.type,
-    translation,
+    transform,
     destination,
+    sourceQuadrant: { x: xTransform.sourceSign, y: yTransform.sourceSign },
+    destinationQuadrant: { x: xTransform.destinationSign, y: yTransform.destinationSign },
+    axisEpsilon: OBJECTIVE_SHIFT_AXIS_EPSILON,
     safetyMargin: OBJECTIVE_SHIFT_MARGIN,
     translatesRoute: geometry.translatesRoute,
     path,
+    previewGeometry,
   };
 }
 
@@ -142,21 +188,27 @@ export function commitObjectiveShift(objective, plan) {
   const target = shiftableTarget(objective);
   if (!target || target.sourceId !== plan.targetSourceId) return false;
   const destination = plan.destination ?? plan.path.at(-1);
-  const dx = finite(plan.translation?.x, destination.x - target.x);
-  const dy = finite(plan.translation?.y, destination.y - target.y);
+  const transform = plan.transform ?? {
+    scaleX: 1,
+    scaleY: 1,
+    translateX: finite(plan.translation?.x, destination.x - target.x),
+    translateY: finite(plan.translation?.y, destination.y - target.y),
+  };
   if (objective.type === 'moving-zone') {
     for (const entry of objective.path) {
-      entry.x = point(entry.x + dx, 0).x;
-      entry.y = point(0, entry.y + dy).y;
+      const transformed = transformShiftPoint(entry, transform);
+      entry.x = transformed.x;
+      entry.y = transformed.y;
     }
   } else if (objective.type === 'escort') {
     for (const entry of objective.escort.route) {
-      entry.x = point(entry.x + dx, 0).x;
-      entry.y = point(0, entry.y + dy).y;
+      const transformed = transformShiftPoint(entry, transform);
+      entry.x = transformed.x;
+      entry.y = transformed.y;
     }
   }
-  target.x = point(target.x + dx, 0).x;
-  target.y = point(0, target.y + dy).y;
+  target.x = destination.x;
+  target.y = destination.y;
   return true;
 }
 

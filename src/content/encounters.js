@@ -47,6 +47,7 @@ export const ANTI_ORBIT_COUNTER_TEMPLATES = Object.freeze({
     edgeDangerSeconds: 1.05,
     centerSafeRadius: 2.7,
     safeMargin: 0.18,
+    playerCollisionRadius: 0.4,
     ringNodes: 16,
   }),
 });

@@ -300,15 +300,15 @@ function createObjectiveShift({ id, tier, direction, objective, variant }) {
   const template = ANTI_ORBIT_COUNTER_TEMPLATES['objective-shift'];
   const plan = createObjectiveShiftPlan(objective, { pathNodes: template.pathNodes, variant });
   if (!plan) return null;
-  const geometry = plan.path.map((entry, index) => hazardNode(entry.x, entry.y, 0.32, {
-    role: 'counter-shift-path', sequence: index, color: COLORS.shift,
+  const geometry = plan.previewGeometry.map((entry, index) => hazardNode(entry.x, entry.y, entry.radius, {
+    role: entry.role, sequence: index, color: COLORS.shift,
   }));
   return {
     id, kind: 'objective-shift', tier, direction, phase: 'preview', elapsed: 0,
     previewSeconds: template.telegraphSeconds, activeSeconds: template.activeSeconds,
     recoverySeconds: template.recoverySeconds, requiresRouteChange: true,
     targetSourceId: plan.targetSourceId, targetType: plan.targetType,
-    path: plan.path, destination: plan.destination, translation: plan.translation,
+    path: plan.path, destination: plan.destination, transform: plan.transform,
     geometry, committed: false, plan,
   };
 }
@@ -320,6 +320,7 @@ function createCenterPulse({ id, tier, direction, objective, lowHull }) {
     previewSeconds: template.previewSeconds, activeSeconds: template.activeSeconds,
     recoverySeconds: template.recoverySeconds, requiresRouteChange: true,
     centerSafeRadius: template.centerSafeRadius * (lowHull ? 1.25 : 1), safeMargin: template.safeMargin,
+    playerCollisionRadius: template.playerCollisionRadius,
     window: 'edge-warning', ringRadius: 1,
     ringNodeCount: template.ringNodes,
     geometry: [
@@ -351,7 +352,7 @@ function updateCenterPulse(counter, objective) {
   const activeElapsed = clamp(counter.elapsed - counter.previewSeconds, 0, counter.activeSeconds);
   const amount = activeElapsed / counter.activeSeconds;
   const hazardRadius = counter.geometry[0]?.radius ?? 0.48;
-  const minimumSafeRingRadius = (counter.centerSafeRadius + counter.safeMargin + hazardRadius)
+  const minimumSafeRingRadius = (counter.centerSafeRadius + counter.playerCollisionRadius + counter.safeMargin + hazardRadius)
     / Math.min(axes.x, axes.y);
   counter.ringRadius = Math.max(1 - amount * 0.68, minimumSafeRingRadius);
   counter.window = activeElapsed <= template.edgeDangerSeconds
