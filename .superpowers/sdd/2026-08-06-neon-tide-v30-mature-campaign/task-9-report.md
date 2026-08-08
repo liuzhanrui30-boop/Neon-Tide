@@ -125,3 +125,34 @@ All Node/npm commands used Node 22.14.0 from the required runtime. Port 4173 rem
 ### Concerns
 - Vite retains the inherited large-chunk warning; the final main bundle is 853.38 kB minified (237.05 kB gzip). Code splitting remains outside Task 9.
 - Selected/rejected diagnostics intentionally remain in debug/event telemetry for admission analysis, but all unqualified wave fields are now strictly materialized values.
+
+---
+
+## Review fix round 3/5 — Close enemy telemetry acceptance gaps
+
+### Status
+DONE — both final Important findings are fixed with deterministic admission accounting and same-frame warning acceptance.
+
+### Delivered
+- Added immutable per-selected-role `admissionCharges` to wave selection. Every accepted role records its authored threat cost, deterministic zero/one cost jitter, and charged admission cost.
+- Replaced ambiguous diagnostic `cost` fields with explicit `authoredCost`, `costJitter`, and `chargedCost` across `selectedDiagnostics`, `materializedDiagnostics`, and `rejectedDiagnostics`. Each diagnostic also retains the exact ordered per-role charge records.
+- Deterministically partitions selected charge records between successfully materialized and rejected role occurrences. Selected authored cost, jitter, and charged cost now each equal the corresponding materialized plus rejected totals.
+- Kept unqualified `lastWave.cost`, `lastWave.materialized.cost`, and `encounter:threat-wave.cost` strictly authored/materialized. Admission-only charged values remain confined to the clearly named diagnostics.
+- Added 512 seeded Standard/Abyss jitter selections proving every role charge and aggregate identity. Added the exact Abyss capacity-one regression where selection charges 11 (authored 10 plus jitter 1), only Hunter materializes at authored cost 1, and all three diagnostic dimensions partition exactly.
+- Restored the browser acceptance’s captured concurrent-warning frame. The returned warning list and renderer warning count now come from the same frame, while later accumulated renderer geometry parity is returned separately.
+- Removed the renderer-observation fallback for capturing concurrency. Acceptance requires at least two warnings in the captured array, at least two owners, at least two independent progress values, finite in-range progress/opacity, non-colliding flags, and an exact same-frame renderer count. The explicit length check prevents an empty-array `.every()` false pass.
+
+### Verification
+All Node/npm commands used Node 22.14.0 from the required runtime. Port 4173 remained untouched; browser validation used temporary Vite port 4174 and isolated headful Chrome 146.0.7680.80 on CDP 9358.
+
+- Focused enemy/director/collision/renderer/world tests — PASS: 67/67.
+- Jitter partition stress — PASS: 256 Standard + 256 Abyss selections, plus the exact Abyss charged-cost-11 capacity-one probe.
+- Final `npm run check` — PASS: 223/223 Node tests and production build.
+- Focused natural enemy concurrent-warning acceptance — PASS: 1/1.
+- Full browser matrix — PASS: 31/31 in one final run.
+- Breakpoint cleanup failure-path self-test — PASS: 1/1.
+- `git diff --check` — PASS.
+
+### Concerns
+- Vite retains the inherited large-chunk warning; the final main bundle is 853.98 kB minified (237.20 kB gzip). Code splitting remains outside Task 9.
+- Admission charge records intentionally add small wave-cadence-only diagnostic objects; they are not created in per-frame enemy/render hot paths.

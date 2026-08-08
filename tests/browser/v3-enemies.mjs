@@ -197,15 +197,12 @@ async function collectThreatEvidence(page) {
       if (owners.size >= 2 && progress.size >= 2) {
         simultaneous = state;
       }
-      if (state.renderer.observations.maxSimultaneousWarningOwners >= 2
-        && state.renderer.observations.maxIndependentWarningProgress >= 2) {
-        simultaneous ??= state;
-      }
       if (ENEMY_ROLE_IDS.every((role) => observedRoles.has(role))
         && simultaneous && lancerParity && wardenParity && lancerSafeParity) {
         return {
-          ...state,
+          ...simultaneous,
           threat: state.threat,
+          rendererParity: state.renderer,
           observedRoles: [...observedRoles],
           lancerParity,
           hazardParity: { ...wardenParity, lancerSafe: lancerSafeParity },
@@ -240,13 +237,18 @@ export const v3EnemyScenarios = [
       const evidence = await collectThreatEvidence(page);
       assert.deepEqual([...evidence.threat.rolesSeen].sort(), [...ENEMY_ROLE_IDS].sort());
       assert.deepEqual([...evidence.observedRoles].sort(), [...ENEMY_ROLE_IDS].sort());
-      assert.ok(evidence.warnings.every(({ opacity, collidable, flags }) => opacity > 0 && !collidable && flags === 0));
+      assert.ok(evidence.warnings.length >= 2);
+      assert.ok(new Set(evidence.warnings.map(({ ownerId }) => ownerId)).size >= 2);
+      assert.ok(new Set(evidence.warnings.map(({ progress }) => progress.toFixed(3))).size >= 2);
+      assert.ok(evidence.warnings.every(({ progress, opacity, collidable, flags }) => Number.isFinite(progress)
+        && progress >= 0 && progress <= 1 && Number.isFinite(opacity) && opacity > 0 && opacity <= 1
+        && !collidable && flags === 0));
       assert.equal(evidence.renderer.pools.warning.count, evidence.warnings.length);
       assert.equal(evidence.renderer.warningVisibility.hiddenActive, 0);
       assert.ok(evidence.renderer.observations.maxSimultaneousWarningOwners >= 2);
       assert.ok(evidence.renderer.observations.maxIndependentWarningProgress >= 2);
       assert.equal(evidence.renderer.observations.maxHiddenActiveWarnings, 0);
-      const rendered = evidence.renderer.observations;
+      const rendered = evidence.rendererParity.observations;
       assert.ok(rendered.lancerPreviewsRendered > 0);
       assert.ok(rendered.lancerBeamNodesRendered > 0);
       assert.equal(rendered.lancerBeamNodesOutsidePreview, 0);

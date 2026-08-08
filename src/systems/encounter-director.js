@@ -62,10 +62,11 @@ export function selectThreatWave(context = {}, random = Math.random) {
   const availableSlots = Math.max(0, limits.activeEnemyCap - activeEnemies);
   if (availableSlots === 0) return Object.freeze({
     roles: Object.freeze([]), cost: 0, budget, projectileCost: 0, blockedAreaCost: 0,
-    highDamageWarnings: 0, reliefApplied, limits,
+    highDamageWarnings: 0, reliefApplied, limits, admissionCharges: Object.freeze([]),
   });
 
   const roles = [];
+  const admissionCharges = [];
   const localCounts = Object.fromEntries(ENEMY_ROLE_IDS.map((id) => [id, Math.max(0, Math.trunc(finite(roleCounts[id])))]));
   let cost = 0;
   let projectileCost = 0;
@@ -89,6 +90,12 @@ export function selectThreatWave(context = {}, random = Math.random) {
       continue;
     }
     roles.push(roleId);
+    admissionCharges.push(Object.freeze({
+      role: roleId,
+      authoredCost: role.threatCost,
+      costJitter: jitteredCost - role.threatCost,
+      chargedCost: jitteredCost,
+    }));
     localCounts[roleId] += 1;
     cost += jitteredCost;
     projectileCost += role.projectileCost;
@@ -100,6 +107,7 @@ export function selectThreatWave(context = {}, random = Math.random) {
   return Object.freeze({
     roles: Object.freeze(roles), cost, budget, projectileCost, blockedAreaCost,
     highDamageWarnings: localWarnings, reliefApplied, limits,
+    admissionCharges: Object.freeze(admissionCharges),
   });
 }
 
@@ -192,31 +200,57 @@ function summarizeMaterializedRoles(roles) {
   });
 }
 
-function rejectedSelectedRoles(selectedRoles, materializedRoles) {
+function partitionAdmissionCharges(selectedCharges, materializedRoles) {
   const remaining = Object.fromEntries(ENEMY_ROLE_IDS.map((role) => [role, 0]));
   for (const role of materializedRoles) if (ENEMY_ROLES[role]) remaining[role] += 1;
+  const materialized = [];
   const rejected = [];
-  for (const role of selectedRoles) {
-    if (remaining[role] > 0) remaining[role] -= 1;
-    else rejected.push(role);
+  for (const charge of selectedCharges) {
+    if (remaining[charge.role] > 0) {
+      remaining[charge.role] -= 1;
+      materialized.push(charge);
+    } else rejected.push(charge);
   }
-  return rejected;
+  return { materialized, rejected };
+}
+
+function summarizeAdmissionCharges(charges) {
+  const roles = [];
+  let authoredCost = 0;
+  let costJitter = 0;
+  let chargedCost = 0;
+  let projectileCost = 0;
+  let blockedAreaCost = 0;
+  let highDamageWarnings = 0;
+  for (const charge of charges) {
+    const role = ENEMY_ROLES[charge.role];
+    if (!role) continue;
+    roles.push(charge.role);
+    authoredCost += charge.authoredCost;
+    costJitter += charge.costJitter;
+    chargedCost += charge.chargedCost;
+    projectileCost += role.projectileCost;
+    blockedAreaCost += role.blockedAreaCost;
+    if (role.highDamage) highDamageWarnings += 1;
+  }
+  return Object.freeze({
+    roles: Object.freeze(roles),
+    charges: Object.freeze([...charges]),
+    authoredCost,
+    costJitter,
+    chargedCost,
+    projectileCost,
+    blockedAreaCost,
+    highDamageWarnings,
+  });
 }
 
 function createMaterializedWave(selectedWave, materializedRoles) {
   const materialized = summarizeMaterializedRoles(materializedRoles);
-  const selectedSummary = summarizeMaterializedRoles(selectedWave.roles);
-  const rejectedDiagnostics = summarizeMaterializedRoles(
-    rejectedSelectedRoles(selectedWave.roles, materialized.roles),
-  );
-  const selectedDiagnostics = Object.freeze({
-    roles: selectedSummary.roles,
-    cost: selectedWave.cost,
-    authoredCost: selectedSummary.cost,
-    projectileCost: selectedWave.projectileCost,
-    blockedAreaCost: selectedWave.blockedAreaCost,
-    highDamageWarnings: selectedWave.highDamageWarnings,
-  });
+  const partitioned = partitionAdmissionCharges(selectedWave.admissionCharges, materialized.roles);
+  const selectedDiagnostics = summarizeAdmissionCharges(selectedWave.admissionCharges);
+  const materializedDiagnostics = summarizeAdmissionCharges(partitioned.materialized);
+  const rejectedDiagnostics = summarizeAdmissionCharges(partitioned.rejected);
   return Object.freeze({
     roles: materialized.roles,
     cost: materialized.cost,
@@ -228,6 +262,7 @@ function createMaterializedWave(selectedWave, materializedRoles) {
     limits: selectedWave.limits,
     materialized,
     selectedDiagnostics,
+    materializedDiagnostics,
     rejectedDiagnostics,
   });
 }
@@ -441,6 +476,7 @@ export function createEncounterDirector({
         activeEnemyCap: lastWave.limits.activeEnemyCap,
         materialized: lastWave.materialized,
         selectedDiagnostics: lastWave.selectedDiagnostics,
+        materializedDiagnostics: lastWave.materializedDiagnostics,
         rejectedDiagnostics: lastWave.rejectedDiagnostics,
       });
     }

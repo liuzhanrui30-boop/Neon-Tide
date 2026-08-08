@@ -61,6 +61,30 @@ test('threat-wave selection is deterministic, chapter-gated and respects every h
   assert.equal(capped.roles.includes('interceptor'), false);
 });
 
+test('every jittered selection exposes per-role charged costs that exactly partition its admission total', () => {
+  for (const mode of ['standard', 'abyss']) {
+    for (let seed = 1; seed <= 256; seed += 1) {
+      const wave = selectThreatWave(context({ mode, chapter: 3, waveIndex: seed }), seeded(seed));
+      assert.equal(wave.admissionCharges.length, wave.roles.length);
+      let authoredCost = 0;
+      let costJitter = 0;
+      let chargedCost = 0;
+      for (let index = 0; index < wave.admissionCharges.length; index += 1) {
+        const charge = wave.admissionCharges[index];
+        assert.equal(charge.role, wave.roles[index]);
+        assert.equal(charge.authoredCost, ENEMY_ROLES[charge.role].threatCost);
+        assert.ok(charge.costJitter === 0 || charge.costJitter === 1);
+        assert.equal(charge.chargedCost, charge.authoredCost + charge.costJitter);
+        authoredCost += charge.authoredCost;
+        costJitter += charge.costJitter;
+        chargedCost += charge.chargedCost;
+      }
+      assert.equal(chargedCost, wave.cost);
+      assert.equal(authoredCost + costJitter, chargedCost);
+    }
+  }
+});
+
 test('health relief and objective burden lower the next combination while clear-rate and untouched play scale pressure', () => {
   const healthy = selectThreatWave(context({ waveIndex: 13 }), seeded(123));
   const relief = selectThreatWave(context({
@@ -196,14 +220,48 @@ test('rolesSeen and runtime enemy caps include only successfully materialized wa
   assert.equal(threat.lastWave.highDamageWarnings, 0);
   assert.deepEqual(threat.lastWave.materialized.roles, ['hunter']);
   assert.equal(threat.lastWave.materialized.cost, 1);
-  assert.equal(threat.lastWave.selectedDiagnostics.cost, 9);
+  assert.equal(threat.lastWave.selectedDiagnostics.chargedCost, 9);
+  assert.equal(threat.lastWave.selectedDiagnostics.authoredCost, 9);
+  assert.equal(threat.lastWave.selectedDiagnostics.costJitter, 0);
   assert.deepEqual(threat.lastWave.selectedDiagnostics.roles, ['hunter', 'interceptor', 'striker', 'swarm', 'hunter']);
   assert.deepEqual(threat.lastWave.rejectedDiagnostics.roles, ['interceptor', 'striker', 'swarm', 'hunter']);
-  assert.equal(threat.lastWave.rejectedDiagnostics.cost, 8);
+  assert.equal(threat.lastWave.materializedDiagnostics.authoredCost, 1);
+  assert.equal(threat.lastWave.rejectedDiagnostics.authoredCost, 8);
+  assert.equal(threat.lastWave.selectedDiagnostics.chargedCost,
+    threat.lastWave.materializedDiagnostics.chargedCost + threat.lastWave.rejectedDiagnostics.chargedCost);
+  assert.equal('cost' in threat.lastWave.selectedDiagnostics, false);
+  assert.equal('cost' in threat.lastWave.materializedDiagnostics, false);
+  assert.equal('cost' in threat.lastWave.rejectedDiagnostics, false);
   assert.deepEqual(event.roles, ['hunter']);
   assert.equal(event.cost, 1);
   assert.equal(event.projectileCost, 0);
   assert.equal(event.blockedAreaCost, 0);
   assert.equal(event.highDamageWarnings, 0);
+  assert.equal(event.selectedDiagnostics.chargedCost,
+    event.materializedDiagnostics.chargedCost + event.rejectedDiagnostics.chargedCost);
   assert.equal(threat.enemySystem.rejectedSpawns > 0, true);
+});
+
+test('Abyss capacity-one materialization partitions a jittered charged cost of eleven exactly', () => {
+  const world = createEntityWorld({ capacities: { enemy: 1, warning: 8, enemyHazard: 8, enemyProjectile: 8 } });
+  const playerId = world.spawn('player', {
+    x: 0, y: 0, hp: 5, maxHp: 5, radius: 0.4, team: 1, collidable: true,
+  });
+  const director = createEncounterDirector({ seed: 1, mode: 'abyss', quality: 'desktop' });
+  director.startRoom(getEncounterTemplate('anchor-break'), { chapterIndex: 3 });
+  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 1 / 60, {
+    emit() {}, input: [],
+  });
+  const wave = director.getSnapshot().threatState.lastWave;
+  assert.deepEqual(wave.roles, ['hunter']);
+  assert.equal(wave.cost, 1);
+  assert.equal(wave.selectedDiagnostics.chargedCost, 11);
+  assert.equal(wave.selectedDiagnostics.authoredCost, 10);
+  assert.equal(wave.selectedDiagnostics.costJitter, 1);
+  assert.equal(wave.selectedDiagnostics.chargedCost,
+    wave.materializedDiagnostics.chargedCost + wave.rejectedDiagnostics.chargedCost);
+  assert.equal(wave.selectedDiagnostics.authoredCost,
+    wave.materializedDiagnostics.authoredCost + wave.rejectedDiagnostics.authoredCost);
+  assert.equal(wave.selectedDiagnostics.costJitter,
+    wave.materializedDiagnostics.costJitter + wave.rejectedDiagnostics.costJitter);
 });
