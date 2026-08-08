@@ -493,9 +493,10 @@ function updatePurge(objective, events) {
 }
 
 function updateAnchors(objective, player, dt) {
+  const multiplier = Math.max(1, Math.min(1.6, Number(player?.buildStats?.objectiveProximityMultiplier) || 1));
   for (const anchor of objective.anchors) {
     if (anchor.completed || distanceTo(player, anchor) > anchor.radius) continue;
-    anchor.charge = Math.min(anchor.requiredSeconds, anchor.charge + dt);
+    anchor.charge = Math.min(anchor.requiredSeconds, anchor.charge + dt * multiplier);
     if (anchor.charge >= anchor.requiredSeconds - EPSILON) anchor.completed = true;
   }
   objective.progress = objective.anchors.filter(({ completed }) => completed).length;
@@ -504,7 +505,9 @@ function updateAnchors(objective, player, dt) {
 function updateMovingZone(objective, player, dt) {
   objective.routeDistance += objective.pathSpeed * dt;
   Object.assign(objective.safeZone, interpolateRoute(objective.path, objective.routeDistance, true));
-  if (distanceTo(player, objective.safeZone) <= objective.safeZone.radius) objective.progress += dt;
+  if (distanceTo(player, objective.safeZone) <= objective.safeZone.radius) {
+    objective.progress += dt * Math.max(1, Math.min(1.6, Number(player?.buildStats?.objectiveProximityMultiplier) || 1));
+  }
 }
 
 function updateEscort(objective, player, dt, events) {
@@ -512,7 +515,11 @@ function updateEscort(objective, player, dt, events) {
   for (const payload of damage) objective.escort.hp = Math.max(0, objective.escort.hp - positive(payload.amount, 1));
   if (objective.escort.hp <= 0) return 'escort-destroyed';
   if (distanceTo(player, objective.escort) > objective.escort.supportRadius) return null;
-  objective.escort.routeDistance = Math.min(objective.escort.routeLength, objective.escort.routeDistance + objective.escort.speed * dt);
+  const stats = player?.buildStats ?? {};
+  const repair = Math.max(0, Math.min(0.24, Number(stats.escortRepairPerSecond) || 0));
+  objective.escort.hp = Math.min(objective.escort.maxHp, objective.escort.hp + repair * dt);
+  const proximity = Math.max(1, Math.min(1.6, Number(stats.objectiveProximityMultiplier) || 1));
+  objective.escort.routeDistance = Math.min(objective.escort.routeLength, objective.escort.routeDistance + objective.escort.speed * dt * proximity);
   Object.assign(objective.escort, interpolateRoute(objective.escort.route, objective.escort.routeDistance));
   objective.progress = objective.escort.routeDistance;
   objective.escort.completed = objective.progress >= objective.target - EPSILON;
@@ -589,12 +596,14 @@ function updateHarvest(objective, player, events) {
     }
   }
   for (const core of objective.cores) {
-    if (!core.collected && distanceTo(player, core) <= core.radius) core.collected = true;
+    const pickupMultiplier = Math.max(1, Math.min(3, Number(player?.buildStats?.pickupRadiusMultiplier) || 1));
+    if (!core.collected && distanceTo(player, core) <= core.radius * pickupMultiplier) core.collected = true;
   }
   objective.progress = objective.cores.filter(({ collected: done }) => done).length;
 }
 
 function updateDualCrisis(objective, player, dt) {
+  const multiplier = Math.max(1, Math.min(1.6, Number(player?.buildStats?.objectiveProximityMultiplier) || 1));
   if (objective.elapsed >= objective.escalationSeconds) {
     for (const crisis of objective.crises) {
       if (crisis.completed || crisis.escalated) continue;
@@ -604,7 +613,7 @@ function updateDualCrisis(objective, player, dt) {
   }
   for (const crisis of objective.crises) {
     if (crisis.completed || distanceTo(player, crisis) > crisis.radius) continue;
-    crisis.charge = Math.min(crisis.requiredSeconds, crisis.charge + dt);
+    crisis.charge = Math.min(crisis.requiredSeconds, crisis.charge + dt * multiplier);
     if (crisis.charge >= crisis.requiredSeconds - EPSILON) {
       crisis.completed = true;
       objective.choiceOrder.push(crisis.id);

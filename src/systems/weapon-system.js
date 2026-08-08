@@ -115,13 +115,13 @@ function normalizeDirection(x, y, fallbackX = 0, fallbackY = 1) {
   return { x: 0, y: 1 };
 }
 
-function lineTargetScore(target, along) {
+function lineTargetScore(target, along, options = {}) {
   const distanceScore = Math.max(0, 180 - along * 12);
   return distanceScore
     + clamp(finite(target.threat), 0, 100) * 70
     + (target.executingTelegraph || target.executing ? 2_400 : 0)
     + (target.objective || target.objectiveType ? 2_000 : 0)
-    + (target.weakPoint ? 2_800 : 0)
+    + (target.weakPoint ? 2_800 * clamp(finite(options.weakPointMultiplier, 1), 1, 4) : 0)
     + (target.role === 'boss' || target.type === 'boss' ? 1_200 : 0);
 }
 
@@ -190,12 +190,12 @@ export function selectTideLanceLine(player, candidates, objectives = [], options
       const perpendicular = Math.abs(offsetX * directionY - offsetY * directionX);
       if (perpendicular > halfWidth + Math.max(0, finite(target.radius, 0.5))) continue;
       hits.push({ id: candidateId(target, targetIndex), along, target });
-      score += lineTargetScore(target, along);
+      score += lineTargetScore(target, along, options);
     }
     hits.sort((left, right) => left.along - right.along || left.id - right.id);
     const cappedHits = hits.slice(0, maxTargets);
     if (hits.length > maxTargets) {
-      score -= hits.slice(maxTargets).reduce((total, hit) => total + lineTargetScore(hit.target, hit.along), 0);
+      score -= hits.slice(maxTargets).reduce((total, hit) => total + lineTargetScore(hit.target, hit.along, options), 0);
     }
     const better = score > bestScore + EPSILON
       || (Math.abs(score - bestScore) <= EPSILON && cappedHits.length > bestHits.length)
@@ -260,8 +260,8 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
   const candidates = Array.from({ length: candidateCapacity }, createCandidate);
   const candidateRead = createEntityReadTarget();
   const playerRead = createEntityReadTarget();
-  const droneRead = [createEntityReadTarget(), createEntityReadTarget()];
-  const droneIds = new Float64Array(2);
+  const droneRead = Array.from({ length: 4 }, createEntityReadTarget);
+  const droneIds = new Float64Array(4);
   const timers = new Float64Array([0, 0.15, 0.45]);
   const weaponShotCounts = new Uint32Array(3);
   const stepShotCounts = new Uint8Array(3);
@@ -272,6 +272,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
   let sequence = 0;
   let lastTargetId = null;
   let wasBuffed = false;
+  let lastBuildStats = null;
 
   function collectCandidates(world, playerTeam) {
     let count = 0;
@@ -288,9 +289,10 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     return count;
   }
 
-  function ensureDrones(world, player) {
+  function ensureDrones(world, player, buildStats) {
     const config = WEAPON_CONFIG['arc-drones'];
-    for (let index = 0; index < config.droneCount; index += 1) {
+    const droneCount = clamp(Math.trunc(finite(buildStats?.droneCount, config.droneCount)), 2, 4);
+    for (let index = 0; index < droneCount; index += 1) {
       if (droneIds[index] && world.readInto(droneIds[index], droneRead[index])) continue;
       const angle = index * Math.PI;
       const id = world.spawn('friendlyProjectile', {
@@ -304,7 +306,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
         weaponId: 'arc-drones',
         type: 'arc-drone',
         orbitAngle: angle,
-        orbitRadius: 1.15,
+        orbitRadius: 1.15 + index * 0.08,
         speed: 1.9,
         lifetime: 1_000_000_000,
         radius: 0.2,
@@ -315,20 +317,22 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     }
   }
 
-  function spawnPulse(world, player, target) {
+  function spawnPulse(world, player, target, buildStats) {
     const config = WEAPON_CONFIG['pulse-cannon'];
     const direction = normalizeDirection(target.x - player.x, target.y - player.y, 0, 1);
+    const speed = config.speed * clamp(finite(buildStats?.projectileSpeedMultiplier, 1), 0.5, 1.5);
+    const pierceCount = clamp(Math.trunc(finite(buildStats?.projectilePierce)), 0, 4);
     return world.spawn('friendlyProjectile', {
       x: player.x + direction.x * 0.55,
       y: player.y + direction.y * 0.55,
       previousX: player.x,
       previousY: player.y,
-      vx: direction.x * config.speed,
-      vy: direction.y * config.speed,
-      speed: config.speed,
-      maxSpeed: config.speed,
+      vx: direction.x * speed,
+      vy: direction.y * speed,
+      speed,
+      maxSpeed: speed,
       turnRate: config.turnRate,
-      damage: config.damage,
+      damage: config.damage * clamp(finite(buildStats?.weaponDamageMultiplier, 1), 0.5, 2.2),
       lifetime: config.lifetime,
       radius: config.radius,
       targetId: target.id,
@@ -338,13 +342,17 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       weaponId: 'pulse-cannon',
       type: 'pulse-round',
       homing: true,
+      piercing: pierceCount > 0,
+      pierceCount,
+      weakPointMultiplier: clamp(finite(buildStats?.weakPointMultiplier, 1.5), 1, 2.5),
+      objectiveDamageMultiplier: clamp(finite(buildStats?.objectiveDamageMultiplier, 1), 1, 1.8),
       collidable: true,
       color: 0x64f5ff,
       sequence: ++sequence,
     });
   }
 
-  function spawnArc(world, player, target, droneIndex) {
+  function spawnArc(world, player, target, droneIndex, buildStats) {
     const config = WEAPON_CONFIG['arc-drones'];
     const drone = world.readInto(droneIds[droneIndex], droneRead[droneIndex]);
     const originX = drone?.x ?? player.x;
@@ -360,7 +368,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       speed: config.speed,
       maxSpeed: config.speed,
       turnRate: config.turnRate,
-      damage: config.damage,
+      damage: config.damage * clamp(finite(buildStats?.weaponDamageMultiplier, 1), 0.5, 2.2),
       lifetime: config.lifetime,
       radius: config.radius,
       targetId: target.id,
@@ -369,7 +377,11 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       team: player.team || 1,
       weaponId: 'arc-drones',
       type: 'arc-chain',
-      chainCount: config.chainCount,
+      chainCount: clamp(Math.trunc(finite(buildStats?.chainTargets, config.chainCount)), 0, 6),
+      chainDamageMultiplier: clamp(finite(buildStats?.chainDamageMultiplier, 0.78), 0.5, 1),
+      chainRadius: clamp(finite(buildStats?.propagationRadius, 6), 0, 8),
+      weakPointMultiplier: clamp(finite(buildStats?.weakPointMultiplier, 1.5), 1, 2.5),
+      objectiveDamageMultiplier: clamp(finite(buildStats?.droneObjectiveDamageMultiplier, 1), 1, 1.4),
       homing: true,
       collidable: true,
       color: droneIndex === 0 ? 0x8af7ff : 0xa56bff,
@@ -377,7 +389,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     });
   }
 
-  function spawnPrism(world, player, target) {
+  function spawnPrism(world, player, target, buildStats) {
     const config = WEAPON_CONFIG['prism-missiles'];
     const direction = normalizeDirection(target.x - player.x, target.y - player.y, 0, 1);
     return world.spawn('friendlyProjectile', {
@@ -390,17 +402,19 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       speed: config.speed,
       maxSpeed: config.speed,
       turnRate: config.turnRate,
-      damage: config.damage,
+      damage: config.damage * clamp(finite(buildStats?.weaponDamageMultiplier, 1), 0.5, 2.2),
       lifetime: config.lifetime,
       radius: config.radius,
-      impactRadius: 0.75,
+      impactRadius: clamp(finite(buildStats?.missileImpactRadius, 0.75), 0.5, 1.2),
       targetId: target.id,
       ownerId: player.id,
       ownerKind: 'player',
       team: player.team || 1,
       weaponId: 'prism-missiles',
       type: 'prism-missile',
-      splitCount: config.splitCount,
+      splitCount: clamp(Math.trunc(finite(buildStats?.missileSplit, config.splitCount)), 3, 5),
+      weakPointMultiplier: clamp(finite(buildStats?.weakPointMultiplier, 1.5), 1, 2.5),
+      objectiveDamageMultiplier: clamp(finite(buildStats?.objectiveDamageMultiplier, 1), 1, 1.8),
       splitOnImpact: true,
       homing: true,
       collidable: true,
@@ -420,14 +434,15 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     return true;
   }
 
-  function update(world, playerId, dt, events = null) {
+  function update(world, playerId, dt, events = null, buildStats = null) {
     if (!world?.query || !world?.readInto || !world?.spawn) throw new TypeError('EntityWorld is required');
     if (!Number.isFinite(dt) || dt <= 0) throw new TypeError('weapon dt must be positive and finite');
     const player = Number.isSafeInteger(playerId) ? world.readInto(playerId, playerRead) : playerId;
     if (!player || !Number.isFinite(player.x) || !Number.isFinite(player.y)) {
       return Object.freeze({ fired: 0, targetId: null, buffed: false });
     }
-    ensureDrones(world, player);
+    ensureDrones(world, player, buildStats);
+    lastBuildStats = buildStats ? Object.freeze({ ...buildStats }) : null;
     const candidateCount = collectCandidates(world, player.team);
     const target = candidateCount > 0
       ? selectAutoTarget(player, candidates, { maxCandidates: candidateCapacity, candidateCount })
@@ -439,28 +454,33 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       }
     }
     wasBuffed = buffed;
-    const cadenceMultiplier = buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1;
+    const buildCadence = clamp(finite(buildStats?.fireIntervalMultiplier, 1), 0.55, 1);
+    const cadenceMultiplier = (buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1) * buildCadence;
     const counts = stepShotCounts;
     counts.fill(0);
     for (let index = 0; index < timers.length; index += 1) timers[index] -= dt;
     if (target) {
       let guard = 0;
       while (timers[0] <= EPSILON && guard < 4) {
-        registerShot(0, spawnPulse(world, player, target), counts);
+        const projectileCount = clamp(Math.trunc(finite(buildStats?.pulseProjectiles, 1)), 1, 3);
+        for (let projectileIndex = 0; projectileIndex < projectileCount; projectileIndex += 1) {
+          registerShot(0, spawnPulse(world, player, target, buildStats), counts);
+        }
         timers[0] += WEAPON_CONFIG['pulse-cannon'].interval * cadenceMultiplier;
         guard += 1;
       }
       guard = 0;
       while (timers[1] <= EPSILON && guard < 2) {
-        for (let droneIndex = 0; droneIndex < 2; droneIndex += 1) {
-          registerShot(1, spawnArc(world, player, target, droneIndex), counts);
+        const droneCount = clamp(Math.trunc(finite(buildStats?.droneCount, 2)), 2, 4);
+        for (let droneIndex = 0; droneIndex < droneCount; droneIndex += 1) {
+          registerShot(1, spawnArc(world, player, target, droneIndex, buildStats), counts);
         }
         timers[1] += WEAPON_CONFIG['arc-drones'].interval * cadenceMultiplier;
         guard += 1;
       }
       guard = 0;
       while (timers[2] <= EPSILON && guard < 2) {
-        registerShot(2, spawnPrism(world, player, target), counts);
+        registerShot(2, spawnPrism(world, player, target, buildStats), counts);
         timers[2] += WEAPON_CONFIG['prism-missiles'].interval * cadenceMultiplier;
         guard += 1;
       }
@@ -506,6 +526,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       cooldowns: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, timers[index]]))),
       droneIds: Object.freeze([...droneIds]),
       shotsByWeapon: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, weaponShotCounts[index]]))),
+      lastBuildStats,
     });
   }
 

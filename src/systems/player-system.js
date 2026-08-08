@@ -117,25 +117,27 @@ export function createPlayerState(overrides = {}) {
   };
 }
 
-function startDash(player, input, events) {
+function startDash(player, input, events, buildStats = null) {
   if (!input.dashPressed || player.dashTimer > 0) return false;
   const chargeIndex = player.dashCharges.findIndex((charge) => charge >= 1 - 1e-9);
   if (chargeIndex < 0) return false;
   const requested = normalize(input.moveX, input.moveY);
   const dashDirection = requested.length ? requested : normalize(player.facing.x, player.facing.y);
   player.dashCharges[chargeIndex] = 0;
+  const dashSpeed = DASH_SPEED * clamp(Number(buildStats?.dashSpeedMultiplier) || 1, 1, 1.2);
   player.dashTimer = DASH_DURATION;
-  player.phaseTimer = PHASE_DURATION;
-  player.perfectPhaseWindow = PERFECT_PHASE_WINDOW;
+  player.phaseTimer = PHASE_DURATION + clamp(Number(buildStats?.phaseDurationBonus) || 0, 0, 0.16);
+  player.perfectPhaseWindow = PERFECT_PHASE_WINDOW
+    + clamp(Number(buildStats?.perfectPhaseWindowBonus) || 0, 0, 0.06);
   player.facing.x = dashDirection.x;
   player.facing.y = dashDirection.y;
-  player.velocity.x = dashDirection.x * DASH_SPEED;
-  player.velocity.y = dashDirection.y * DASH_SPEED;
+  player.velocity.x = dashDirection.x * dashSpeed;
+  player.velocity.y = dashDirection.y * dashSpeed;
   emit(events, 'player:dash', { chargeIndex, directionX: dashDirection.x, directionY: dashDirection.y });
   return true;
 }
 
-function updateMovement(player, input, dt) {
+function updateMovement(player, input, dt, buildStats = null) {
   const requested = normalize(input.moveX, input.moveY);
   const magnitude = Math.min(1, requested.length);
   const hasDirection = magnitude > 0.01;
@@ -175,7 +177,7 @@ function updateMovement(player, input, dt) {
   const damping = Math.exp(-MOVE_DAMPING * 0.35 * dt);
   player.velocity.x *= damping;
   player.velocity.y *= damping;
-  clampMagnitude(player.velocity, player.maxSpeed);
+  clampMagnitude(player.velocity, player.maxSpeed * clamp(Number(buildStats?.moveSpeedMultiplier) || 1, 1, 1.24));
 }
 
 function updateBounds(player) {
@@ -227,7 +229,7 @@ function updateAutomaticPulse(player, dt, events) {
   }
 }
 
-export function updatePlayerState(player, input, dt, events = null) {
+export function updatePlayerState(player, input, dt, events = null, buildStats = null) {
   if (!player || typeof player !== 'object') throw new TypeError('player state is required');
   if (!input || typeof input !== 'object') throw new TypeError('named action input is required');
   if (!Number.isFinite(dt) || dt <= 0) throw new TypeError('player dt must be positive and finite');
@@ -238,11 +240,12 @@ export function updatePlayerState(player, input, dt, events = null) {
   updateAutomaticPulse(player, dt, events);
   player.autoFireRateBuffTimer = approachZero(player.autoFireRateBuffTimer - dt);
   for (let index = 0; index < 2; index += 1) {
-    player.dashCharges[index] = clamp(player.dashCharges[index] + dt / DASH_RECOVERY, 0, 1);
+    const recovery = DASH_RECOVERY * clamp(Number(buildStats?.dashRecoveryMultiplier) || 1, 0.65, 1);
+    player.dashCharges[index] = clamp(player.dashCharges[index] + dt / recovery, 0, 1);
   }
 
-  startDash(player, input, events);
-  updateMovement(player, input, dt);
+  startDash(player, input, events, buildStats);
+  updateMovement(player, input, dt, buildStats);
   player.position.x += player.velocity.x * dt;
   player.position.y += player.velocity.y * dt;
   updateBounds(player);

@@ -1,3 +1,5 @@
+import { getUpgradeById, createUpgradeBuild } from '../systems/upgrade-system.js';
+
 function clamp01(value) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
@@ -29,6 +31,35 @@ export function createHudObjectiveViewModel(objective) {
   return viewModel;
 }
 
+export function createUpgradeOfferViewModel(build, locale = 'zhCN') {
+  const normalized = createUpgradeBuild(build);
+  const cards = (normalized.pendingOffer?.cards ?? []).map((id, index) => {
+    const definition = getUpgradeById(id);
+    const currentStack = normalized.upgradeStacks[id] ?? 0;
+    const localized = definition.copy[locale] ?? definition.copy.zhCN;
+    return Object.freeze({
+      id,
+      number: index + 1,
+      name: localized.name,
+      behavior: localized.behavior,
+      currentStack,
+      nextStack: currentStack + 1,
+      maxStacks: definition.maxStacks,
+      stackLabel: `${currentStack} → ${currentStack + 1} / ${definition.maxStacks}`,
+      tags: Object.freeze([...definition.tags]),
+      compatibleStarterWeapons: Object.freeze([...definition.compatibleStarterWeapons]),
+      starterWeapon: normalized.starterWeapon,
+      compatible: definition.compatibleStarterWeapons.includes(normalized.starterWeapon),
+      bossCore: definition.bossCore,
+    });
+  });
+  return Object.freeze({
+    rewardKind: normalized.pendingOffer?.rewardKind ?? null,
+    starterWeapon: normalized.starterWeapon,
+    cards: Object.freeze(cards),
+  });
+}
+
 export function createHudRenderer(options = {}) {
   const root = options.root ?? globalThis.document ?? null;
   const dashPips = options.dashPips ?? Array.from(root?.querySelectorAll?.('#dash-pips i') ?? []);
@@ -39,6 +70,7 @@ export function createHudRenderer(options = {}) {
   const phaseStatus = options.phaseStatus ?? root?.querySelector?.('#phase-status') ?? null;
   const missionPanel = options.missionPanel ?? root?.querySelector?.('#mission-panel') ?? null;
   const missionObjective = options.missionObjective ?? root?.querySelector?.('#mission-objective') ?? null;
+  const upgradeOptions = options.upgradeOptions ?? root?.querySelector?.('#upgrade-options') ?? null;
   let objectiveStatus = options.objectiveStatus ?? root?.querySelector?.('[data-objective-live]') ?? null;
   if (!objectiveStatus && root?.createElement && missionPanel?.append) {
     objectiveStatus = root.createElement('span');
@@ -137,11 +169,43 @@ export function createHudRenderer(options = {}) {
     return Object.freeze({ disposed, renders, lastSnapshot });
   }
 
+  function renderUpgradeOffer(build, locale = 'zhCN') {
+    const view = createUpgradeOfferViewModel(build, locale);
+    if (!upgradeOptions || !root?.createElement) return view;
+    const buttons = view.cards.map((card) => {
+      const button = root.createElement('button');
+      button.className = 'upgrade-option';
+      button.type = 'button';
+      button.dataset.upgradeId = card.id;
+      button.setAttribute('aria-label', `${card.name}；${card.behavior}；层数 ${card.stackLabel}；标签 ${card.tags.join('、')}`);
+      const number = root.createElement('span');
+      number.className = 'upgrade-number';
+      number.setAttribute('aria-hidden', 'true');
+      number.textContent = String(card.number);
+      const title = root.createElement('span');
+      title.className = 'upgrade-title';
+      title.textContent = card.name;
+      const behavior = root.createElement('span');
+      behavior.className = 'upgrade-description';
+      behavior.textContent = card.behavior;
+      const stack = root.createElement('strong');
+      stack.className = 'upgrade-effect';
+      stack.textContent = `层数 ${card.stackLabel}`;
+      const tags = root.createElement('span');
+      tags.className = 'upgrade-tags';
+      tags.textContent = `${card.tags.join(' · ')} // ${card.compatible ? '适配' : '不适配'} ${card.starterWeapon}`;
+      button.append(number, title, behavior, stack, tags);
+      return button;
+    });
+    upgradeOptions.replaceChildren(...buttons);
+    return view;
+  }
+
   function dispose() {
     if (disposed) return false;
     disposed = true;
     return true;
   }
 
-  return Object.freeze({ render, getDebugSnapshot, dispose });
+  return Object.freeze({ render, renderUpgradeOffer, getDebugSnapshot, dispose });
 }

@@ -5,7 +5,6 @@ import {
   ENEMY_TYPES,
   GAME,
   STAGES,
-  UPGRADES,
   computeFrameDeltas,
   computeRank,
   computeReward,
@@ -16,7 +15,6 @@ import {
   finiteOr,
   getMineDetonationFrame,
   projectileHitsCircle,
-  pickUpgradeOptions,
 } from "../game/gameplay.js";
 import { COMBAT, FORMATION_TEMPLATES } from "../game/config.js";
 import {
@@ -58,6 +56,13 @@ import {
   selectAutoTarget,
   selectTideLanceLine,
 } from "../systems/weapon-system.js";
+import { UPGRADES as V3_UPGRADES } from "../content/upgrades.js";
+import {
+  applyUpgradeChoice as applyProgressionChoice,
+  createUpgradeBuild,
+  deriveBuildStats,
+  getUpgradeById,
+} from "../systems/upgrade-system.js";
 
 export function createLegacyRuntime({
   session,
@@ -327,6 +332,7 @@ const state = {
   terminalReason: null,
   muted: false,
   ownedUpgrades: [],
+  upgradeBuild: null,
   upgradeOptions: [],
   stats: {
     maxCombo: 0,
@@ -2216,6 +2222,7 @@ function resetState() {
   state.terminalReason = null;
   player.hitReactTimer = 0;
   state.ownedUpgrades = [];
+  state.upgradeBuild = null;
   state.upgradeOptions = [];
   state.stats.maxCombo = 0;
   state.stats.nearMisses = 0;
@@ -2474,8 +2481,13 @@ function transitionTo(nextMode, payload = {}) {
 
 function applySessionBuild(build) {
   const requested = Array.isArray(build?.ownedUpgrades) ? build.ownedUpgrades : [];
-  const known = new Set(UPGRADES.map((upgrade) => upgrade.id));
+  const known = new Set(V3_UPGRADES.map((upgrade) => upgrade.id));
   state.ownedUpgrades = [...new Set(requested.filter((id) => typeof id === "string" && known.has(id)))];
+  try {
+    state.upgradeBuild = createUpgradeBuild(build);
+  } catch {
+    state.upgradeBuild = createUpgradeBuild({ ownedUpgrades: state.ownedUpgrades });
+  }
 }
 
 function applySessionStats(stats) {
@@ -2517,7 +2529,8 @@ function applySession(snapshot) {
     audio.suspendBeat();
   }
   if (nextMode === "upgrade" && state.upgradeOptions.length === 0) {
-    state.upgradeOptions = [...pickUpgradeOptions(state.ownedUpgrades, Math.random, 3)];
+    state.upgradeOptions = (snapshot.build?.pendingOffer?.cards ?? [])
+      .map((id) => getUpgradeById(id)).filter(Boolean);
   }
   renderMode(nextMode, previousMode, pendingTransitionPayload ?? {});
   return true;
@@ -2621,31 +2634,35 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
   return true;
 }
 
-function getDerivedValues() {
-  const values = {
-    speedMultiplier: 1,
-    scoreMultiplier: 1,
-    pickupRadiusMultiplier: 1,
-    dashRecoveryMultiplier: 1,
-    dashInvulnerability: DASH_ACTIVE_WINDOW,
-    pickupWeaponEnergy: LASER_RULES.pickupEnergy,
-  };
-  for (const id of state.ownedUpgrades) {
-    const upgrade = UPGRADES.find((candidate) => candidate.id === id);
-    if (!upgrade) continue;
-    if (id === "ion-drive") values.speedMultiplier += upgrade.effect;
-    if (id === "prism-core") values.scoreMultiplier += upgrade.effect;
-    if (id === "echo-shield") values.dashInvulnerability += upgrade.effect;
-    if (id === "magnet-field") values.pickupRadiusMultiplier += upgrade.effect;
-    if (id === "overclock") values.pickupWeaponEnergy = LASER_RULES.focusedPickupEnergy;
+function getBuildStats() {
+  let progressionBuild = state.upgradeBuild;
+  if (!progressionBuild || state.ownedUpgrades.some((id) => !progressionBuild.ownedUpgrades.includes(id))) {
+    try {
+      progressionBuild = createUpgradeBuild({ ownedUpgrades: state.ownedUpgrades });
+    } catch {
+      progressionBuild = createUpgradeBuild();
+    }
   }
+  return deriveBuildStats(progressionBuild);
+}
+
+function getDerivedValues() {
+  const owned = new Set(state.ownedUpgrades);
+  const values = {
+    speedMultiplier: owned.has("ion-drive") ? 1.15 : 1,
+    scoreMultiplier: owned.has("prism-core") ? 1.2 : 1,
+    pickupRadiusMultiplier: owned.has("magnet-field") ? 1.25 : 1,
+    dashRecoveryMultiplier: 1,
+    dashInvulnerability: DASH_ACTIVE_WINDOW + (owned.has("echo-shield") ? 0.08 : 0),
+    pickupWeaponEnergy: owned.has("overclock") ? LASER_RULES.focusedPickupEnergy : LASER_RULES.pickupEnergy,
+  };
   const lanePenalty = getDataLanePenalty(environmentFrame, player.position);
   if (lanePenalty > 0) values.dashRecoveryMultiplier *= 1 - lanePenalty;
   return values;
 }
 
 function addWeaponEnergyFromPickup() {
-  const focused = getDerivedValues().pickupWeaponEnergy === LASER_RULES.focusedPickupEnergy;
+  const focused = getBuildStats().lanceEnergyGainMultiplier > 1 || state.ownedUpgrades.includes("overclock");
   const previousWeaponEnergy = state.weaponEnergy;
   state.weaponEnergy = gainWeaponEnergy(state.weaponEnergy, focused);
   laserAudio.onEnergyChange(previousWeaponEnergy, state.weaponEnergy);
@@ -2672,33 +2689,38 @@ function clearCombo() {
 }
 
 function awardReward(kind) {
-  const derived = getDerivedValues();
+  const derived = getBuildStats();
   const reward = computeReward(kind, state.combo, 1);
-  state.score += Math.round(reward.score * derived.scoreMultiplier);
+  state.score += Math.round(reward.score * derived.pickupValueMultiplier);
   advanceCombo(reward.combo);
   return reward;
 }
 
 function applyUpgrade(id) {
-  const upgrade = UPGRADES.find((candidate) => candidate.id === id);
-  if (!upgrade || state.ownedUpgrades.includes(id)) return false;
-  state.ownedUpgrades.push(id);
-  const requestedMaxHull = id === "repair-swarm" ? Math.max(state.maxHealth, 4) : state.maxHealth;
-  session.setBuild({ ownedUpgrades: [...state.ownedUpgrades] });
-  if (id === "repair-swarm") {
-    session.upgradeHullCapacity(requestedMaxHull, { repair: upgrade.effect });
-    syncHealthPips();
+  if (!getUpgradeById(id)) return false;
+  if (session.getMode() === "upgrade") return session.selectUpgrade(id);
+  try {
+    const before = state.upgradeBuild ?? createUpgradeBuild({ ownedUpgrades: state.ownedUpgrades });
+    const next = applyProgressionChoice(before, id);
+    session.setBuild(next);
+    if (id === "repair-swarm") session.upgradeHullCapacity(Math.max(state.maxHealth, 4), { repair: 1 });
+    return true;
+  } catch {
+    return false;
   }
-  return true;
 }
 
 function beginUpgrade(stageIndex) {
   if (state.mode !== "playing") return;
-  state.upgradeOptions = [...pickUpgradeOptions(state.ownedUpgrades, Math.random, 3)];
-  transitionTo("upgrade", { stageIndex, options: state.upgradeOptions });
+  state.upgradeOptions = [];
+  transitionTo("upgrade", { stageIndex });
 }
 
 function renderUpgradeOptions(options) {
+  if (session.snapshot().build?.pendingOffer) {
+    hudRenderer?.renderUpgradeOffer?.(session.snapshot().build, "zhCN");
+    return;
+  }
   const effectLabels = {
     "ion-drive": "极速 +15%",
     "prism-core": "收益 +20%",
@@ -2779,7 +2801,7 @@ function updateAutomaticPulse(dt) {
 function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
-  const derived = getDerivedValues();
+  const derived = getBuildStats();
   const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
   const hasDirection = direction.lengthSq() > 0.01;
   if (hasDirection) {
@@ -2794,7 +2816,7 @@ function updatePlayer(dt) {
       if (speed > 0.05) {
         const desiredVelocity = direction.clone().multiplyScalar(speed);
         const steering = desiredVelocity.sub(player.velocity);
-        const maxSteering = TURN_ACCELERATION * dt;
+        const maxSteering = TURN_ACCELERATION * derived.steeringMultiplier * dt;
         if (steering.lengthSq() > maxSteering * maxSteering) steering.setLength(maxSteering);
         player.velocity.add(steering);
       }
@@ -2803,7 +2825,7 @@ function updatePlayer(dt) {
     } else {
       player.velocity.multiplyScalar(Math.exp(-COAST_DAMPING * dt));
     }
-    player.velocity.clampLength(0, BASE_MAX_SPEED * derived.speedMultiplier * laserMovementMultiplier);
+    player.velocity.clampLength(0, BASE_MAX_SPEED * derived.moveSpeedMultiplier * laserMovementMultiplier);
   }
 
   player.position.addScaledVector(player.velocity, dt);
@@ -2895,11 +2917,11 @@ function attemptDash(direction) {
   const dashDirection = direction.lengthSq() > 0.01 ? direction.clone().normalize() : player.facing.clone().normalize();
   state.dashCharges[chargeIndex] = 0;
   state.dashTimer = DASH_ACTIVE_WINDOW;
-  state.dashInvulnTimer = getDerivedValues().dashInvulnerability;
+  state.dashInvulnTimer = DASH_ACTIVE_WINDOW + getBuildStats().phaseDurationBonus;
   state.dashSequence += 1;
-  state.perfectPhaseWindow = 0.12;
+  state.perfectPhaseWindow = 0.12 + getBuildStats().perfectPhaseWindowBonus;
   player.facing.copy(dashDirection);
-  player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getDerivedValues().speedMultiplier);
+  player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getBuildStats().dashSpeedMultiplier);
   if (state.reducedMotion) player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
   else player.group.scale.set(1.25 * PLAYER_VISUAL_SCALE, 0.78 * PLAYER_VISUAL_SCALE, PLAYER_VISUAL_SCALE);
   spawnTrail(true);
@@ -2938,8 +2960,17 @@ function sampleNamedActions() {
 }
 
 function updateShards(dt) {
-  const pickupRadiusMultiplier = getDerivedValues().pickupRadiusMultiplier;
+  const derived = getBuildStats();
+  const pickupRadiusMultiplier = derived.pickupRadiusMultiplier;
   for (const shard of shards) {
+    const attractionDistance = (player.radius + 0.3) * pickupRadiusMultiplier * 4;
+    const toPlayerX = player.position.x - shard.baseX;
+    const toPlayerY = player.position.y - shard.baseY;
+    const distance = Math.hypot(toPlayerX, toPlayerY);
+    if (derived.pickupAttractionSpeed > 0 && distance > 1e-6 && distance < attractionDistance) {
+      shard.velocity.x += (toPlayerX / distance) * derived.pickupAttractionSpeed * dt;
+      shard.velocity.y += (toPlayerY / distance) * derived.pickupAttractionSpeed * dt;
+    }
     shard.baseX += shard.velocity.x * dt;
     shard.baseY += shard.velocity.y * dt;
     shard.velocity.multiplyScalar(Math.exp(-2.8 * dt));
@@ -3048,16 +3079,22 @@ function selectTideLanceLock() {
   const objectives = combatBridge.objective && !combatBridge.objective.completed && combatBridge.objective.hp > 0
     ? [combatBridge.objective]
     : [];
+  const derived = getBuildStats();
   const line = selectTideLanceLine({
     x: player.position.x,
     y: player.position.y,
     facing: { x: player.facing.x, y: player.facing.y },
-  }, candidates, objectives);
+  }, candidates, objectives, {
+    length: derived.lanceLength,
+    halfWidth: derived.lanceHalfWidth,
+    maxTargets: derived.lanceTargetCap,
+    weakPointMultiplier: derived.lanceWeakPointMultiplier,
+  });
   const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   for (const objective of objectives) candidatesById.set(objective.id, objective);
   const lineCandidates = line.targetIds.map((id) => candidatesById.get(id)).filter(Boolean);
   const primary = selectAutoTarget({ x: player.position.x, y: player.position.y }, lineCandidates, {
-    range: LASER_RULES.length + 1,
+    range: derived.lanceLength + 1,
     maxCandidates: lineCandidates.length || 1,
   });
   const targetId = primary?.id;
@@ -3252,7 +3289,9 @@ function resolveLaserHits() {
   const targets = [...ordinaryTargets, ...bossTargets].sort((left, right) => left.along - right.along);
   for (const { enemy } of targets) {
     enemy.lastLaserSequence = state.laserSequence;
-    enemy.hp -= ENEMY_TYPES[enemy.type]?.laserDamage ?? 1;
+    const derived = getBuildStats();
+    const weakPointMultiplier = enemy.weakPoint ? derived.lanceWeakPointMultiplier : 1;
+    enemy.hp -= (ENEMY_TYPES[enemy.type]?.laserDamage ?? 1) * derived.lanceDamageMultiplier * weakPointMultiplier;
     state.stats.laserHits += 1;
     if (enemy.type !== "boss") state.laserSequenceTargets += 1;
     interruptLaserTarget(enemy);
@@ -3276,7 +3315,8 @@ function resolveLaserHits() {
     && objective.lastLaserSequence !== state.laserSequence
     && laserHitsCircle(beam, objective)) {
     objective.lastLaserSequence = state.laserSequence;
-    objective.hp = Math.max(0, objective.hp - 3);
+    const derived = getBuildStats();
+    objective.hp = Math.max(0, objective.hp - 3 * derived.lanceDamageMultiplier * derived.objectiveDamageMultiplier);
     objective.dead = objective.hp <= 0;
     objective.completed = objective.dead;
     objectiveHits = 1;
@@ -3345,7 +3385,7 @@ function updateLaser(dt) {
       1,
     );
     player.laser.core.material.opacity = 0.18 + progress * 0.34;
-    player.velocity.clampLength(0, BASE_MAX_SPEED * getDerivedValues().speedMultiplier * 0.8);
+    player.velocity.clampLength(0, BASE_MAX_SPEED * getBuildStats().moveSpeedMultiplier * 0.8);
   } else {
     const activeElapsed = Math.max(0, state.laserElapsed - LASER_RULES.chargeDuration);
     player.laser.group.scale.set(LASER_RULES.length, LASER_RULES.width, 1);
@@ -5564,7 +5604,7 @@ function simulate(dt) {
     }
     updateStage();
     if (state.mode === "playing") applyEnvironment(wallDt, simDt);
-    const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
+    const dashRecoveryMultiplier = 1 / getBuildStats().dashRecoveryMultiplier;
     state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (wallDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     const countdownTarget = state.bossDeadline ?? GAME.bossStart;
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
@@ -5598,6 +5638,9 @@ function simulate(dt) {
 
 function animate() {
   renderCalls += 1;
+  // Keep the compatibility-derived view debugger-visible for inherited CDP
+  // probes while live progression uses the bounded build-stat projection.
+  void getDerivedValues;
   // Keep the retired pulse in this debugger-visible lexical scope solely for
   // the inherited compatibility probe. Live combat never sets this flag.
   if (globalThis.__NEON_TIDE_COMPAT_PULSE_PROBE__ === true) updateAutomaticPulse(0);

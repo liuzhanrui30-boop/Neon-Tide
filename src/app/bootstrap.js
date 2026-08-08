@@ -14,6 +14,7 @@ import { createProjectileSystem } from '../systems/projectile-system.js';
 import { createCollisionSystem } from '../systems/collision-system.js';
 import { createObjectiveWorldBridge } from '../systems/objective-world-bridge.js';
 import { createEnemySystem } from '../systems/enemy-system.js';
+import { createUpgradeBuild, deriveBuildStats } from '../systems/upgrade-system.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
@@ -213,9 +214,10 @@ export function bootstrapNeonTide(options = {}) {
             enemySummary = enemySystem.update(world, world.get(playerId), objective, dt, events);
           });
         }
-        weaponSystem.update(world, playerId, dt, events);
+        const buildStats = deriveBuildStats(createUpgradeBuild(session.snapshot().build));
+        weaponSystem.update(world, playerId, dt, events, buildStats);
         projectileSystem.update(world, dt, events);
-        const summary = collisionSystem.resolve(world, session, dt, events);
+        const summary = collisionSystem.resolve(world, session, dt, events, buildStats);
         runtime?.applyCombatSummary(world, summary);
         if (session.isObjectiveManaged()) {
           const objectiveInput = summary.damageRecords
@@ -244,7 +246,7 @@ export function bootstrapNeonTide(options = {}) {
           });
           session.updateRoom({
             world,
-            player: world.get(playerId),
+            player: { ...world.get(playerId), buildStats },
             presentationPending: events.getStats().queued,
           }, dt, { input: objectiveInput, emit: events.emit });
           objectiveAuthority.visit(renderObjectiveHud);

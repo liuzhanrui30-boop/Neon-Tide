@@ -203,7 +203,7 @@ export function createCollisionSystem({
         y: target.y,
         vx: projectile.vx,
         vy: projectile.vy,
-        damage: Math.max(0.25, projectile.damage * 0.78),
+        damage: Math.max(0.25, projectile.damage * clamp(finite(projectile.chainDamageMultiplier, 0.78), 0.5, 1)),
         ownerId: projectile.ownerId,
         targetId: -target.id,
         team: projectile.team,
@@ -236,8 +236,13 @@ export function createCollisionSystem({
           const armoredBossPart = target.kind === 'bossPart' && (target.armored || !target.weakPoint);
           const armoredEnemy = target.kind === 'enemy' && target.armored && !target.weakPoint;
           if (!armoredBossPart && !armoredEnemy) {
-            const multiplier = target.kind === 'bossPart' && target.weakPoint ? 1.5 : 1;
-            queueDamage(state, projectile, target, projectile.damage * multiplier, target.weakPoint);
+            const weakPointMultiplier = target.weakPoint
+              ? clamp(finite(projectile.weakPointMultiplier, 1.5), 1, 2.5)
+              : 1;
+            const objectiveMultiplier = target.kind === 'objective'
+              ? clamp(finite(projectile.objectiveDamageMultiplier, 1), 1, 1.8)
+              : 1;
+            queueDamage(state, projectile, target, projectile.damage * weakPointMultiplier * objectiveMultiplier, target.weakPoint);
           }
           queueImpactSpawns(state, projectile, target);
           hit = true;
@@ -366,12 +371,27 @@ export function createCollisionSystem({
     }
   }
 
-  function collectPickupsAndObjectives(world, state, player, dt, events) {
+  function collectPickupsAndObjectives(world, state, player, dt, events, buildStats = null) {
     const pickups = world.query('pickup');
     let pickupValue = 0;
     for (let index = 0; index < pickups.length; index += 1) {
       const pickup = world.readInto(pickups.at(index), pickupRead);
-      if (!pickup || !pickup.collidable || !overlaps(player, pickup)) continue;
+      if (!pickup || !pickup.collidable) continue;
+      const attractionMultiplier = clamp(finite(buildStats?.pickupRadiusMultiplier, 1), 1, 3);
+      const attractionSpeed = clamp(finite(buildStats?.pickupAttractionSpeed), 0, 6);
+      const dx = player.x - pickup.x;
+      const dy = player.y - pickup.y;
+      const distance = Math.hypot(dx, dy);
+      if (attractionSpeed > 0 && distance > EPSILON && distance < (player.radius + pickup.radius) * attractionMultiplier * 4) {
+        world.write(pickup.id, {
+          previousX: pickup.x,
+          previousY: pickup.y,
+          x: pickup.x + (dx / distance) * attractionSpeed * dt,
+          y: pickup.y + (dy / distance) * attractionSpeed * dt,
+        });
+      }
+      const pickupRadius = { ...pickup, radius: pickup.radius * attractionMultiplier };
+      if (!overlaps(player, pickupRadius)) continue;
       state.despawnCount = addUnique(despawnIds, state.despawnCount, pickup.id);
       state.pickups += 1;
       pickupValue += pickup.value;
@@ -386,7 +406,7 @@ export function createCollisionSystem({
       const objective = world.readInto(objectives.at(index), objectiveRead);
       if (!objective || !objective.collidable || objective.completed || objective.team === 2
         || !overlaps(player, objective)) continue;
-      const progress = objective.progress + dt;
+      const progress = objective.progress + dt * clamp(finite(buildStats?.objectiveProximityMultiplier, 1), 1, 1.6);
       const completed = objective.duration > 0 && progress >= objective.duration - EPSILON;
       world.write(objective.id, {
         progress: objective.duration > 0 ? Math.min(objective.duration, progress) : progress,
@@ -521,7 +541,7 @@ export function createCollisionSystem({
     return spawned;
   }
 
-  function resolve(world, session, dt, events = null) {
+  function resolve(world, session, dt, events = null, buildStats = null) {
     if (!world?.query || !world?.readInto || !world?.write || !world?.spawn || !world?.despawn) {
       throw new TypeError('EntityWorld is required');
     }
@@ -544,7 +564,7 @@ export function createCollisionSystem({
     const player = Number.isSafeInteger(playerId) ? world.readInto(playerId, playerRead) : null;
     if (player?.collidable) {
       collectPlayerHits(world, state, player, events);
-      collectPickupsAndObjectives(world, state, player, dt, events);
+      collectPickupsAndObjectives(world, state, player, dt, events, buildStats);
     }
     const damage = applyDamage(world, state);
     let weaponHitEventEmitted = false;

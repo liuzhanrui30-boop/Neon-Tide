@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHudRenderer } from '../src/render/hud-renderer.js';
+import { createHudRenderer, createUpgradeOfferViewModel } from '../src/render/hud-renderer.js';
+import { attachPendingOffer, createUpgradeBuild } from '../src/systems/upgrade-system.js';
 
 class FakeClassList {
   toggle() {}
@@ -92,4 +93,19 @@ test('HUD stores and exposes only a detached immutable objective view model', ()
   authoritative.anchors[0].x = 999;
   assert.equal(objective.progress, 1);
   assert.throws(() => { objective.progress = 99; }, TypeError);
+});
+
+test('upgrade cards expose behavior, current to new stack, tags and starter compatibility', () => {
+  const build = attachPendingOffer(createUpgradeBuild({ starterWeapon: 'pulse-cannon' }), 77);
+  const view = createUpgradeOfferViewModel(build, 'zhCN');
+  assert.equal(view.cards.length, 3);
+  assert.equal(Object.isFrozen(view), true);
+  for (const card of view.cards) {
+    assert.ok(card.name);
+    assert.ok(card.behavior);
+    assert.match(card.stackLabel, /0 → 1/);
+    assert.ok(card.tags.length > 0);
+    assert.equal(card.compatible, true);
+    assert.equal(card.starterWeapon, 'pulse-cannon');
+  }
 });

@@ -1,6 +1,12 @@
 import { maxHullForRunBuild, normalizeRunBuild } from './run-build.js';
 import { getCampaignEncounter, getEncounterTemplate } from '../content/encounters.js';
 import { createEncounterDirector } from '../systems/encounter-director.js';
+import {
+  applyUpgradeChoice,
+  attachPendingOffer,
+  createUpgradeBuild,
+  deriveBuildStats,
+} from '../systems/upgrade-system.js';
 
 export const GAME_SESSION_MODES = Object.freeze([
   'menu',
@@ -381,6 +387,15 @@ export function createGameSession(options = {}) {
     if (Number.isInteger(result.chapterIndex) && result.chapterIndex >= 0) state.chapterIndex = result.chapterIndex;
     if (nextMode === 'victory' || nextMode === 'defeat') state.terminalReason = result.reason ?? nextMode;
     if (nextMode === 'defeat') state.hull = 0;
+    if (nextMode === 'upgrade') {
+      const offerSeed = Math.trunc(state.seed * 1103515245 + state.stats.roomsCompleted * 2654435761
+        + (state.build.offerSequence ?? 0) * 2246822519);
+      state.build = cloneValue(attachPendingOffer(
+        createUpgradeBuild(state.build),
+        offerSeed,
+        result.rewardKind === 'boss' || result.bossCore ? 'boss' : 'normal',
+      ));
+    }
     let checkpoint = null;
     const changed = transition(
       nextMode,
@@ -459,6 +474,27 @@ export function createGameSession(options = {}) {
       current: snapshot(),
       detail: Object.freeze({ buildChanged: true }),
     });
+    events?.emit('session:changed', changeRecord);
+    onChange(changeRecord);
+    return true;
+  }
+
+  function selectUpgrade(id) {
+    if (state.mode !== 'upgrade') return invalid('upgrade');
+    if (typeof id !== 'string' || !state.build?.pendingOffer?.cards?.includes(id)) return false;
+    const previous = snapshot();
+    const beforeStats = deriveBuildStats(createUpgradeBuild(state.build));
+    const nextBuild = applyUpgradeChoice(state.build, id);
+    const nextStats = deriveBuildStats(nextBuild);
+    const hullIncrease = Math.max(0, nextStats.hullBonus - beforeStats.hullBonus);
+    state.build = cloneValue(nextBuild);
+    state.maxHull = Math.max(state.maxHull, baseMaxHull + nextStats.hullBonus);
+    state.hull = Math.min(state.maxHull, state.hull + Math.max(0, nextStats.immediateRepair - beforeStats.immediateRepair) + hullIncrease * 0);
+    state.revision += 1;
+    const current = snapshot();
+    const detail = Object.freeze({ upgradeSelected: id, stacks: nextBuild.upgradeStacks[id] });
+    const changeRecord = Object.freeze({ previous, current, detail });
+    events?.emit('session:upgrade-selected', detail);
     events?.emit('session:changed', changeRecord);
     onChange(changeRecord);
     return true;
@@ -548,6 +584,7 @@ export function createGameSession(options = {}) {
     damageHull,
     upgradeHullCapacity,
     setBuild,
+    selectUpgrade,
     setStats,
     reconcileCompatibilityHull,
     reset,
