@@ -275,6 +275,7 @@ const state = {
   laserDirection: new THREE.Vector2(0, 1),
   laserTargetMode: "neutral",
   laserTargetIndex: -1,
+  laserTargetSourceId: 0,
   laserLockScore: 0,
   laserRetargetUsed: false,
   autoPulseTimer: AUTO_PULSE_INTERVAL,
@@ -282,6 +283,7 @@ const state = {
   comboTimer: 0,
   stageIndex: 0,
   spawnSequence: 0,
+  combatSourceSequence: 0,
   enemySpawnTimer: 1.1,
   formationTimer: 4.8,
   environmentTimer: Infinity,
@@ -409,6 +411,10 @@ const runtimeStats = {
 const combatBridge = {
   playerId: 0,
   enemiesById: new Map(),
+  enemiesBySourceId: new Map(),
+  bossPartsById: new Map(),
+  objective: null,
+  objectiveEntityId: 0,
   readTarget: createEntityReadTarget(),
   hits: 0,
   damage: 0,
@@ -416,6 +422,8 @@ const combatBridge = {
   nextFeedbackAt: 0,
   feedbackEvents: 0,
   suppressedFeedback: 0,
+  pendingFeedback: null,
+  consumedWeaponEvents: 0,
 };
 const RUNTIME_COLLECTION_AUDIT_INTERVAL = 2;
 const runtimeAudit = {
@@ -1668,6 +1676,7 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
   const config = ENEMY_TYPES[type] ?? ENEMY_TYPES.chaser;
   group.position.set(position.x, position.y, 2);
   world.add(group);
+  const sourceId = ++state.combatSourceSequence;
   const enemy = {
     type,
     group,
@@ -1689,8 +1698,10 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
     dead: false,
     priority: 1,
     ...overrides,
+    sourceId,
   };
   enemies.push(enemy);
+  combatBridge.enemiesBySourceId.set(sourceId, enemy);
   state.stats.enemyPeak = Math.max(state.stats.enemyPeak, enemies.length);
   const role = config.role ?? type;
   state.stats.roles[role] = (state.stats.roles[role] ?? 0) + 1;
@@ -2078,6 +2089,7 @@ function removeEnemy(index) {
   const enemy = enemies[index];
   enemies.splice(index, 1);
   if (!enemy) return false;
+  combatBridge.enemiesBySourceId.delete(enemy.sourceId);
   if (enemy.group?.isObject3D) world.remove(enemy.group);
   enemy.ownedMaterials?.forEach((material) => material?.dispose?.());
   state.stats.activeCleanupCount += 1;
@@ -2158,11 +2170,13 @@ function resetState() {
   state.laserDirection.set(0, 1);
   state.laserTargetMode = "neutral";
   state.laserTargetIndex = -1;
+  state.laserTargetSourceId = 0;
   state.laserLockScore = 0;
   state.laserRetargetUsed = false;
   state.autoPulseTimer = AUTO_PULSE_INTERVAL;
   state.stageIndex = 0;
   state.spawnSequence = 0;
+  state.combatSourceSequence = 0;
   state.enemySpawnTimer = 0.72;
   state.formationTimer = 4.8;
   state.environmentTimer = Infinity;
@@ -2219,12 +2233,18 @@ function resetState() {
   state.stats.autoPulseLog = [];
   combatBridge.playerId = 0;
   combatBridge.enemiesById.clear();
+  combatBridge.enemiesBySourceId.clear();
+  combatBridge.bossPartsById.clear();
+  combatBridge.objective = null;
+  combatBridge.objectiveEntityId = 0;
   combatBridge.hits = 0;
   combatBridge.damage = 0;
   combatBridge.destroyed = 0;
   combatBridge.nextFeedbackAt = 0;
   combatBridge.feedbackEvents = 0;
   combatBridge.suppressedFeedback = 0;
+  combatBridge.pendingFeedback = null;
+  combatBridge.consumedWeaponEvents = 0;
   state.stats.projectilePeak = 0;
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
@@ -2976,8 +2996,8 @@ function canStartLaser() {
 }
 
 function selectTideLanceLock() {
-  const candidates = enemies.map((enemy, index) => ({
-    id: index,
+  const candidates = enemies.map((enemy) => ({
+    id: enemy.sourceId,
     x: enemy.group.position.x,
     y: enemy.group.position.y,
     visible: enemy.group.visible !== false
@@ -2995,25 +3015,46 @@ function selectTideLanceLock() {
     executingTelegraph: isEnemyAttackExecuting(enemy),
     threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
   }));
+  const objectives = combatBridge.objective && !combatBridge.objective.completed && combatBridge.objective.hp > 0
+    ? [combatBridge.objective]
+    : [];
   const line = selectTideLanceLine({
     x: player.position.x,
     y: player.position.y,
     facing: { x: player.facing.x, y: player.facing.y },
-  }, candidates, []);
-  const lineCandidates = line.targetIds.map((id) => candidates[id]).filter(Boolean);
+  }, candidates, objectives);
+  const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
+  for (const objective of objectives) candidatesById.set(objective.id, objective);
+  const lineCandidates = line.targetIds.map((id) => candidatesById.get(id)).filter(Boolean);
   const primary = selectAutoTarget({ x: player.position.x, y: player.position.y }, lineCandidates, {
     range: LASER_RULES.length + 1,
     maxCandidates: lineCandidates.length || 1,
   });
   const targetId = primary?.id;
-  if (!Number.isInteger(targetId) || !enemies[targetId] || enemies[targetId].dead) return null;
-  const target = candidates[targetId];
+  if (!Number.isSafeInteger(targetId)) return null;
+  const enemy = combatBridge.enemiesBySourceId.get(targetId) ?? null;
+  const objective = objectives.find(({ id }) => id === targetId) ?? null;
+  if ((!enemy || enemy.dead) && !objective) return null;
+  const target = candidatesById.get(targetId);
   return Object.freeze({
     ...line,
     target,
-    enemy: enemies[targetId],
+    enemy,
+    objective,
     direction: Object.freeze({ x: line.directionX, y: line.directionY }),
   });
+}
+
+function projectLaserTargetIndex(lock) {
+  return lock?.enemy ? enemies.indexOf(lock.enemy) : -1;
+}
+
+function applyTideLanceLock(lock) {
+  state.laserDirection.set(lock.direction.x, lock.direction.y);
+  state.laserTargetMode = "target";
+  state.laserTargetSourceId = lock.target.id;
+  state.laserTargetIndex = projectLaserTargetIndex(lock);
+  state.laserLockScore = lock.score;
 }
 
 function fireAutomaticPulse(sequence) {
@@ -3030,7 +3071,7 @@ function fireAutomaticPulse(sequence) {
     });
   }
   const enemy = lock.enemy;
-  const targetIndex = lock.target.id;
+  const targetIndex = enemies.indexOf(enemy);
   const hpBefore = Math.max(0, runtimeFinite(enemy.hp, 0));
   const damage = Math.min(AUTO_PULSE_DAMAGE, hpBefore);
   enemy.hp = Math.max(0, hpBefore - damage);
@@ -3073,23 +3114,22 @@ function startLaserCharge() {
   state.laserSequence += 1;
   state.laserSequenceTargets = 0;
   const lock = selectTideLanceLock();
-  if (lock?.enemy) {
-    state.laserDirection.set(lock.direction.x, lock.direction.y);
-    state.laserTargetMode = "target";
-    state.laserTargetIndex = lock.target.id;
-    state.laserLockScore = lock.score;
+  if (lock?.target) {
+    applyTideLanceLock(lock);
   } else {
     state.laserDirection.copy(player.facing);
     if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
     else state.laserDirection.normalize();
     state.laserTargetMode = "neutral";
     state.laserTargetIndex = -1;
+    state.laserTargetSourceId = 0;
     state.laserLockScore = 0;
   }
   state.laserRetargetUsed = false;
   events.emit("player:tideLanceLock", Object.freeze({
     mode: state.laserTargetMode,
     targetIndex: state.laserTargetIndex,
+    targetId: state.laserTargetSourceId || null,
     directionX: state.laserDirection.x,
     directionY: state.laserDirection.y,
     score: state.laserLockScore,
@@ -3200,12 +3240,26 @@ function resolveLaserHits() {
     spawnParticleBurst(hitPosition, enemy.type === "boss" ? 0xe7ffff : paletteState.primary.getHex(), enemy.type === "boss" ? 10 : 6, 3.2, 0.78);
     deferOrDestroyLaserTarget(enemy);
   }
-  if (targets.length > 0) {
+  let objectiveHits = 0;
+  const objective = combatBridge.objective;
+  if (objective && !objective.completed && objective.hp > 0
+    && objective.lastLaserSequence !== state.laserSequence
+    && laserHitsCircle(beam, objective)) {
+    objective.lastLaserSequence = state.laserSequence;
+    objective.hp = Math.max(0, objective.hp - 3);
+    objective.dead = objective.hp <= 0;
+    objective.completed = objective.dead;
+    objectiveHits = 1;
+    state.stats.laserHits += 1;
+    state.laserSequenceTargets += 1;
+    spawnParticleBurst(new THREE.Vector2(objective.x, objective.y), paletteState.primary.getHex(), 8, 3, 0.82);
+  }
+  if (targets.length + objectiveHits > 0) {
     state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
     const feedbackPosition = player.position.clone().addScaledVector(state.laserDirection, Math.min(LASER_RULES.length, 4.2));
     showFloatingText(`PIERCE ×${state.laserSequenceTargets}`, feedbackPosition, "cyan", "medium");
   }
-  return targets.length;
+  return targets.length + objectiveHits;
 }
 
 function maybeRetargetTideLance() {
@@ -3214,19 +3268,22 @@ function maybeRetargetTideLance() {
     return false;
   }
   const lock = selectTideLanceLock();
-  if (!lock?.enemy) return false;
-  const currentTargetAlive = state.laserTargetIndex >= 0 && enemies[state.laserTargetIndex] && !enemies[state.laserTargetIndex].dead;
-  const changedTarget = lock.target.id !== state.laserTargetIndex;
+  if (!lock?.target) return false;
+  const currentEnemy = combatBridge.enemiesBySourceId.get(state.laserTargetSourceId);
+  const currentObjective = combatBridge.objective?.id === state.laserTargetSourceId
+    ? combatBridge.objective
+    : null;
+  const currentTargetAlive = Boolean((currentEnemy && !currentEnemy.dead)
+    || (currentObjective && !currentObjective.completed && currentObjective.hp > 0));
+  const changedTarget = lock.target.id !== state.laserTargetSourceId;
   const improved = lock.score > state.laserLockScore + 1e-6;
   if (currentTargetAlive && (!changedTarget || !improved)) return false;
-  state.laserDirection.set(lock.direction.x, lock.direction.y);
-  state.laserTargetMode = "target";
-  state.laserTargetIndex = lock.target.id;
-  state.laserLockScore = lock.score;
+  applyTideLanceLock(lock);
   state.laserRetargetUsed = true;
   events.emit("player:tideLanceLock", Object.freeze({
     mode: state.laserTargetMode,
     targetIndex: state.laserTargetIndex,
+    targetId: state.laserTargetSourceId || null,
     directionX: state.laserDirection.x,
     directionY: state.laserDirection.y,
     score: state.laserLockScore,
@@ -5046,6 +5103,104 @@ function setupInput() {
   return true;
 }
 
+const TIDE_RELAY_POSITIONS = Object.freeze([
+  Object.freeze({ x: -5.4, y: 3.4 }),
+  Object.freeze({ x: 5.2, y: 3.1 }),
+  Object.freeze({ x: -5.1, y: -3.2 }),
+  Object.freeze({ x: 0, y: 3.6 }),
+]);
+
+function legacyBodyContactDamaging(enemy) {
+  return Boolean(enemy && !enemy.dead && !["mine", "lancer"].includes(enemy.type) && enemy.state !== "enter");
+}
+
+function bossPartVulnerability(enemy) {
+  const weakPoint = Boolean(enemy && ["choose", "recover"].includes(enemy.state));
+  return Object.freeze({ weakPoint, armored: !weakPoint });
+}
+
+function ensureCombatObjective(entityWorld) {
+  const current = combatBridge.objective;
+  if (!current || current.stageIndex !== state.stageIndex) {
+    if (combatBridge.objectiveEntityId) entityWorld.despawn(combatBridge.objectiveEntityId);
+    const position = TIDE_RELAY_POSITIONS[state.stageIndex] ?? TIDE_RELAY_POSITIONS[0];
+    const maxHp = 48 + state.stageIndex * 12;
+    const sourceId = ++state.combatSourceSequence;
+    combatBridge.objective = {
+      id: sourceId,
+      sourceId,
+      stageIndex: state.stageIndex,
+      x: position.x,
+      y: position.y,
+      hp: maxHp,
+      maxHp,
+      radius: 0.92,
+      team: 2,
+      role: "objective",
+      type: "tide-relay",
+      objective: true,
+      objectiveType: "tide-relay",
+      threat: 16,
+      visible: true,
+      dead: false,
+      completed: false,
+      lastLaserSequence: 0,
+    };
+    combatBridge.objectiveEntityId = 0;
+  }
+  const objective = combatBridge.objective;
+  if (objective.completed || objective.hp <= 0) {
+    if (combatBridge.objectiveEntityId) entityWorld.despawn(combatBridge.objectiveEntityId);
+    combatBridge.objectiveEntityId = 0;
+    return objective;
+  }
+  let entityId = combatBridge.objectiveEntityId;
+  if (!entityId || !entityWorld.readInto(entityId, combatBridge.readTarget)) {
+    entityId = entityWorld.spawn("objective", {
+      x: objective.x,
+      y: objective.y,
+      hp: objective.hp,
+      maxHp: objective.maxHp,
+      radius: objective.radius,
+      sourceId: objective.sourceId,
+      team: objective.team,
+      role: objective.role,
+      type: objective.type,
+      objective: true,
+      objectiveType: objective.objectiveType,
+      threat: objective.threat,
+      color: paletteState.primary.getHex(),
+      collidable: true,
+    });
+    combatBridge.objectiveEntityId = entityId ?? 0;
+  }
+  if (entityId) {
+    entityWorld.write(entityId, {
+      previousX: objective.x,
+      previousY: objective.y,
+      x: objective.x,
+      y: objective.y,
+      hp: objective.hp,
+      maxHp: objective.maxHp,
+      radius: objective.radius,
+      sourceId: objective.sourceId,
+      team: objective.team,
+      role: objective.role,
+      type: objective.type,
+      objective: true,
+      objectiveType: objective.objectiveType,
+      threat: objective.threat,
+      progress: 1 - objective.hp / objective.maxHp,
+      state: "hostile",
+      completed: false,
+      color: paletteState.primary.getHex(),
+      collidable: true,
+      invulnerable: false,
+    });
+  }
+  return objective;
+}
+
 function syncCombatWorld(entityWorld) {
   if (!entityWorld?.spawn || !entityWorld?.readInto || !entityWorld?.write
     || state.mode !== "playing" || state.elapsed < V3_COMBAT_WARMUP_SECONDS) return null;
@@ -5089,6 +5244,8 @@ function syncCombatWorld(entityWorld) {
     collidable: true,
   });
 
+  ensureCombatObjective(entityWorld);
+
   for (const enemy of enemies) {
     if (!enemy || enemy.dead || enemy.pendingLaserDeath) continue;
     let entityId = enemy.v3EntityId;
@@ -5101,6 +5258,7 @@ function syncCombatWorld(entityWorld) {
         radius: enemy.radius,
         team: 2,
         flags: ENTITY_FLAG_HIDDEN,
+        sourceId: enemy.sourceId,
         role: enemy.type,
         type: enemy.type,
         collidable: true,
@@ -5119,21 +5277,83 @@ function syncCombatWorld(entityWorld) {
       damage: 1,
       team: 2,
       flags: ENTITY_FLAG_HIDDEN,
+      sourceId: enemy.sourceId,
       role: enemy.type,
       type: enemy.type,
       threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
       executingTelegraph: isEnemyAttackExecuting(enemy),
-      weakPoint: Boolean(enemy.weakPoint),
+      weakPoint: enemy.type !== "boss" && Boolean(enemy.weakPoint),
       collidable: true,
-      invulnerable: Boolean(enemy.invulnerable),
+      contactDamaging: legacyBodyContactDamaging(enemy),
+      contactRadius: enemy.type === "boss" ? 2.25 : enemy.radius,
+      invulnerable: enemy.type === "boss" || Boolean(enemy.invulnerable),
       state: enemy.state,
     });
     combatBridge.enemiesById.set(entityId, enemy);
+    combatBridge.enemiesBySourceId.set(enemy.sourceId, enemy);
+
+    if (enemy.type === "boss") {
+      let partId = enemy.v3BossPartId;
+      const vulnerability = bossPartVulnerability(enemy);
+      if (!partId || !entityWorld.readInto(partId, combatBridge.readTarget)) {
+        partId = entityWorld.spawn("bossPart", {
+          x: enemy.group.position.x,
+          y: enemy.group.position.y,
+          hp: Math.max(0, runtimeFinite(enemy.hp, 1)),
+          maxHp: Math.max(1, runtimeFinite(enemy.maxHp, enemy.hp)),
+          radius: 1.08,
+          sourceId: enemy.sourceId,
+          parentId: entityId,
+          team: 2,
+          flags: ENTITY_FLAG_HIDDEN,
+          role: "boss",
+          type: "boss-core",
+          partId: "core",
+          weakPoint: vulnerability.weakPoint,
+          armored: vulnerability.armored,
+          collidable: true,
+        });
+        enemy.v3BossPartId = partId ?? 0;
+      }
+      if (partId) {
+        entityWorld.write(partId, {
+          previousX: enemy.group.position.x,
+          previousY: enemy.group.position.y,
+          x: enemy.group.position.x,
+          y: enemy.group.position.y,
+          hp: Math.max(0, runtimeFinite(enemy.hp, 0)),
+          maxHp: Math.max(1, runtimeFinite(enemy.maxHp, enemy.hp)),
+          radius: 1.08,
+          sourceId: enemy.sourceId,
+          parentId: entityId,
+          team: 2,
+          flags: ENTITY_FLAG_HIDDEN,
+          role: "boss",
+          type: "boss-core",
+          partId: "core",
+          threat: (ENEMY_TYPES.boss?.threatCost ?? 0) + 12,
+          executingTelegraph: isEnemyAttackExecuting(enemy),
+          weakPoint: vulnerability.weakPoint,
+          armored: vulnerability.armored,
+          collidable: true,
+          contactDamaging: false,
+          invulnerable: false,
+          state: enemy.state,
+        });
+        combatBridge.bossPartsById.set(partId, enemy);
+      }
+    }
   }
   for (const [entityId, enemy] of combatBridge.enemiesById) {
     if (!enemy.dead && enemies.includes(enemy) && entityWorld.readInto(entityId, combatBridge.readTarget)) continue;
     entityWorld.despawn(entityId);
     combatBridge.enemiesById.delete(entityId);
+  }
+  for (const [partId, enemy] of combatBridge.bossPartsById) {
+    if (!enemy.dead && enemies.includes(enemy) && enemy.type === "boss"
+      && entityWorld.readInto(partId, combatBridge.readTarget)) continue;
+    entityWorld.despawn(partId);
+    combatBridge.bossPartsById.delete(partId);
   }
   return combatBridge.playerId;
 }
@@ -5143,9 +5363,25 @@ function applyCombatSummary(entityWorld, summary) {
   let firstHitPosition = null;
   let destroyedThisStep = 0;
   for (const record of summary.damageRecords) {
-    const enemy = combatBridge.enemiesById.get(record.targetId);
+    if (record.targetKind === "objective"
+      && (record.targetId === combatBridge.objectiveEntityId
+        || record.targetSourceId === combatBridge.objective?.sourceId)) {
+      const objective = combatBridge.objective;
+      objective.hp = Math.max(0, record.hpAfter);
+      objective.dead = objective.hp <= 0;
+      objective.completed = objective.dead;
+      firstHitPosition ??= new THREE.Vector2(objective.x, objective.y);
+      if (objective.completed) {
+        combatBridge.objectiveEntityId = 0;
+        destroyedThisStep += 1;
+      }
+      continue;
+    }
+    const enemy = record.targetKind === "bossPart"
+      ? combatBridge.bossPartsById.get(record.targetId) ?? combatBridge.enemiesBySourceId.get(record.targetSourceId)
+      : combatBridge.enemiesById.get(record.targetId) ?? combatBridge.enemiesBySourceId.get(record.targetSourceId);
     if (!enemy || enemy.dead) continue;
-    enemy.hp = Math.max(0, Math.min(runtimeFinite(enemy.hp, record.hpAfter), record.hpAfter));
+    enemy.hp = Math.max(0, record.hpAfter);
     enemy.hitReactTimer = Math.max(runtimeFinite(enemy.hitReactTimer, 0), 0.12);
     firstHitPosition ??= new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
     if (enemy.type === "boss") {
@@ -5154,31 +5390,16 @@ function applyCombatSummary(entityWorld, summary) {
     }
     if (record.destroyed || enemy.hp <= 0) {
       combatBridge.enemiesById.delete(record.targetId);
+      combatBridge.bossPartsById.delete(record.targetId);
       if (destroyEnemy(enemy, "v3Weapon")) destroyedThisStep += 1;
     }
   }
   combatBridge.hits += summary.hits;
   combatBridge.damage += summary.damage;
   combatBridge.destroyed += destroyedThisStep;
-  if (firstHitPosition && state.elapsed + 1e-9 >= combatBridge.nextFeedbackAt) {
-    if (destroyedThisStep === 0) {
-      triggerFeedback("small", {
-        position: firstHitPosition,
-        color: paletteState.primary.getHex(),
-        particles: Math.min(8, 3 + summary.hits),
-        speed: 2.5,
-        size: 0.65,
-        rippleScale: 0.62,
-        text: `AUTO ×${summary.hits}`,
-        tone: "cyan",
-      });
-    }
-    audio.event(destroyedThisStep > 0 ? "break" : "laserHit", Math.min(1, 0.18 + summary.hits * 0.08));
-    combatBridge.nextFeedbackAt = state.elapsed + V3_WEAPON_FEEDBACK_INTERVAL;
-    combatBridge.feedbackEvents += 1;
-  } else if (firstHitPosition) {
-    combatBridge.suppressedFeedback += 1;
-  }
+  combatBridge.pendingFeedback = firstHitPosition && summary.weaponHitEventEmitted
+    ? Object.freeze({ position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep })
+    : null;
   if (summary.perfectPhases > 0 && combatBridge.playerId) {
     const entityPlayer = entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget);
     if (entityPlayer) {
@@ -5202,6 +5423,34 @@ function applyCombatSummary(entityWorld, summary) {
     audio.event("nearMiss", 0.9);
   }
   if (summary.playerDamage > 0) state.hurtInvuln = Math.max(state.hurtInvuln, HURT_INVULNERABILITY);
+  return true;
+}
+
+function consumePresentationEvent(event) {
+  if (!event || typeof event.type !== "string") return false;
+  if (event.type === "weaponFire" || event.type === "weaponHit") combatBridge.consumedWeaponEvents += 1;
+  if (event.type !== "weaponHit" || !combatBridge.pendingFeedback) return true;
+  const feedback = combatBridge.pendingFeedback;
+  combatBridge.pendingFeedback = null;
+  if (state.elapsed + 1e-9 >= combatBridge.nextFeedbackAt) {
+    if (feedback.destroyed === 0) {
+      triggerFeedback("small", {
+        position: feedback.position,
+        color: paletteState.primary.getHex(),
+        particles: Math.min(8, 3 + feedback.hits),
+        speed: 2.5,
+        size: 0.65,
+        rippleScale: 0.62,
+        text: `AUTO ×${feedback.hits}`,
+        tone: "cyan",
+      });
+    }
+    audio.event(feedback.destroyed > 0 ? "break" : "laserHit", Math.min(1, 0.18 + feedback.hits * 0.08));
+    combatBridge.nextFeedbackAt = state.elapsed + V3_WEAPON_FEEDBACK_INTERVAL;
+    combatBridge.feedbackEvents += 1;
+  } else {
+    combatBridge.suppressedFeedback += 1;
+  }
   return true;
 }
 
@@ -5396,6 +5645,7 @@ function getDebugSnapshot() {
     tideLanceLock: Object.freeze({
       mode: state.laserTargetMode,
       targetIndex: state.laserTargetIndex,
+      targetId: state.laserTargetSourceId || null,
       directionX: state.laserDirection.x,
       directionY: state.laserDirection.y,
       score: state.laserLockScore,
@@ -5404,11 +5654,22 @@ function getDebugSnapshot() {
     combatBridge: Object.freeze({
       playerId: combatBridge.playerId || null,
       enemies: combatBridge.enemiesById.size,
+      enemySources: combatBridge.enemiesBySourceId.size,
+      bossParts: combatBridge.bossPartsById.size,
+      objectiveId: combatBridge.objectiveEntityId || null,
+      objective: combatBridge.objective ? Object.freeze({
+        sourceId: combatBridge.objective.sourceId,
+        stageIndex: combatBridge.objective.stageIndex,
+        hp: combatBridge.objective.hp,
+        maxHp: combatBridge.objective.maxHp,
+        completed: combatBridge.objective.completed,
+      }) : null,
       hits: combatBridge.hits,
       damage: combatBridge.damage,
       destroyed: combatBridge.destroyed,
       feedbackEvents: combatBridge.feedbackEvents,
       suppressedFeedback: combatBridge.suppressedFeedback,
+      consumedWeaponEvents: combatBridge.consumedWeaponEvents,
     }),
   });
 }
@@ -5420,6 +5681,7 @@ return Object.freeze({
   applySession,
   syncCombatWorld,
   applyCombatSummary,
+  consumePresentationEvent,
   reset,
   dispose,
   getDebugSnapshot,

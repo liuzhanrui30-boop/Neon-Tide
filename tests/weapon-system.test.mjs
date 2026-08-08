@@ -76,3 +76,28 @@ test('starter weapons use the fixed friendly projectile pool and perfect phase a
   assert.ok(base.emitted.every(({ payload }) => payload.total > 0 && payload.total <= 8));
 });
 
+test('perfect-phase rising edge immediately rescales every outstanding cooldown once', () => {
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 1, friendlyProjectile: 16 } });
+  const playerId = world.spawn('player', { x: 0, y: 0, team: 1, collidable: true });
+  world.spawn('enemy', { x: 8, y: 0, hp: 100, team: 2, collidable: true });
+  const system = createWeaponSystem();
+  system.update(world, playerId, 0.1, { emit() { return true; } });
+  const before = system.getStats().cooldowns;
+  world.write(playerId, { fireTimer: 0.8 });
+  system.update(world, playerId, 0.01, { emit() { return true; } });
+  const afterEdge = system.getStats().cooldowns;
+  system.update(world, playerId, 0.01, { emit() { return true; } });
+  const afterHeld = system.getStats().cooldowns;
+
+  assert.ok(Math.abs(afterEdge['prism-missiles'] - (before['prism-missiles'] * 0.75 - 0.01)) < 1e-9);
+  assert.ok(Math.abs(afterHeld['prism-missiles'] - (afterEdge['prism-missiles'] - 0.01)) < 1e-9);
+});
+
+test('weapon fire event counter advances only when the bounded queue accepts it', () => {
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 1, friendlyProjectile: 8 } });
+  const playerId = world.spawn('player', { x: 0, y: 0, team: 1 });
+  world.spawn('enemy', { x: 4, y: 0, hp: 20, team: 2, collidable: true });
+  const system = createWeaponSystem();
+  system.update(world, playerId, 1 / 60, { emit() { return false; } });
+  assert.equal(system.getStats().fireEvents, 0);
+});

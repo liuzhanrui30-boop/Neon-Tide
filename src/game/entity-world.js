@@ -18,6 +18,16 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
   bossPart: 32,
 });
 
+export const COARSE_ENTITY_CAPACITIES = Object.freeze({
+  ...DEFAULT_ENTITY_CAPACITIES,
+  friendlyProjectile: 72,
+  enemyProjectile: 72,
+});
+
+export function selectEntityCapacities({ coarsePointer = false } = {}) {
+  return coarsePointer ? COARSE_ENTITY_CAPACITIES : DEFAULT_ENTITY_CAPACITIES;
+}
+
 export const ENTITY_FLAG_HIDDEN = 1;
 
 const MAX_KIND_CAPACITY = 1_000_000;
@@ -79,12 +89,14 @@ const FLOAT_RULES = Object.freeze({
   orbitRadius: [0, SCALE_LIMIT, 0],
   impactRadius: [0, SCALE_LIMIT, 0],
   hitCooldown: [0, GENERAL_LIMIT, 0],
+  contactRadius: [0, SCALE_LIMIT, 0],
   energy: [0, GENERAL_LIMIT, 0],
   value: [-GENERAL_LIMIT, GENERAL_LIMIT, 0],
   amount: [-GENERAL_LIMIT, GENERAL_LIMIT, 0],
   ownerId: [0, Number.MAX_SAFE_INTEGER, 0],
   targetId: [0, Number.MAX_SAFE_INTEGER, 0],
   parentId: [0, Number.MAX_SAFE_INTEGER, 0],
+  sourceId: [0, Number.MAX_SAFE_INTEGER, 0],
 });
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([
@@ -92,7 +104,7 @@ const UINT_FIELDS = Object.freeze([
 ]);
 const BOOLEAN_FIELDS = Object.freeze([
   'executingTelegraph', 'objective', 'invulnerable', 'collidable', 'homing', 'weakPoint',
-  'piercing', 'splitOnImpact', 'completed',
+  'piercing', 'splitOnImpact', 'completed', 'contactDamaging', 'armored',
 ]);
 const STRING_FIELDS = Object.freeze([
   'role', 'state', 'type', 'variant', 'weaponId', 'objectiveType', 'partId', 'attackKind', 'ownerKind',

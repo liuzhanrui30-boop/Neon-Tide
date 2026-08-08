@@ -16,6 +16,43 @@ function overlaps(left, right) {
   return (left.x - right.x) ** 2 + (left.y - right.y) ** 2 <= radius ** 2 + EPSILON;
 }
 
+function overlapsWithRadius(left, right, rightRadius) {
+  const radius = Math.max(0, finite(left.radius, 0.5)) + Math.max(0, finite(rightRadius, 0.5));
+  return (left.x - right.x) ** 2 + (left.y - right.y) ** 2 <= radius ** 2 + EPSILON;
+}
+
+export function sweptCircleHit(projectile, target) {
+  const startX = Number(projectile?.previousX);
+  const startY = Number(projectile?.previousY);
+  const endX = Number(projectile?.x);
+  const endY = Number(projectile?.y);
+  const targetX = Number(target?.x);
+  const targetY = Number(target?.y);
+  const radius = Math.max(0, finite(projectile?.radius, 0.5)) + Math.max(0, finite(target?.radius, 0.5));
+  if (![startX, startY, endX, endY, targetX, targetY, radius].every(Number.isFinite)) return false;
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const offsetX = targetX - startX;
+  const offsetY = targetY - startY;
+  if (![dx, dy, offsetX, offsetY].every(Number.isFinite)) return false;
+  const scale = Math.max(1, Math.abs(dx), Math.abs(dy), Math.abs(offsetX), Math.abs(offsetY), radius);
+  const scaledDx = dx / scale;
+  const scaledDy = dy / scale;
+  const scaledOffsetX = offsetX / scale;
+  const scaledOffsetY = offsetY / scale;
+  const scaledRadius = radius / scale;
+  const lengthSquared = scaledDx * scaledDx + scaledDy * scaledDy;
+  const projection = lengthSquared > 0
+    ? clamp((scaledOffsetX * scaledDx + scaledOffsetY * scaledDy) / lengthSquared, 0, 1)
+    : 0;
+  const nearestX = scaledDx * projection;
+  const nearestY = scaledDy * projection;
+  const distanceX = scaledOffsetX - nearestX;
+  const distanceY = scaledOffsetY - nearestY;
+  return distanceX * distanceX + distanceY * distanceY
+    <= scaledRadius * scaledRadius + Number.EPSILON * 8;
+}
+
 function addUnique(ids, count, id) {
   for (let index = 0; index < count; index += 1) {
     if (ids[index] === id) return count;
@@ -94,6 +131,7 @@ export function createCollisionSystem({
   let totalSpawns = 0;
   let totalDespawns = 0;
   let queueOverflows = 0;
+  let hitEvents = 0;
 
   function queueDamage(state, projectile, target, amount, weakPoint, friendly = true) {
     if (state.damageCount >= outcomes) {
@@ -178,7 +216,7 @@ export function createCollisionSystem({
   function targetCanTakeFriendlyHit(projectile, target) {
     if (!target.collidable || target.hp <= 0 || target.invulnerable) return false;
     if (projectile.team !== 0 && projectile.team === target.team) return false;
-    if (target.kind === 'objective' && target.team !== 2 && !target.objective) return false;
+    if (target.kind === 'objective' && target.team !== 2) return false;
     return true;
   }
 
@@ -192,8 +230,8 @@ export function createCollisionSystem({
         const targets = world.query(kind);
         for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
           const target = world.readInto(targets.at(targetIndex), targetRead);
-          if (!target || !targetCanTakeFriendlyHit(projectile, target) || !overlaps(projectile, target)) continue;
-          const armoredBossPart = target.kind === 'bossPart' && !target.weakPoint;
+          if (!target || !targetCanTakeFriendlyHit(projectile, target) || !sweptCircleHit(projectile, target)) continue;
+          const armoredBossPart = target.kind === 'bossPart' && (target.armored || !target.weakPoint);
           if (!armoredBossPart) {
             const multiplier = target.kind === 'bossPart' && target.weakPoint ? 1.5 : 1;
             queueDamage(state, projectile, target, projectile.damage * multiplier, target.weakPoint);
@@ -244,7 +282,7 @@ export function createCollisionSystem({
       const projectile = world.readInto(projectiles.at(index), projectileRead);
       if (!projectile || !projectile.collidable
         || containsId(despawnIds, state.despawnCount, projectile.id)
-        || !overlaps(player, projectile)) continue;
+        || !sweptCircleHit(projectile, player)) continue;
       state.despawnCount = addUnique(despawnIds, state.despawnCount, projectile.id);
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
@@ -258,7 +296,8 @@ export function createCollisionSystem({
     const enemies = world.query('enemy');
     for (let index = 0; index < enemies.length; index += 1) {
       const enemy = world.readInto(enemies.at(index), targetRead);
-      if (!enemy || !enemy.collidable || enemy.hp <= 0 || !overlaps(player, enemy)) continue;
+      if (!enemy || !enemy.collidable || !enemy.contactDamaging || enemy.hp <= 0) continue;
+      if (!overlapsWithRadius(player, enemy, enemy.contactRadius > 0 ? enemy.contactRadius : enemy.radius)) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
         perfectAvailable = false;
@@ -279,7 +318,7 @@ export function createCollisionSystem({
       for (let targetIndex = 0; targetIndex < objectives.length; targetIndex += 1) {
         const objective = world.readInto(objectives.at(targetIndex), objectiveRead);
         if (!objective || !objective.collidable || objective.hp <= 0 || objective.invulnerable) continue;
-        if (objective.team !== 1 || !overlaps(projectile, objective)) continue;
+        if (objective.team !== 1 || !sweptCircleHit(projectile, objective)) continue;
         queueDamage(state, projectile, objective, projectile.damage || 1, false, false);
         state.despawnCount = addUnique(despawnIds, state.despawnCount, projectile.id);
         break;
@@ -302,7 +341,8 @@ export function createCollisionSystem({
     const objectives = world.query('objective');
     for (let index = 0; index < objectives.length; index += 1) {
       const objective = world.readInto(objectives.at(index), objectiveRead);
-      if (!objective || !objective.collidable || objective.completed || !overlaps(player, objective)) continue;
+      if (!objective || !objective.collidable || objective.completed || objective.team === 2
+        || !overlaps(player, objective)) continue;
       const progress = objective.progress + dt;
       const completed = objective.duration > 0 && progress >= objective.duration - EPSILON;
       world.write(objective.id, {
@@ -345,6 +385,7 @@ export function createCollisionSystem({
       records.push(Object.freeze({
         sourceId: damageSourceIds[index],
         targetId: target.id,
+        targetSourceId: target.sourceId || null,
         targetKind: damageTargetKinds[index],
         weaponId,
         amount,
@@ -451,13 +492,18 @@ export function createCollisionSystem({
       collectPickupsAndObjectives(world, state, player, dt, events);
     }
     const damage = applyDamage(world, state);
+    let weaponHitEventEmitted = false;
     if (damage.friendlyHits > 0) {
-      events?.emit?.('weaponHit', Object.freeze({
+      const accepted = events?.emit?.('weaponHit', Object.freeze({
         count: damage.friendlyHits,
         totalDamage: damage.friendlyDamage,
         destroyed: damage.friendlyDestroyed,
         byWeapon: Object.freeze({ ...damage.byWeapon }),
-      }));
+      })) ?? false;
+      if (accepted) {
+        hitEvents += 1;
+        weaponHitEventEmitted = true;
+      }
     }
     if (state.playerDamage > 0) {
       session?.damageHull?.(state.playerDamage);
@@ -481,6 +527,7 @@ export function createCollisionSystem({
       perfectPhases: state.perfectPhases,
       pickups: state.pickups,
       objectiveOverlaps: state.objectiveOverlaps,
+      weaponHitEventEmitted,
       damageRecords: Object.freeze(damage.records),
     });
     resolves += 1;
@@ -500,7 +547,7 @@ export function createCollisionSystem({
   }
 
   function getStats() {
-    return Object.freeze({ resolves, totalHits, totalDamage, totalSpawns, totalDespawns, queueOverflows });
+    return Object.freeze({ resolves, totalHits, totalDamage, totalSpawns, totalDespawns, queueOverflows, hitEvents });
   }
 
   return Object.freeze({ resolve, reset, getStats });

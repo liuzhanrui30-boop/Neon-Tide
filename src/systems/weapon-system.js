@@ -271,6 +271,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
   let fireEvents = 0;
   let sequence = 0;
   let lastTargetId = null;
+  let wasBuffed = false;
 
   function collectCandidates(world, playerTeam) {
     let count = 0;
@@ -432,6 +433,12 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       ? selectAutoTarget(player, candidates, { maxCandidates: candidateCapacity, candidateCount })
       : null;
     const buffed = player.fireTimer > 0 || player.autoFireRateBuffTimer > 0;
+    if (buffed && !wasBuffed) {
+      for (let index = 0; index < timers.length; index += 1) {
+        timers[index] *= AUTO_PULSE_BUFF_MULTIPLIER;
+      }
+    }
+    wasBuffed = buffed;
     const cadenceMultiplier = buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1;
     const counts = stepShotCounts;
     counts.fill(0);
@@ -463,7 +470,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     const total = counts[0] + counts[1] + counts[2];
     if (total > 0) {
       lastTargetId = target?.id ?? null;
-      events?.emit?.('weaponFire', Object.freeze({
+      const accepted = events?.emit?.('weaponFire', Object.freeze({
         total,
         targetId: target?.id ?? null,
         buffed,
@@ -472,8 +479,8 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
           'arc-drones': counts[1],
           'prism-missiles': counts[2],
         }),
-      }));
-      fireEvents += 1;
+      })) ?? false;
+      if (accepted) fireEvents += 1;
     }
     updates += 1;
     return Object.freeze({ fired: total, targetId: target?.id ?? null, buffed });
@@ -485,6 +492,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     timers[2] = 0.45;
     droneIds.fill(0);
     lastTargetId = null;
+    wasBuffed = false;
     return true;
   }
 
@@ -495,6 +503,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       rejectedShots,
       fireEvents,
       lastTargetId,
+      cooldowns: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, timers[index]]))),
       droneIds: Object.freeze([...droneIds]),
       shotsByWeapon: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, weaponShotCounts[index]]))),
     });

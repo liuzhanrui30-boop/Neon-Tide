@@ -5,13 +5,52 @@ async function v3WeaponsScenario() {
   await withPage('v3-weapons-no-input', {}, async (page) => {
     await page.startGame();
     await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length===1&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().renderer.pools.objective.count===1`);
     page.requireDev('isolated automatic weapon sandbox');
+    const naturalObjective = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;
+      const id=api.world.query('objective').at(0);
+      const objective=api.world.get(id);
+      const debug=api.getDebugSnapshot();
+      return {id,objective,bridge:debug.legacy.combatBridge,renderer:debug.renderer.pools.objective};
+    })()`);
+    assert.equal(naturalObjective.objective.objectiveType, 'tide-relay');
+    assert.equal(naturalObjective.objective.objective, true);
+    assert.equal(naturalObjective.objective.team, 2);
+    assert.equal(naturalObjective.objective.sourceId, naturalObjective.bridge.objective.sourceId);
+    assert.equal(naturalObjective.renderer.count, 1);
+
     await page.gameEvaluate(`
       clearWorldEntities();
       $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
       $player.position.set(0,0);$player.velocity.set(0,0);syncPlayerTransform();
       return true;
     `);
+    const objectiveLock = await page.gameEvaluate(`
+      const lock=selectTideLanceLock();
+      return {targetId:lock?.target?.id,type:lock?.target?.objectiveType,enemy:Boolean(lock?.enemy),objective:Boolean(lock?.objective)};
+    `);
+    assert.deepEqual(objectiveLock, {
+      targetId: naturalObjective.objective.sourceId,
+      type: 'tide-relay',
+      enemy: false,
+      objective: true,
+    });
+    await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const id=api.world.query('objective').at(0);return id&&api.world.get(id).progress>0;})()`);
+    const objectiveProgress = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;const id=api.world.query('objective').at(0);const objective=api.world.get(id);
+      return {hp:objective.hp,maxHp:objective.maxHp,progress:objective.progress,events:api.getDebugSnapshot().events,presentation:api.getDebugSnapshot().presentationEvents};
+    })()`);
+    assert.ok(objectiveProgress.hp < objectiveProgress.maxHp, JSON.stringify(objectiveProgress));
+    assert.ok(objectiveProgress.progress > 0, JSON.stringify(objectiveProgress));
+    assert.equal(objectiveProgress.events.queued, 0);
+    assert.equal(objectiveProgress.events.dropped, 0);
+    assert.ok(objectiveProgress.presentation.consumed > 0);
+    await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;const objective=api.world.get(api.world.query('objective').at(0));
+      return api.world.spawn('friendlyProjectile',{x:objective.x,y:objective.y,previousX:objective.x,previousY:objective.y,damage:999,radius:.1,team:1,weaponId:'cleanup-probe',collidable:true});
+    })()`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length===0&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge.objective.completed`);
 
     const setup = await page.evaluate(`(()=>{
       const api=globalThis.__NEON_TIDE_V3__;
@@ -99,6 +138,47 @@ async function v3WeaponsScenario() {
     assert.deepEqual(lance.line.targetIds, [1, 2, 3]);
     assert.ok(lance.line.directionX > 0.99);
 
+    const hardening = await page.evaluate(`(async()=>{
+      const [{createEntityWorld},{createWeaponSystem},{createCollisionSystem,sweptCircleHit},{createEventQueue,createPresentationEventConsumer}]=await Promise.all([
+        import('/src/game/entity-world.js'),import('/src/systems/weapon-system.js'),import('/src/systems/collision-system.js'),import('/src/game/events.js')
+      ]);
+      const cooldownWorld=createEntityWorld({capacities:{player:1,enemy:1,friendlyProjectile:16}});
+      const playerId=cooldownWorld.spawn('player',{x:0,y:0,team:1});
+      cooldownWorld.spawn('enemy',{x:8,y:0,hp:100,team:2,collidable:true});
+      const weapons=createWeaponSystem();
+      const sink={emit(){return true;}};
+      weapons.update(cooldownWorld,playerId,.1,sink);
+      const before=weapons.getStats().cooldowns['prism-missiles'];
+      cooldownWorld.write(playerId,{fireTimer:.8});
+      weapons.update(cooldownWorld,playerId,.01,sink);
+      const edge=weapons.getStats().cooldowns['prism-missiles'];
+      weapons.update(cooldownWorld,playerId,.01,sink);
+      const held=weapons.getStats().cooldowns['prism-missiles'];
+
+      const contactWorld=createEntityWorld({capacities:{player:1,enemy:3}});
+      contactWorld.spawn('player',{x:0,y:0,radius:.4,team:1,collidable:true});
+      contactWorld.spawn('enemy',{x:0,y:0,hp:2,radius:1,contactRadius:1,damage:4,team:2,type:'mine',collidable:true,contactDamaging:false});
+      contactWorld.spawn('enemy',{x:0,y:0,hp:2,radius:1,contactRadius:1,damage:4,team:2,type:'lancer',collidable:true,contactDamaging:false});
+      const hunter=contactWorld.spawn('enemy',{x:0,y:0,hp:2,radius:1,contactRadius:1,damage:1,team:2,type:'chaser',collidable:true,contactDamaging:true});
+      let contactDamage=0;
+      createCollisionSystem().resolve(contactWorld,{damageHull(amount){contactDamage+=amount;return true;}},1/60,sink);
+
+      const queue=createEventQueue(4);const consumer=createPresentationEventConsumer({capacity:7});
+      for(let index=0;index<3000;index+=1){queue.emit('weaponFire',{index});queue.drain(consumer.consume);}
+      return {
+        cooldown:{before,edge,held},contact:{damage:contactDamage,hunter:Boolean(contactWorld.get(hunter))},
+        sweep:{tunnel:sweptCircleHit({previousX:-10,previousY:0,x:10,y:0,radius:.1},{x:0,y:0,radius:.4}),zero:sweptCircleHit({previousX:2,previousY:2,x:2,y:2,radius:.1},{x:2.2,y:2,radius:.2}),extreme:sweptCircleHit({previousX:-1e150,previousY:0,x:1e150,y:0,radius:1},{x:0,y:0,radius:1})},
+        queue:queue.getStats(),consumer:consumer.getStats(),
+      };
+    })()`);
+    assert.ok(Math.abs(hardening.cooldown.edge - (hardening.cooldown.before * 0.75 - 0.01)) < 1e-9, JSON.stringify(hardening));
+    assert.ok(Math.abs(hardening.cooldown.held - (hardening.cooldown.edge - 0.01)) < 1e-9, JSON.stringify(hardening));
+    assert.deepEqual(hardening.contact, { damage: 1, hunter: true });
+    assert.deepEqual(hardening.sweep, { tunnel: true, zero: true, extreme: true });
+    assert.equal(hardening.queue.dropped, 0);
+    assert.equal(hardening.queue.queued, 0);
+    assert.equal(hardening.consumer.count, 7);
+
     const retarget = await page.gameEvaluate(`
       clearWorldEntities();
       $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
@@ -107,25 +187,104 @@ async function v3WeaponsScenario() {
       first.weakPoint=true;first.priority=0;second.priority=0;
       $state.weaponEnergy=100;$state.laserState='ready';$state.dashTimer=0;$state.dashInvulnTimer=0;
       const started=startLaserCharge();
-      const initial={target:$state.laserTargetIndex,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed};
-      first.weakPoint=false;second.weakPoint=true;second.state='dash';
+      const initial={target:$state.laserTargetIndex,targetId:$state.laserTargetSourceId,firstId:first.sourceId,secondId:second.sourceId,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed};
+      destroyEnemy(first,'v3Weapon');
       updateLaser(1/60);
-      const changed={target:$state.laserTargetIndex,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed,elapsed:$state.laserElapsed};
-      first.weakPoint=true;first.state='dash';first.priority=100;
+      const changed={target:$state.laserTargetIndex,targetId:$state.laserTargetSourceId,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed,elapsed:$state.laserElapsed};
+      second.weakPoint=false;second.priority=100;
       updateLaser(1/60);
-      const final={target:$state.laserTargetIndex,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed,elapsed:$state.laserElapsed};
+      const final={target:$state.laserTargetIndex,targetId:$state.laserTargetSourceId,directionX:$state.laserDirection.x,used:$state.laserRetargetUsed,elapsed:$state.laserElapsed};
       clearLaserState();clearWorldEntities();
       return {started,charge:LASER_RULES.chargeDuration,initial,changed,final};
     `);
     assert.equal(retarget.started, true);
     assert.equal(retarget.charge, 0.28);
-    assert.deepEqual(retarget.initial, { target: 0, directionX: 1, used: false });
-    assert.equal(retarget.changed.target, 1);
+    assert.equal(retarget.initial.target, 0);
+    assert.equal(retarget.initial.targetId, retarget.initial.firstId);
+    assert.notEqual(retarget.initial.firstId, retarget.initial.secondId);
+    assert.equal(retarget.initial.directionX, 1);
+    assert.equal(retarget.initial.used, false);
+    assert.equal(retarget.changed.target, 0);
+    assert.equal(retarget.changed.targetId, retarget.initial.secondId);
     assert.ok(retarget.changed.directionX < -0.99, JSON.stringify(retarget));
     assert.equal(retarget.changed.used, true);
-    assert.equal(retarget.final.target, 1);
+    assert.equal(retarget.final.target, 0);
+    assert.equal(retarget.final.targetId, retarget.initial.secondId);
     assert.equal(retarget.final.used, true);
     assert.ok(retarget.final.elapsed < 0.14);
+
+    const proxySources = await page.gameEvaluate(`
+      clearWorldEntities();
+      const mine=spawnEnemy('mine',new THREE.Vector2(-5,-3),{hp:100,maxHp:100});
+      const lancer=spawnEnemy('lancer',new THREE.Vector2(5,-3),{hp:100,maxHp:100});
+      const hunter=spawnEnemy('hunter',new THREE.Vector2(-5,3),{hp:100,maxHp:100});
+      const entering=spawnEnemy('hunter',new THREE.Vector2(5,3),{hp:100,maxHp:100});
+      setEnemyState(entering,'enter',5,0);
+      return {mine:mine.sourceId,lancer:lancer.sourceId,hunter:hunter.sourceId,entering:entering.sourceId};
+    `);
+    await page.waitForPage(`(()=>{const ids=new Set(Object.values(${JSON.stringify(proxySources)}));return [...globalThis.__NEON_TIDE_V3__.world.query('enemy')].map(id=>globalThis.__NEON_TIDE_V3__.world.get(id)).filter(entity=>ids.has(entity.sourceId)).length===4;})()`);
+    const proxyContacts = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const ids=${JSON.stringify(proxySources)};const bySource=Object.fromEntries([...api.world.query('enemy')].map(id=>api.world.get(id)).map(entity=>[entity.sourceId,entity]));return {mine:bySource[ids.mine].contactDamaging,lancer:bySource[ids.lancer].contactDamaging,hunter:bySource[ids.hunter].contactDamaging,entering:bySource[ids.entering].contactDamaging};})()`);
+    assert.deepEqual(proxyContacts, { mine: false, lancer: false, hunter: true, entering: false });
+
+    const bossTransition = await page.gameEvaluate(`
+      clearWorldEntities();
+      $state.upgradeTriggered=[true,true];$state.stageIndex=2;$state.stageQueue=[];$state.bossTriggered=false;$state.bossSpawned=false;
+      $state.bossStart=null;$state.bossDeadline=null;$state.elapsed=100;$state.enemySpawnTimer=Infinity;
+      updateStage();
+      const boss=$enemies.find((enemy)=>enemy.type==='boss');
+      setEnemyState(boss,'telegraph',10,10);
+      return {stage:$state.stageIndex,bossId:boss.sourceId,hp:boss.hp,state:boss.state};
+    `);
+    assert.equal(bossTransition.stage, 3);
+    assert.equal(bossTransition.state, 'telegraph');
+    await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const id=api.world.query('bossPart').at(0);const part=id&&api.world.get(id);return part&&part.sourceId===${bossTransition.bossId}&&part.armored&&!part.weakPoint;})()`);
+    const armored = await page.evaluate(`(()=>{
+      const api=globalThis.__NEON_TIDE_V3__;const part=api.world.get(api.world.query('bossPart').at(0));
+      const body=[...api.world.query('enemy')].map(id=>api.world.get(id)).find(entity=>entity.sourceId===part.sourceId);
+      const projectile=api.world.spawn('friendlyProjectile',{x:part.x,y:part.y,previousX:part.x,previousY:part.y,damage:4,radius:.1,team:1,weaponId:'armor-probe',collidable:true});
+      return {projectile,part,body};
+    })()`);
+    assert.equal(armored.part.partId, 'core');
+    assert.equal(armored.part.armored, true);
+    assert.equal(armored.part.weakPoint, false);
+    assert.equal(armored.body.invulnerable, true);
+    assert.equal(armored.body.contactDamaging, true);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.get(${armored.projectile})===null`);
+    const armoredHp = await page.gameEvaluate(`return $enemies.find((enemy)=>enemy.type==='boss')?.hp`);
+    assert.equal(armoredHp, bossTransition.hp);
+
+    const weakBefore = await page.gameEvaluate(`const boss=$enemies.find((enemy)=>enemy.type==='boss');setEnemyState(boss,'recover',2,0);return boss.hp`);
+    await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const part=api.world.get(api.world.query('bossPart').at(0));return part&&part.weakPoint&&!part.armored;})()`);
+    const weakProjectile = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const part=api.world.get(api.world.query('bossPart').at(0));return api.world.spawn('friendlyProjectile',{x:part.x,y:part.y,previousX:part.x,previousY:part.y,damage:2,radius:.1,team:1,weaponId:'weak-probe',collidable:true});})()`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.get(${weakProjectile})===null`);
+    const weakAfter = await page.gameEvaluate(`return $enemies.find((enemy)=>enemy.type==='boss')?.hp`);
+    assert.ok(weakAfter <= weakBefore - 3, JSON.stringify({ weakBefore, weakAfter }));
+    const cleanupProjectile = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const part=api.world.get(api.world.query('bossPart').at(0));return api.world.spawn('friendlyProjectile',{x:part.x,y:part.y,previousX:part.x,previousY:part.y,damage:999,radius:.1,team:1,weaponId:'boss-cleanup-probe',collidable:true});})()`);
+    assert.ok(cleanupProjectile);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode==='victory'&&globalThis.__NEON_TIDE_V3__.world.query('bossPart').length===0`);
+    const finalDebug = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.equal(finalDebug.events.queued, 0);
+    assert.equal(finalDebug.events.dropped, 0);
+    assert.equal(finalDebug.legacy.combatBridge.bossParts, 0);
+    assert.ok(finalDebug.legacy.combatBridge.consumedWeaponEvents > 0);
+    assert.ok(finalDebug.presentationEvents.recent.length <= 64);
+  });
+
+  await withPage('v3-weapons-coarse-390x844', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+  }, async (page) => {
+    await page.startGame();
+    await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
+    const caps = await page.evaluate(`(()=>{const debug=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();return {world:debug.world.pools,renderer:debug.renderer.pools,quality:document.documentElement.dataset.renderQuality};})()`);
+    assert.equal(caps.world.friendlyProjectile.capacity, 72);
+    assert.equal(caps.world.enemyProjectile.capacity, 72);
+    assert.equal(caps.renderer.friendlyProjectile.capacity, 72);
+    assert.equal(caps.renderer.enemyProjectile.capacity, 72);
+    assert.equal(caps.quality, 'mobile');
   });
 }
 

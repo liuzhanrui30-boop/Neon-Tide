@@ -3,8 +3,18 @@ import assert from 'node:assert/strict';
 import {
   createEntityReadTarget,
   createEntityWorld,
+  DEFAULT_ENTITY_CAPACITIES,
   ENTITY_KINDS,
+  selectEntityCapacities,
 } from '../src/game/entity-world.js';
+
+test('projectile capacities are deterministic for desktop and coarse pointers', () => {
+  assert.equal(DEFAULT_ENTITY_CAPACITIES.friendlyProjectile, 96);
+  assert.equal(DEFAULT_ENTITY_CAPACITIES.enemyProjectile, 96);
+  assert.equal(selectEntityCapacities({ coarsePointer: false }).friendlyProjectile, 96);
+  assert.equal(selectEntityCapacities({ coarsePointer: true }).friendlyProjectile, 72);
+  assert.equal(selectEntityCapacities({ coarsePointer: true }).enemyProjectile, 72);
+});
 
 test('held snapshots and read targets cannot observe or mutate a replacement generation', () => {
   const world = createEntityWorld({ capacities: { enemy: 2 } });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEntityWorld } from '../src/game/entity-world.js';
-import { createCollisionSystem, resolveCollisions } from '../src/systems/collision-system.js';
+import { createCollisionSystem, resolveCollisions, sweptCircleHit } from '../src/systems/collision-system.js';
 
 function createEvents() {
   const emitted = [];
@@ -138,6 +138,17 @@ test('enemy projectiles damage allied objectives without emitting friendly weapo
   assert.equal(events.emitted.some(({ type }) => type === 'weaponHit'), false);
 });
 
+test('friendly projectiles ignore allied objectives and damage hostile objective cores', () => {
+  const world = createEntityWorld({ capacities: { objective: 2, friendlyProjectile: 2 } });
+  const allied = world.spawn('objective', { x: 0, y: 0, hp: 3, radius: 0.5, team: 1, objective: true, collidable: true });
+  const hostile = world.spawn('objective', { x: 3, y: 0, hp: 3, radius: 0.5, team: 2, objective: true, collidable: true });
+  world.spawn('friendlyProjectile', { x: 0, y: 0, damage: 1, radius: 0.1, team: 1, collidable: true });
+  world.spawn('friendlyProjectile', { x: 3, y: 0, damage: 1, radius: 0.1, team: 1, collidable: true });
+  resolveCollisions(world, null, 1 / 60, createEvents());
+  assert.equal(world.get(allied).hp, 3);
+  assert.equal(world.get(hostile).hp, 2);
+});
+
 test('pickup collection and objective overlap are finite deferred outcomes', () => {
   const world = createEntityWorld({ capacities: { player: 1, pickup: 1, objective: 1 } });
   world.spawn('player', { x: 0, y: 0, radius: 0.5, team: 1, collidable: true });
@@ -158,4 +169,60 @@ test('pickup collection and objective overlap are finite deferred outcomes', () 
   assert.ok(world.get(objectiveId).progress > 0);
   assert.equal(summary.pickups, 1);
   assert.equal(summary.objectiveOverlaps, 1);
+});
+
+test('swept projectile collision catches tunneling and stays finite for zero-length and extreme segments', () => {
+  assert.equal(sweptCircleHit({ previousX: -10, previousY: 0, x: 10, y: 0, radius: 0.1 }, {
+    x: 0, y: 0, radius: 0.4,
+  }), true);
+  assert.equal(sweptCircleHit({ previousX: 2, previousY: 2, x: 2, y: 2, radius: 0.1 }, {
+    x: 2.2, y: 2, radius: 0.2,
+  }), true);
+  assert.equal(sweptCircleHit({ previousX: -Number.MAX_VALUE, previousY: 0, x: Number.MAX_VALUE, y: 0, radius: 1 }, {
+    x: 0, y: 0, radius: 1,
+  }), false);
+  assert.equal(sweptCircleHit({ previousX: -1e150, previousY: 0, x: 1e150, y: 0, radius: 1 }, {
+    x: 0, y: 0, radius: 1,
+  }), true);
+});
+
+test('friendly and enemy projectiles use their full fixed-step sweep without duplicate hits', () => {
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 1, friendlyProjectile: 1, enemyProjectile: 1 } });
+  const enemyId = world.spawn('enemy', { x: 0, y: 0, hp: 4, radius: 0.4, team: 2, collidable: true });
+  world.spawn('player', { x: 0, y: 3, radius: 0.4, team: 1, collidable: true });
+  world.spawn('friendlyProjectile', {
+    previousX: -5, previousY: 0, x: 5, y: 0, damage: 1, radius: 0.1, team: 1, collidable: true,
+  });
+  world.spawn('enemyProjectile', {
+    previousX: 0, previousY: -3, x: 0, y: 6, damage: 2, radius: 0.1, team: 2, collidable: true,
+  });
+  const damage = [];
+  const summary = resolveCollisions(world, { damageHull(amount) { damage.push(amount); return true; } }, 1 / 60, createEvents());
+  assert.equal(world.get(enemyId).hp, 3);
+  assert.deepEqual(damage, [2]);
+  assert.equal(summary.hits, 1);
+});
+
+test('body contact requires an explicit contact-damaging proxy contract', () => {
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 2 } });
+  world.spawn('player', { x: 0, y: 0, radius: 0.4, team: 1, collidable: true });
+  world.spawn('enemy', {
+    x: 0, y: 0, hp: 2, radius: 1, contactRadius: 1, damage: 5, team: 2, collidable: true, contactDamaging: false,
+  });
+  let damage = 0;
+  resolveCollisions(world, { damageHull(amount) { damage += amount; return true; } }, 1 / 60, createEvents());
+  assert.equal(damage, 0);
+  const enemyId = world.query('enemy').at(0);
+  world.write(enemyId, { contactDamaging: true });
+  resolveCollisions(world, { damageHull(amount) { damage += amount; return true; } }, 1 / 60, createEvents());
+  assert.equal(damage, 5);
+});
+
+test('collision event stats only count accepted weapon-hit events', () => {
+  const world = createEntityWorld({ capacities: { enemy: 1, friendlyProjectile: 1 } });
+  world.spawn('enemy', { x: 0, y: 0, hp: 2, team: 2, collidable: true });
+  world.spawn('friendlyProjectile', { x: 0, y: 0, previousX: 0, previousY: 0, damage: 1, team: 1, collidable: true });
+  const system = createCollisionSystem();
+  system.resolve(world, null, 1 / 60, { emit() { return false; } });
+  assert.equal(system.getStats().hitEvents, 0);
 });
