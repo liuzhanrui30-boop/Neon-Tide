@@ -20,6 +20,7 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
 
 const MAX_KIND_CAPACITY = 1_000_000;
 const CALLBACK_SCRATCH_DEPTH = 8;
+const ACCESS_SCRATCH_DEPTH = 8;
 const KIND_SET = new Set(ENTITY_KINDS);
 const POSITION_LIMIT = 1_000_000;
 const VELOCITY_LIMIT = 100_000;
@@ -86,6 +87,17 @@ const BOOLEAN_FIELDS = Object.freeze([
 const STRING_FIELDS = Object.freeze([
   'role', 'state', 'type', 'variant', 'weaponId', 'objectiveType', 'partId', 'attackKind', 'ownerKind',
 ]);
+const STORAGE_FIELDS = Object.freeze([
+  ...FLOAT_FIELDS,
+  ...UINT_FIELDS,
+  ...BOOLEAN_FIELDS,
+  ...STRING_FIELDS,
+  'dashCharge0',
+  'dashCharge1',
+]);
+const STORAGE_FIELD_INDEX = Object.freeze(Object.fromEntries(
+  STORAGE_FIELDS.map((field, index) => [field, index]),
+));
 const VECTOR_FIELDS = Object.freeze({
   position: Object.freeze({ x: 'x', y: 'y', z: 'z' }),
   previousPosition: Object.freeze({ x: 'previousX', y: 'previousY', z: 'previousZ' }),
@@ -126,6 +138,13 @@ export function createEntityReadTarget() {
   for (const field of BOOLEAN_FIELDS) target[field] = false;
   for (const field of STRING_FIELDS) target[field] = null;
   return target;
+}
+
+function createWriteScratch() {
+  return {
+    values: createEntityReadTarget(),
+    present: new Uint8Array(STORAGE_FIELDS.length),
+  };
 }
 
 function assertKind(kind) {
@@ -245,10 +264,98 @@ function initializeSlot(pool, slot, data) {
   }
 }
 
-function patchSlot(pool, slot, patch) {
-  for (const key in patch) {
-    if (Object.hasOwn(patch, key)) setComponent(pool, slot, key, patch[key]);
+function captureWriteField(pool, scratch, field, value) {
+  const index = STORAGE_FIELD_INDEX[field];
+  scratch.present[index] = 1;
+  if (Object.hasOwn(FLOAT_RULES, field)) scratch.values[field] = sanitizeFloat(field, value);
+  else if (UINT_FIELDS.includes(field)) {
+    scratch.values[field] = field === 'color'
+      ? sanitizeColor(value, DEFAULT_COLORS[pool.kind])
+      : sanitizeUint(value);
+  } else if (BOOLEAN_FIELDS.includes(field)) scratch.values[field] = Boolean(value);
+  else if (STRING_FIELDS.includes(field)) scratch.values[field] = sanitizeString(value);
+  else scratch.values[field] = sanitizeFloat('value', value);
+}
+
+function capturePatch(pool, patch, scratch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    throw new TypeError('entity data must be an object');
   }
+  scratch.present.fill(0);
+  for (const key in patch) {
+    if (!Object.hasOwn(patch, key)) continue;
+    if (!COMPONENT_FIELDS.has(key)) throw new TypeError(`unknown entity component: ${key}`);
+    const value = patch[key];
+    if (STRING_FIELDS.includes(key)) {
+      if (value != null && typeof value !== 'string') throw new TypeError(`${key} must be a string or null`);
+      captureWriteField(pool, scratch, key, value);
+    } else if (Object.hasOwn(VECTOR_FIELDS, key)) {
+      validateVector(key, value);
+      if (value == null) continue;
+      const fields = VECTOR_FIELDS[key];
+      for (const axis in fields) {
+        if (!Object.hasOwn(value, axis)) continue;
+        const field = fields[axis];
+        captureWriteField(pool, scratch, field, value[axis]);
+      }
+    } else if (key === 'dashCharges') {
+      if (value == null) continue;
+      if (!Array.isArray(value) || value.length !== 2) {
+        throw new TypeError('dashCharges must contain exactly two values');
+      }
+      captureWriteField(pool, scratch, 'dashCharge0', value[0]);
+      captureWriteField(pool, scratch, 'dashCharge1', value[1]);
+    } else {
+      captureWriteField(pool, scratch, key, value);
+    }
+  }
+}
+
+function commitPatch(pool, slot, scratch) {
+  for (const field of FLOAT_FIELDS) {
+    if (scratch.present[STORAGE_FIELD_INDEX[field]]) pool[field][slot] = scratch.values[field];
+  }
+  for (const field of UINT_FIELDS) {
+    if (scratch.present[STORAGE_FIELD_INDEX[field]]) pool[field][slot] = scratch.values[field];
+  }
+  for (const field of BOOLEAN_FIELDS) {
+    if (scratch.present[STORAGE_FIELD_INDEX[field]]) pool[field][slot] = scratch.values[field] ? 1 : 0;
+  }
+  for (const field of STRING_FIELDS) {
+    if (scratch.present[STORAGE_FIELD_INDEX[field]]) pool[field][slot] = scratch.values[field];
+  }
+  if (scratch.present[STORAGE_FIELD_INDEX.dashCharge0]) {
+    pool.dashCharge0[slot] = scratch.values.dashCharge0;
+  }
+  if (scratch.present[STORAGE_FIELD_INDEX.dashCharge1]) {
+    pool.dashCharge1[slot] = scratch.values.dashCharge1;
+  }
+}
+
+function copySlotToScratch(pool, slot, id, scratch) {
+  scratch.id = id;
+  scratch.kind = pool.kind;
+  scratch.slot = slot;
+  scratch.active = true;
+  for (const field of FLOAT_FIELDS) scratch[field] = pool[field][slot];
+  for (const field of UINT_FIELDS) scratch[field] = pool[field][slot];
+  for (const field of BOOLEAN_FIELDS) scratch[field] = pool[field][slot] === 1;
+  for (const field of STRING_FIELDS) scratch[field] = pool[field][slot];
+  scratch.dashCharge0 = pool.dashCharge0[slot];
+  scratch.dashCharge1 = pool.dashCharge1[slot];
+}
+
+function copyScratchToTarget(scratch, target) {
+  target.id = scratch.id;
+  target.kind = scratch.kind;
+  target.slot = scratch.slot;
+  target.active = scratch.active;
+  for (const field of FLOAT_FIELDS) target[field] = scratch[field];
+  for (const field of UINT_FIELDS) target[field] = scratch[field];
+  for (const field of BOOLEAN_FIELDS) target[field] = scratch[field];
+  for (const field of STRING_FIELDS) target[field] = scratch[field];
+  target.dashCharge0 = scratch.dashCharge0;
+  target.dashCharge1 = scratch.dashCharge1;
 }
 
 function entityId(pool, slot) {
@@ -270,6 +377,10 @@ function createPool(kind, capacity, offset, idStride, maxGeneration) {
     activePositions: new Int32Array(capacity),
     callbackScratch: new Array(CALLBACK_SCRATCH_DEPTH),
     callbackScratchLeases: new Uint8Array(CALLBACK_SCRATCH_DEPTH),
+    readScratch: new Array(ACCESS_SCRATCH_DEPTH),
+    readScratchLeases: new Uint8Array(ACCESS_SCRATCH_DEPTH),
+    writeScratch: new Array(ACCESS_SCRATCH_DEPTH),
+    writeScratchLeases: new Uint8Array(ACCESS_SCRATCH_DEPTH),
     count: 0,
     freeCount: capacity,
     retiredCount: 0,
@@ -285,6 +396,10 @@ function createPool(kind, capacity, offset, idStride, maxGeneration) {
   for (let slot = 0; slot < capacity; slot += 1) pool.freeSlots[slot] = capacity - slot - 1;
   for (let index = 0; index < CALLBACK_SCRATCH_DEPTH; index += 1) {
     pool.callbackScratch[index] = new Float64Array(capacity);
+  }
+  for (let index = 0; index < ACCESS_SCRATCH_DEPTH; index += 1) {
+    pool.readScratch[index] = createEntityReadTarget();
+    pool.writeScratch[index] = createWriteScratch();
   }
   return pool;
 }
@@ -412,17 +527,15 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
     const pool = resolveLivePool(id);
     if (!pool) return null;
     const slot = slotFromId(pool, id);
-    target.id = id;
-    target.kind = pool.kind;
-    target.slot = slot;
-    target.active = true;
-    for (const field of FLOAT_FIELDS) target[field] = pool[field][slot];
-    for (const field of UINT_FIELDS) target[field] = pool[field][slot];
-    for (const field of BOOLEAN_FIELDS) target[field] = pool[field][slot] === 1;
-    for (const field of STRING_FIELDS) target[field] = pool[field][slot];
-    target.dashCharge0 = pool.dashCharge0[slot];
-    target.dashCharge1 = pool.dashCharge1[slot];
-    return target;
+    const lease = acquireAccessScratch(pool.readScratchLeases, pool.kind, 'read');
+    const scratch = pool.readScratch[lease];
+    copySlotToScratch(pool, slot, id, scratch);
+    try {
+      copyScratchToTarget(scratch, target);
+      return target;
+    } finally {
+      pool.readScratchLeases[lease] = 0;
+    }
   }
 
   function get(id) {
@@ -443,9 +556,25 @@ export function createEntityWorld({ capacities = {}, maxGeneration: requestedMax
   function write(id, patch) {
     const pool = resolveLivePool(id);
     if (!pool) return false;
-    validateData(patch);
-    patchSlot(pool, slotFromId(pool, id), patch);
-    return true;
+    const lease = acquireAccessScratch(pool.writeScratchLeases, pool.kind, 'write');
+    const scratch = pool.writeScratch[lease];
+    try {
+      capturePatch(pool, patch, scratch);
+      if (resolveLivePool(id) !== pool) return false;
+      commitPatch(pool, slotFromId(pool, id), scratch);
+      return true;
+    } finally {
+      pool.writeScratchLeases[lease] = 0;
+    }
+  }
+
+  function acquireAccessScratch(leases, kind, operation) {
+    for (let index = 0; index < ACCESS_SCRATCH_DEPTH; index += 1) {
+      if (leases[index]) continue;
+      leases[index] = 1;
+      return index;
+    }
+    throw new RangeError(`${kind} ${operation} nesting exceeds ${ACCESS_SCRATCH_DEPTH}`);
   }
 
   function acquireCallbackScratch(pool) {

@@ -68,6 +68,58 @@ test('queries expose immutable IDs while writes and allocation-free reads stay g
   assert.equal(world.get(first).previousX, -1);
 });
 
+test('write captures patch getters and rechecks the generation before committing', () => {
+  const world = createEntityWorld({ capacities: { enemy: 1 } });
+  const first = world.spawn('enemy', { x: 10, hp: 1, role: 'original' });
+  let replacement = null;
+  const patch = {
+    get hp() {
+      assert.equal(world.despawn(first), true);
+      replacement = world.spawn('enemy', { x: 20, hp: 2, role: 'replacement' });
+      return 99;
+    },
+    x: 77,
+    role: 'corrupted',
+  };
+
+  assert.equal(world.write(first, patch), false);
+  assert.ok(replacement);
+  assert.equal(world.get(first), null);
+  assert.equal(world.get(replacement).x, 20);
+  assert.equal(world.get(replacement).hp, 2);
+  assert.equal(world.get(replacement).role, 'replacement');
+});
+
+test('readInto captures source primitives before target setters can reuse the slot', () => {
+  const world = createEntityWorld({ capacities: { enemy: 1 } });
+  const first = world.spawn('enemy', { x: 10, hp: 1, role: 'original' });
+  let replacement = null;
+  let capturedId = null;
+  const target = {};
+  Object.defineProperty(target, 'id', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      return capturedId;
+    },
+    set(value) {
+      capturedId = value;
+      assert.equal(world.despawn(first), true);
+      replacement = world.spawn('enemy', { x: 20, hp: 2, role: 'replacement' });
+    },
+  });
+
+  assert.equal(world.readInto(first, target), target);
+  assert.ok(replacement);
+  assert.equal(target.id, first);
+  assert.equal(target.x, 10);
+  assert.equal(target.hp, 1);
+  assert.equal(target.role, 'original');
+  assert.equal(world.get(replacement).x, 20);
+  assert.equal(world.get(replacement).hp, 2);
+  assert.equal(world.get(replacement).role, 'replacement');
+});
+
 test('query iteration snapshots generations and stays deterministic during despawn and reuse', () => {
   const world = createEntityWorld({ capacities: { enemy: 3 } });
   const first = world.spawn('enemy', { hp: 1 });
