@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { createCollisionSystem, resolveCollisions, sweptCircleHit } from '../src/systems/collision-system.js';
+import { createEnemySystem } from '../src/systems/enemy-system.js';
 
 function createEvents() {
   const emitted = [];
@@ -235,6 +236,40 @@ test('lethal hits protect every committed enemy active state from collision-pass
     assert.equal(world.get(enemyId).hp, 0, state);
     assert.equal(world.get(enemyId).state, state);
   }
+});
+
+test('a lethally hit committed dash retains authored contact damage until its execution ends', () => {
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 1 } });
+  const playerId = world.spawn('player', {
+    x: 0, y: 0, hp: 5, maxHp: 5, radius: 0.4, team: 1, collidable: true,
+  });
+  const enemies = createEnemySystem({ random: () => 0.5 });
+  const enemyId = enemies.spawnRole(world, 'interceptor', {
+    x: 0, y: 0, hp: 0, maxHp: 2, state: 'cut-dash', stateTimer: 0.1,
+  });
+  world.write(enemyId, {
+    vx: 0, vy: 0, damage: 0.3, collidable: true, contactDamaging: true,
+  });
+  const hullHits = [];
+  const session = { damageHull(amount) { hullHits.push(amount); return true; } };
+  const events = createEvents();
+
+  resolveCollisions(world, session, 1 / 60, events);
+  resolveCollisions(world, session, 1 / 60, events);
+  assert.deepEqual(hullHits, [0.3]);
+  assert.equal(world.get(enemyId).hitCooldown, 2);
+
+  enemies.update(world, world.get(playerId), null, 0.1, events);
+  const ended = world.get(enemyId);
+  assert.equal(ended.state, 'approach');
+  assert.equal(ended.contactDamaging, false);
+  world.write(enemyId, { contactDamaging: true, damage: 5, hitCooldown: 0 });
+  resolveCollisions(world, session, 1 / 60, events);
+  assert.deepEqual(hullHits, [0.3]);
+
+  enemies.update(world, world.get(playerId), null, 1 / 60, events);
+  assert.equal(world.get(enemyId), null);
+  assert.equal(events.emitted.filter(({ type, payload }) => type === 'enemy:destroyed' && payload.id === enemyId).length, 1);
 });
 
 test('collision event stats only count accepted weapon-hit events', () => {

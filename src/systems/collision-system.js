@@ -1,5 +1,5 @@
-import { createEntityReadTarget } from '../game/entity-world.js';
-import { isEnemyCommittedAttackState } from '../content/enemies.js';
+import { createEntityReadTarget, getAuthoritativeContactRadius } from '../game/entity-world.js';
+import { isEnemyExecutionProtected, isEnemyExecutionProtectedContact } from '../content/enemies.js';
 import { AUTO_PULSE_BUFF_MULTIPLIER, PERFECT_PHASE_REFUND } from './player-system.js';
 
 const FRIENDLY_TARGET_KINDS = Object.freeze(['bossPart', 'enemy', 'objective']);
@@ -299,8 +299,9 @@ export function createCollisionSystem({
     const enemies = world.query('enemy');
     for (let index = 0; index < enemies.length; index += 1) {
       const enemy = world.readInto(enemies.at(index), targetRead);
-      if (!enemy || !enemy.collidable || !enemy.contactDamaging || enemy.hp <= 0 || enemy.hitCooldown > 0) continue;
-      if (!overlapsWithRadius(player, enemy, enemy.contactRadius > 0 ? enemy.contactRadius : enemy.radius)) continue;
+      if (!enemy || !enemy.collidable || !enemy.contactDamaging || enemy.hitCooldown > 0
+        || (enemy.hp <= 0 && !isEnemyExecutionProtectedContact(enemy))) continue;
+      if (!overlapsWithRadius(player, enemy, getAuthoritativeContactRadius(enemy))) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
         perfectAvailable = false;
@@ -316,7 +317,7 @@ export function createCollisionSystem({
     for (let index = 0; index < objectives.length; index += 1) {
       const hazard = world.readInto(objectives.at(index), objectiveRead);
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
-      if (!overlapsWithRadius(player, hazard, hazard.contactRadius > 0 ? hazard.contactRadius : hazard.radius)) continue;
+      if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
         perfectAvailable = false;
@@ -331,7 +332,7 @@ export function createCollisionSystem({
     for (let index = 0; index < hazards.length; index += 1) {
       const hazard = world.readInto(hazards.at(index), hazardRead);
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2 || hazard.hitCooldown > 0) continue;
-      if (!overlapsWithRadius(player, hazard, hazard.contactRadius > 0 ? hazard.contactRadius : hazard.radius)) continue;
+      if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
         perfectAvailable = false;
@@ -416,7 +417,7 @@ export function createCollisionSystem({
       const amount = Math.min(target.hp, damageAmounts[index]);
       const hpAfter = Math.max(0, target.hp - amount);
       const executionProtected = hpAfter <= 0 && target.kind === 'enemy'
-        && (target.executingTelegraph || isEnemyCommittedAttackState(target.state));
+        && isEnemyExecutionProtected(target);
       world.write(target.id, {
         hp: hpAfter,
         state: hpAfter <= 0 ? (executionProtected ? target.state : 'destroyed') : target.state,

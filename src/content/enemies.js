@@ -24,6 +24,14 @@ export function isEnemyCommittedAttackState(state) {
   return typeof state === 'string' && COMMITTED_ATTACK_STATE_SET.has(state);
 }
 
+export function isEnemyExecutionProtected(enemy) {
+  return Boolean(enemy?.executingTelegraph || isEnemyCommittedAttackState(enemy?.state));
+}
+
+export function isEnemyExecutionProtectedContact(enemy) {
+  return Boolean(enemy?.contactDamaging && isEnemyExecutionProtected(enemy));
+}
+
 const ROLE_SET = new Set(ENEMY_ROLE_IDS);
 
 function role(definition) {

@@ -172,6 +172,66 @@ export function scanThreatWorld(world) {
   };
 }
 
+function summarizeMaterializedRoles(roles) {
+  const accepted = [];
+  let cost = 0;
+  let projectileCost = 0;
+  let blockedAreaCost = 0;
+  let highDamageWarnings = 0;
+  for (const roleId of roles) {
+    const role = ENEMY_ROLES[roleId];
+    if (!role) continue;
+    accepted.push(roleId);
+    cost += role.threatCost;
+    projectileCost += role.projectileCost;
+    blockedAreaCost += role.blockedAreaCost;
+    if (role.highDamage) highDamageWarnings += 1;
+  }
+  return Object.freeze({
+    roles: Object.freeze(accepted), cost, projectileCost, blockedAreaCost, highDamageWarnings,
+  });
+}
+
+function rejectedSelectedRoles(selectedRoles, materializedRoles) {
+  const remaining = Object.fromEntries(ENEMY_ROLE_IDS.map((role) => [role, 0]));
+  for (const role of materializedRoles) if (ENEMY_ROLES[role]) remaining[role] += 1;
+  const rejected = [];
+  for (const role of selectedRoles) {
+    if (remaining[role] > 0) remaining[role] -= 1;
+    else rejected.push(role);
+  }
+  return rejected;
+}
+
+function createMaterializedWave(selectedWave, materializedRoles) {
+  const materialized = summarizeMaterializedRoles(materializedRoles);
+  const selectedSummary = summarizeMaterializedRoles(selectedWave.roles);
+  const rejectedDiagnostics = summarizeMaterializedRoles(
+    rejectedSelectedRoles(selectedWave.roles, materialized.roles),
+  );
+  const selectedDiagnostics = Object.freeze({
+    roles: selectedSummary.roles,
+    cost: selectedWave.cost,
+    authoredCost: selectedSummary.cost,
+    projectileCost: selectedWave.projectileCost,
+    blockedAreaCost: selectedWave.blockedAreaCost,
+    highDamageWarnings: selectedWave.highDamageWarnings,
+  });
+  return Object.freeze({
+    roles: materialized.roles,
+    cost: materialized.cost,
+    projectileCost: materialized.projectileCost,
+    blockedAreaCost: materialized.blockedAreaCost,
+    highDamageWarnings: materialized.highDamageWarnings,
+    budget: selectedWave.budget,
+    reliefApplied: selectedWave.reliefApplied,
+    limits: selectedWave.limits,
+    materialized,
+    selectedDiagnostics,
+    rejectedDiagnostics,
+  });
+}
+
 function clone(value) {
   if (value == null || typeof value !== 'object') return value;
   if (Array.isArray(value)) return value.map(clone);
@@ -355,26 +415,37 @@ export function createEncounterDirector({
     }, threatRandom);
     waveIndex += 1;
     wavesSelected += 1;
-    lastWave = wave;
+    const materializedRoles = [];
     if (wave.roles.length > 0) {
       const ids = enemySystem.spawnWave(world, wave.roles, { arena: objective.arena, events });
       if (ids.length > 0) {
         wavesSpawned += 1;
-        const materializedRoles = [];
         for (const id of ids) {
           const role = world.get(id)?.role;
           if (!ENEMY_ROLES[role]) continue;
           rolesSeen.add(role);
           materializedRoles.push(role);
         }
-        emit(events, 'encounter:threat-wave', {
-          templateId, chapterIndex, waveIndex: waveIndex - 1, roles: materializedRoles,
-          cost: wave.cost, budget: wave.budget, activeEnemyCap: wave.limits.activeEnemyCap,
-        });
       }
     }
+    lastWave = createMaterializedWave(wave, materializedRoles);
+    if (materializedRoles.length > 0) {
+      emit(events, 'encounter:threat-wave', {
+        templateId, chapterIndex, waveIndex: waveIndex - 1,
+        roles: lastWave.roles,
+        cost: lastWave.cost,
+        projectileCost: lastWave.projectileCost,
+        blockedAreaCost: lastWave.blockedAreaCost,
+        highDamageWarnings: lastWave.highDamageWarnings,
+        budget: lastWave.budget,
+        activeEnemyCap: lastWave.limits.activeEnemyCap,
+        materialized: lastWave.materialized,
+        selectedDiagnostics: lastWave.selectedDiagnostics,
+        rejectedDiagnostics: lastWave.rejectedDiagnostics,
+      });
+    }
     waveTimer = mode === 'abyss' ? 1.8 : 2.4;
-    return wave;
+    return lastWave;
   }
 
   function update(context = {}, dt = 0, events = null) {

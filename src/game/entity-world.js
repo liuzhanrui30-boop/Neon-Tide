@@ -38,6 +38,13 @@ export function selectEntityCapacities({ coarsePointer = false, quality = 'deskt
     : DEFAULT_ENTITY_CAPACITIES;
 }
 
+export function getAuthoritativeContactRadius(entity) {
+  const contactRadius = Number(entity?.contactRadius);
+  if (Number.isFinite(contactRadius) && contactRadius > 0) return contactRadius;
+  const radius = Number(entity?.radius);
+  return Number.isFinite(radius) && radius > 0 ? radius : 0;
+}
+
 export const ENTITY_FLAG_HIDDEN = 1;
 
 const MAX_KIND_CAPACITY = 1_000_000;

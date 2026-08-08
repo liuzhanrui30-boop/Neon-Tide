@@ -120,7 +120,6 @@ async function collectThreatEvidence(page) {
   let nextDash = 0;
   let simultaneous = null;
   const observedRoles = new Set();
-  const lancerPreviews = new Map();
   let lancerParity = null;
   let wardenParity = null;
   let lancerSafeParity = null;
@@ -144,43 +143,6 @@ async function collectThreatEvidence(page) {
       })}`);
       for (const role of state.renderer.observations.enemyRoles) {
         if (ENEMY_ROLE_IDS.includes(role)) observedRoles.add(role);
-      }
-      if (state.renderer.pools.enemy.count === state.enemies.length) {
-        for (const enemy of state.enemies) observedRoles.add(enemy.role);
-      }
-      for (const warning of state.warnings) {
-        if (warning.type === 'lancer-beam' && warning.opacity > 0 && !warning.collidable) {
-          lancerPreviews.set(warning.ownerId, warning);
-        }
-      }
-      for (const [ownerId, preview] of lancerPreviews) {
-        const nodes = state.hazards.filter((hazard) => hazard.ownerId === ownerId && hazard.type === 'lancer-beam-node');
-        if (nodes.length === 0) continue;
-        const cos = Math.cos(preview.rotation);
-        const sin = Math.sin(preview.rotation);
-        const contained = nodes.every((node) => {
-          const dx = node.x - preview.x;
-          const dy = node.y - preview.y;
-          const along = dx * cos + dy * sin;
-          const across = -dx * sin + dy * cos;
-          return node.collidable && node.contactDamaging
-            && Math.abs(along) + node.radius <= preview.scaleX / 2 + 1e-6
-            && Math.abs(across) + node.radius <= preview.scaleY / 2 + 1e-6;
-        });
-        if (contained) lancerParity = { preview, nodes };
-      }
-      const wardenGap = state.hazards.find(({ role }) => role === 'warden-gap');
-      const wardenNode = wardenGap && state.hazards.find(({ role, collidable }) => role === 'warden-wall' && collidable);
-      const lancerSafe = state.hazards.find(({ role }) => role === 'safe-sector');
-      if (wardenGap && wardenNode
-        && state.renderer.pools.enemyHazard.count === state.hazards.length
-        && !wardenGap.collidable && wardenGap.scaleX === wardenGap.radius && wardenGap.scaleY === wardenGap.radius
-        && wardenGap.radius > wardenNode.radius) {
-        wardenParity = { wardenGap, wardenNode };
-      }
-      if (lancerSafe && state.renderer.pools.enemyHazard.count === state.hazards.length
-        && !lancerSafe.collidable && lancerSafe.scaleX === lancerSafe.radius && lancerSafe.scaleY === lancerSafe.radius) {
-        lancerSafeParity = lancerSafe;
       }
       const rendered = state.renderer.observations;
       if (rendered.lancerPreviewsRendered > 0 && rendered.lancerBeamNodesRendered > 0
@@ -242,7 +204,7 @@ async function collectThreatEvidence(page) {
       if (ENEMY_ROLE_IDS.every((role) => observedRoles.has(role))
         && simultaneous && lancerParity && wardenParity && lancerSafeParity) {
         return {
-          ...simultaneous,
+          ...state,
           threat: state.threat,
           observedRoles: [...observedRoles],
           lancerParity,
@@ -284,9 +246,14 @@ export const v3EnemyScenarios = [
       assert.ok(evidence.renderer.observations.maxSimultaneousWarningOwners >= 2);
       assert.ok(evidence.renderer.observations.maxIndependentWarningProgress >= 2);
       assert.equal(evidence.renderer.observations.maxHiddenActiveWarnings, 0);
-      assert.ok(evidence.lancerParity.nodesRendered > 0);
-      assert.equal(evidence.lancerParity.outsidePreview, 0);
-      assert.ok(evidence.hazardParity.wardenGap.radius > evidence.hazardParity.wardenNode.radius);
+      const rendered = evidence.renderer.observations;
+      assert.ok(rendered.lancerPreviewsRendered > 0);
+      assert.ok(rendered.lancerBeamNodesRendered > 0);
+      assert.equal(rendered.lancerBeamNodesOutsidePreview, 0);
+      assert.ok(rendered.wardenWallRenderedRadius > 0);
+      assert.ok(rendered.wardenGapRenderedRadius > 0);
+      assert.ok(rendered.wardenGapRenderedRadius > rendered.wardenWallRenderedRadius);
+      assert.ok(rendered.lancerSafeRenderedRadius > 0);
     });
   }],
   ['v3 compact runtime caps match Standard and Abyss director limits end to end', async () => {

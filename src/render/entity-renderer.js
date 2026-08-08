@@ -4,6 +4,7 @@ import {
   DEFAULT_ENTITY_CAPACITIES,
   ENTITY_FLAG_HIDDEN,
   ENTITY_KINDS,
+  getAuthoritativeContactRadius,
 } from '../game/entity-world.js';
 
 const PROJECTILE_KINDS = new Set(['friendlyProjectile', 'enemyProjectile']);
@@ -297,7 +298,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     lancerPreviewsRendered += 1;
   }
 
-  function recordLancerNode(entity) {
+  function recordLancerNode(entity, renderedRadius) {
     const slot = previewSlot(entity.ownerId);
     if (slot < 0) return;
     const dx = entity.x - previewX[slot];
@@ -305,8 +306,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     const along = dx * previewCos[slot] + dy * previewSin[slot];
     const across = -dx * previewSin[slot] + dy * previewCos[slot];
     lancerBeamNodesRendered += 1;
-    if (Math.abs(along) + entity.radius > previewHalfLength[slot] + 1e-6
-      || Math.abs(across) + entity.radius > previewHalfWidth[slot] + 1e-6) {
+    if (Math.abs(along) + renderedRadius > previewHalfLength[slot] + 1e-6
+      || Math.abs(across) + renderedRadius > previewHalfWidth[slot] + 1e-6) {
       lancerBeamNodesOutsidePreview += 1;
     }
   }
@@ -338,16 +339,17 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         previousRotation,
       );
       const rotation = previousRotation * (1 - alpha) + currentRotation * alpha;
-      const scale = clampFinite(entity.scale, 0, RENDER_SCALE_LIMIT, 1);
+      const hazardFootprint = pool.kind === 'enemyHazard'
+        ? getAuthoritativeContactRadius(entity)
+        : 0;
+      const scale = pool.kind === 'enemyHazard'
+        ? 1
+        : clampFinite(entity.scale, 0, RENDER_SCALE_LIMIT, 1);
       const baseSize = BASE_SIZES[pool.kind];
       scratch.position.set(x, y, z);
       scratch.rotation.set(0, 0, rotation);
-      const authoritativeScaleX = pool.kind === 'enemyHazard' && entity.scaleX === 1
-        ? entity.radius
-        : entity.scaleX;
-      const authoritativeScaleY = pool.kind === 'enemyHazard' && entity.scaleY === 1
-        ? entity.radius
-        : entity.scaleY;
+      const authoritativeScaleX = pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleX;
+      const authoritativeScaleY = pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleY;
       const renderedScaleX = clampFinite(authoritativeScaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       const renderedScaleY = clampFinite(authoritativeScaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       scratch.scale.set(
@@ -361,7 +363,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       setColorComponents(object.instanceColor.array, count * 3, color);
       if (pool.kind === 'enemy' && entity.role) observedEnemyRoles.add(entity.role);
       if (pool.kind === 'enemyHazard') {
-        if (entity.type === 'lancer-beam-node') recordLancerNode(entity);
+        if (entity.type === 'lancer-beam-node') recordLancerNode(entity, renderedScaleX);
         if (entity.role === 'warden-gap') wardenGapRenderedRadius = Math.max(wardenGapRenderedRadius, renderedScaleX);
         else if (entity.role === 'warden-wall') wardenWallRenderedRadius = Math.max(wardenWallRenderedRadius, renderedScaleX);
         else if (entity.role === 'safe-sector') lancerSafeRenderedRadius = Math.max(lancerSafeRenderedRadius, renderedScaleX);

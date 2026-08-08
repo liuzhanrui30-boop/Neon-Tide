@@ -177,11 +177,33 @@ test('rolesSeen and runtime enemy caps include only successfully materialized wa
     x: 0, y: 0, hp: 5, maxHp: 5, radius: 0.4, team: 1, collidable: true,
   });
   const director = createEncounterDirector({ seed: 91, mode: 'standard', quality: 'desktop' });
+  const emitted = [];
   director.startRoom(getEncounterTemplate('anchor-break'), { chapterIndex: 3 });
-  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 1 / 60, { emit() {}, input: [] });
+  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 1 / 60, {
+    emit(type, payload) { emitted.push({ type, payload }); }, input: [],
+  });
   const actual = [...world.query('enemy')].map((id) => world.get(id).role);
-  const seen = director.getSnapshot().threatState.rolesSeen;
+  const threat = director.getSnapshot().threatState;
+  const seen = threat.rolesSeen;
+  const event = emitted.find(({ type }) => type === 'encounter:threat-wave')?.payload;
   assert.equal(actual.length, 1);
+  assert.deepEqual(actual, ['hunter']);
   assert.deepEqual(seen, actual);
-  assert.equal(director.getSnapshot().threatState.enemySystem.rejectedSpawns > 0, true);
+  assert.deepEqual(threat.lastWave.roles, ['hunter']);
+  assert.equal(threat.lastWave.cost, 1);
+  assert.equal(threat.lastWave.projectileCost, 0);
+  assert.equal(threat.lastWave.blockedAreaCost, 0);
+  assert.equal(threat.lastWave.highDamageWarnings, 0);
+  assert.deepEqual(threat.lastWave.materialized.roles, ['hunter']);
+  assert.equal(threat.lastWave.materialized.cost, 1);
+  assert.equal(threat.lastWave.selectedDiagnostics.cost, 9);
+  assert.deepEqual(threat.lastWave.selectedDiagnostics.roles, ['hunter', 'interceptor', 'striker', 'swarm', 'hunter']);
+  assert.deepEqual(threat.lastWave.rejectedDiagnostics.roles, ['interceptor', 'striker', 'swarm', 'hunter']);
+  assert.equal(threat.lastWave.rejectedDiagnostics.cost, 8);
+  assert.deepEqual(event.roles, ['hunter']);
+  assert.equal(event.cost, 1);
+  assert.equal(event.projectileCost, 0);
+  assert.equal(event.blockedAreaCost, 0);
+  assert.equal(event.highDamageWarnings, 0);
+  assert.equal(threat.enemySystem.rejectedSpawns > 0, true);
 });

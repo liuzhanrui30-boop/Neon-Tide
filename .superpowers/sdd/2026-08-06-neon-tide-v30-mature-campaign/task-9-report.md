@@ -93,3 +93,35 @@ All Node/npm commands used Node 22.14.0 from the required runtime. Port 4173 rem
 ### Concerns
 - Vite retains the inherited large-chunk warning; the final main bundle is 852.08 kB minified (236.64 kB gzip). Code splitting remains outside Task 9.
 - Standard low-hull relief intentionally pauses future wave admission at or below 40% hull rather than weakening live threats. Abyss retains reduced future admission. This is deterministic and fully covered, but remains a tuning lever for later playtesting.
+
+---
+
+## Review fix round 2/5 — Complete committed enemy executions
+
+### Status
+DONE — the remaining three Important findings and renderer/collision footprint hardening are implemented and verified.
+
+### Delivered
+- Unified enemy execution protection behind shared helpers. A lethally hit enemy body may continue player contact only when it is both explicitly contact-damaging and still execution-protected. Interceptor `cut-dash`, Striker `strike-dash`, and any future protected contact state retain authored damage and the normal body cooldown until their committed execution ends; dead non-executing bodies are rejected even if stale contact flags remain.
+- Added an end-to-end post-lethal dash regression: kill during the dash, overlap the player, accept authored damage once, reject the repeated overlap during cooldown, reject stale contact after the state ends, then despawn and emit cleanup exactly once.
+- Reworked threat-wave telemetry around successful materialization. `rolesSeen`, `lastWave`, `lastWave.materialized`, and `encounter:threat-wave` now report only roles that actually entered the enemy pool. Their cost, projectile cost, blocked-area cost, and high-damage warning count are recomputed from the materialized role definitions.
+- Preserved pre-admission information only under explicit `selectedDiagnostics` and `rejectedDiagnostics`. The capacity-one regression now selects a cost-nine wave, materializes only Hunter, and reports actual cost one at every public/event materialized surface while retaining the rejected roles/cost solely in diagnostics.
+- Removed every authoritative-world fallback from the natural enemy renderer acceptance. Role reachability and Warden/Lancer parity now depend only on stable renderer observations. The scenario directly requires nonzero rendered Warden wall radius, Warden gap radius, Lancer safe radius, Lancer preview count, and Lancer beam-node count, with zero rendered nodes outside the preview.
+- Added `getAuthoritativeContactRadius` as the shared circular footprint contract. Collision and `enemyHazard` rendering both prefer positive `contactRadius`, otherwise `radius`, and ignore conflicting generic/axis scale values for circular hazards.
+- Hardened rendered Lancer containment observations to use the actual rendered node footprint rather than a separate radius field.
+- Added conflicting-field parity coverage for Warden wall nodes, Lancer beam nodes, Mine explosions, and Bulwark counter waves. Each case mutates `scale`, `scaleX`, `scaleY`, `radius`, and `contactRadius` independently and proves the rendered matrix and collision boundary use the same authoritative footprint.
+
+### Verification
+All Node/npm commands used Node 22.14.0 from the required runtime. Port 4173 remained untouched; browser validation used temporary Vite port 4174 and isolated headful Chrome 146.0.7680.80 on CDP 9358.
+
+- Focused collision/director/renderer/world/enemy tests — PASS: 65/65.
+- Final `npm run check` — PASS: 221/221 Node tests and production build.
+- Focused natural enemy renderer-only acceptance — PASS: 1/1.
+- Focused compact Standard/Abyss cap acceptance — PASS: 1/1.
+- Full browser matrix — PASS: 31/31 in one final run.
+- Breakpoint cleanup failure-path self-test — PASS: 1/1.
+- `git diff --check` — PASS.
+
+### Concerns
+- Vite retains the inherited large-chunk warning; the final main bundle is 853.38 kB minified (237.05 kB gzip). Code splitting remains outside Task 9.
+- Selected/rejected diagnostics intentionally remain in debug/event telemetry for admission analysis, but all unqualified wave fields are now strictly materialized values.

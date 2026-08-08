@@ -3,7 +3,7 @@ import {
   ENEMY_ROLE_IDS,
   ENEMY_ROLES,
   getEnemyRole,
-  isEnemyCommittedAttackState,
+  isEnemyExecutionProtected,
 } from '../content/enemies.js';
 
 const EPSILON = 1e-9;
@@ -81,7 +81,7 @@ function contactRadius(role) {
 }
 
 function isPendingExecution(enemy) {
-  return enemy.hp <= 0 && (enemy.executingTelegraph || isEnemyCommittedAttackState(enemy.state));
+  return enemy.hp <= 0 && isEnemyExecutionProtected(enemy);
 }
 
 export function createEnemySystem({

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { createEntityRenderer } from '../src/render/entity-renderer.js';
+import { resolveCollisions } from '../src/systems/collision-system.js';
 
 function createFixture(capacities = {}) {
   const scene = new THREE.Scene();
@@ -115,6 +116,44 @@ test('warning and hazard transforms match authoritative footprint dimensions wit
   assert.deepEqual(renderer.getStats().ownership, ownership);
   renderer.dispose();
   world.dispose();
+});
+
+test('Warden, Lancer, Mine, and Bulwark hazards render the same authoritative radius used by collision', () => {
+  const cases = [
+    { role: 'warden-wall', type: 'warden-wall-node', radius: 0.34, contactRadius: 0.34, scaleX: 8, scaleY: 7 },
+    { role: 'lancer', type: 'lancer-beam-node', radius: 0.28, contactRadius: 0.5, scaleX: 0.02, scaleY: 6 },
+    { role: 'mine', type: 'mine-explosion', radius: 0.38, contactRadius: 0, scaleX: 5, scaleY: 0.01 },
+    { role: 'bulwark', type: 'bulwark-counter-wave', radius: 0.42, contactRadius: 0.62, scaleX: 0.03, scaleY: 9 },
+  ];
+  for (const entry of cases) {
+    const { world, renderer, root } = createFixture({ player: 1, enemyHazard: 1 });
+    const footprint = entry.contactRadius || entry.radius;
+    const playerId = world.spawn('player', {
+      x: footprint + 0.39, y: 0, radius: 0.4, team: 1, collidable: true,
+    });
+    const hazardId = world.spawn('enemyHazard', {
+      x: 0, y: 0, radius: entry.radius, contactRadius: entry.contactRadius,
+      scale: 4, scaleX: entry.scaleX, scaleY: entry.scaleY, role: entry.role, type: entry.type,
+      damage: 0.35, ownerId: 7, team: 2, collidable: true, contactDamaging: true,
+    });
+    renderer.sync(world, 1);
+    const matrix = new THREE.Matrix4();
+    const scale = new THREE.Vector3();
+    findKind(root, 'enemyHazard').getMatrixAt(0, matrix);
+    matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), scale);
+    assert.ok(Math.abs(scale.x - footprint) < 1e-6, entry.role);
+    assert.ok(Math.abs(scale.y - footprint) < 1e-6, entry.role);
+
+    const hits = [];
+    resolveCollisions(world, { damageHull(amount) { hits.push(amount); return true; } }, 1 / 60, { emit() {} });
+    assert.deepEqual(hits, [0.35], entry.role);
+    world.write(playerId, { x: footprint + 0.41 });
+    world.write(hazardId, { hitCooldown: 0 });
+    resolveCollisions(world, { damageHull(amount) { hits.push(amount); return true; } }, 1 / 60, { emit() {} });
+    assert.deepEqual(hits, [0.35], entry.role);
+    renderer.dispose();
+    world.dispose();
+  }
 });
 
 test('sync clamps extreme finite transforms before writing GPU buffers', () => {
