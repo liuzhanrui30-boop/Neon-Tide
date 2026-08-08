@@ -12,6 +12,7 @@ import { createHudRenderer } from '../render/hud-renderer.js';
 import { createWeaponSystem } from '../systems/weapon-system.js';
 import { createProjectileSystem } from '../systems/projectile-system.js';
 import { createCollisionSystem } from '../systems/collision-system.js';
+import { createObjectiveWorldBridge } from '../systems/objective-world-bridge.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
@@ -39,6 +40,10 @@ export function bootstrapNeonTide(options = {}) {
   const entityCapacities = options.entityCapacities ?? selectEntityCapacities({
     coarsePointer: coarsePointer || entityQuality.tier === 'mobile',
   });
+  const objectiveTestMode = import.meta.env.DEV
+    && new URLSearchParams(globalThis.location?.search ?? '').has('objective-test');
+  const compatibilityTestMode = import.meta.env.DEV
+    && new URLSearchParams(globalThis.location?.search ?? '').has('compatibility-test');
   const entityScene = new THREE.Scene();
   const world = createEntityWorld({ capacities: entityCapacities });
   const entityRenderer = createEntityRenderer({
@@ -51,6 +56,8 @@ export function bootstrapNeonTide(options = {}) {
   const weaponSystem = createWeaponSystem();
   const projectileSystem = createProjectileSystem();
   const collisionSystem = createCollisionSystem();
+  const objectiveBridge = createObjectiveWorldBridge({ world });
+  let objectiveInputSequence = 0;
   let projectedPlayer = null;
   const playerProjection = Object.freeze({
     publish(snapshot) {
@@ -79,6 +86,7 @@ export function bootstrapNeonTide(options = {}) {
   const presentationEvents = createPresentationEventConsumer({
     capacity: 64,
     onEvent(event) {
+      objectiveBridge.consume(event);
       runtime?.consumePresentationEvent?.(event);
     },
   });
@@ -88,6 +96,7 @@ export function bootstrapNeonTide(options = {}) {
     events,
     runSave,
     encounterQuality: entityQuality,
+    encounterDurationScale: options.encounterDurationScale ?? (objectiveTestMode ? 0.18 : 1),
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
       const startsNewAttempt = current.mode === 'briefing'
@@ -98,6 +107,7 @@ export function bootstrapNeonTide(options = {}) {
         weaponSystem.reset();
         projectileSystem.reset();
         collisionSystem.reset();
+        objectiveBridge.reset();
         entityRenderer.reset();
         presentationEvents.reset();
       }
@@ -109,6 +119,7 @@ export function bootstrapNeonTide(options = {}) {
         weaponSystem.reset();
         projectileSystem.reset();
         collisionSystem.reset();
+        objectiveBridge.reset();
         entityRenderer.reset();
         presentationEvents.reset();
         return;
@@ -147,38 +158,60 @@ export function bootstrapNeonTide(options = {}) {
     maxCatchUpSteps: MAX_CATCH_UP_STEPS,
     onStep(dt) {
       try {
-        const beforeStep = session.snapshot();
-        if (beforeStep.mode === 'playing' && beforeStep.room?.objectiveManaged && beforeStep.room.combatFrozen) {
+        if (session.getMode() === 'playing' && session.isObjectiveManaged() && session.isCombatFrozen()) {
           const frozenPlayerId = world.query('player').at(0);
           session.updateRoom({
             world,
             player: frozenPlayerId ? world.get(frozenPlayerId) : projectedPlayer,
             presentationPending: events.getStats().queued,
           }, dt, events);
-          hudRenderer.render({ objective: session.snapshot().room?.objective });
+          hudRenderer.render({
+            ...(projectedPlayer ?? {}),
+            inputDevice: inputSystem.getLastActiveDevice(),
+            objective: session.getLiveEncounterObjective(),
+          });
           return;
         }
         runtime?.simulate(dt);
-        if (session.snapshot().mode !== 'playing') return;
+        if (session.getMode() !== 'playing') return;
         const playerId = runtime?.syncCombatWorld(world);
         if (!Number.isSafeInteger(playerId)) return;
+        if (session.isObjectiveManaged()) objectiveBridge.sync(session.getLiveEncounterObjective());
         weaponSystem.update(world, playerId, dt, events);
         projectileSystem.update(world, dt, events);
         const summary = collisionSystem.resolve(world, session, dt, events);
         runtime?.applyCombatSummary(world, summary);
-        if (session.snapshot().room?.objectiveManaged) {
+        if (session.isObjectiveManaged()) {
           const objectiveInput = summary.damageRecords
-            .filter((record) => record.destroyed && record.targetKind === 'enemy')
-            .map((record) => ({
-              type: 'enemy:destroyed',
-              payload: { id: record.targetId, sourceId: record.targetSourceId },
-            }));
+            .flatMap((record) => {
+              if (record.destroyed && record.targetKind === 'enemy') return [{
+                type: 'enemy:destroyed', sequence: ++objectiveInputSequence,
+                payload: { id: record.targetId, sourceId: record.targetSourceId, targetSourceId: record.targetSourceId },
+              }];
+              if (record.targetKind === 'objective') return [{
+                type: 'objective:damaged', sequence: ++objectiveInputSequence,
+                payload: { id: record.targetId, sourceId: record.targetSourceId, amount: record.amount },
+              }];
+              return [];
+            });
+          if (summary.pickups > 0) objectiveInput.push({
+            type: 'pickupCollected',
+            sequence: ++objectiveInputSequence,
+            payload: { count: summary.pickups, ids: summary.pickupSourceIds },
+          });
+          for (const completion of summary.objectiveCompletions) objectiveInput.push({
+            type: 'objectiveCompleted', sequence: ++objectiveInputSequence, payload: completion,
+          });
           session.updateRoom({
             world,
             player: world.get(playerId),
             presentationPending: events.getStats().queued,
           }, dt, { input: objectiveInput, emit: events.emit });
-          hudRenderer.render({ objective: session.snapshot().room?.objective });
+          hudRenderer.render({
+            ...(projectedPlayer ?? {}),
+            inputDevice: inputSystem.getLastActiveDevice(),
+            objective: session.getLiveEncounterObjective(),
+          });
         }
       } finally {
         events.drain(presentationEvents.consume);
@@ -198,6 +231,7 @@ export function bootstrapNeonTide(options = {}) {
     playerProjection,
     hudRenderer,
     entityRenderer,
+    compatibilityCampaign: compatibilityTestMode,
   });
   runtime.start();
   loop.reset(performance.now());
@@ -220,6 +254,7 @@ export function bootstrapNeonTide(options = {}) {
       projectiles: projectileSystem.getStats(),
       collisions: collisionSystem.getStats(),
       encounter: session.getEncounterSnapshot(),
+      objectiveBridge: objectiveBridge.getStats(),
       legacy: runtime.getDebugSnapshot(),
       player: playerProjection.getSnapshot(),
       input: Object.freeze({
@@ -240,6 +275,7 @@ export function bootstrapNeonTide(options = {}) {
     runtime.dispose();
     inputSystem.dispose();
     hudRenderer.dispose();
+    objectiveBridge.clear();
     entityRenderer.dispose();
     world.dispose();
     events.clear();
@@ -259,6 +295,7 @@ export function bootstrapNeonTide(options = {}) {
     weaponSystem,
     projectileSystem,
     collisionSystem,
+    objectiveBridge,
     presentationEvents,
     dispose,
     getDebugSnapshot,

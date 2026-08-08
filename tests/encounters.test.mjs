@@ -4,6 +4,7 @@ import {
   ENCOUNTER_TEMPLATES,
   OBJECTIVE_TYPES,
   getEncounterTemplate,
+  getCampaignEncounter,
   getThreatBudget,
 } from '../src/content/encounters.js';
 
@@ -20,6 +21,17 @@ test('encounter content registers one complete authored template per objective t
   }
 });
 
+test('natural campaign rooms use the authored route-changing teaching sequence', () => {
+  assert.deepEqual(
+    Array.from({ length: 4 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'standard', seed: 77 }).type),
+    ['anchors', 'moving-zone', 'core-harvest', 'escort'],
+  );
+  assert.deepEqual(
+    Array.from({ length: 4 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'abyss', seed: 77 }).type),
+    Array.from({ length: 4 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'abyss', seed: 77 }).type),
+  );
+});
+
 test('threat budgets respect mode and quality caps without changing objective rules', () => {
   const template = getEncounterTemplate('purge-tide');
   const desktop = getThreatBudget(template, { mode: 'standard', quality: 'desktop' });
@@ -31,4 +43,3 @@ test('threat budgets respect mode and quality caps without changing objective ru
   assert.ok(mobile.activeEnemyCap <= 36);
   assert.ok(abyss.activeEnemyCap <= 56);
 });
-

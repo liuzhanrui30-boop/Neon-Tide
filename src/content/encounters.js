@@ -99,7 +99,15 @@ export function getThreatBudget(templateValue, { mode = 'standard', quality = 'd
   });
 }
 
-export function getCampaignEncounter(roomIndex = 0) {
+const STANDARD_CAMPAIGN_SEQUENCE = Object.freeze([
+  'anchor-break',
+  'moving-sanctum',
+  'core-harvest',
+  'escort-skiff',
+]);
+
+export function getCampaignEncounter(roomIndex = 0, { mode = 'standard', seed = 0 } = {}) {
   const index = Number.isInteger(roomIndex) ? Math.max(0, roomIndex) : 0;
-  return ENCOUNTER_TEMPLATES[index % ENCOUNTER_TEMPLATES.length];
+  const offset = mode === 'abyss' ? Math.abs(Math.trunc(Number(seed) || 0)) % STANDARD_CAMPAIGN_SEQUENCE.length : 0;
+  return getEncounterTemplate(STANDARD_CAMPAIGN_SEQUENCE[(index + offset) % STANDARD_CAMPAIGN_SEQUENCE.length]);
 }

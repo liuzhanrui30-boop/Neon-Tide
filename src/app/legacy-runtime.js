@@ -67,6 +67,7 @@ export function createLegacyRuntime({
   playerProjection = null,
   hudRenderer = null,
   entityRenderer = null,
+  compatibilityCampaign = false,
 }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
@@ -1676,7 +1677,10 @@ function registerEnemy(type, position, group, initialState, overrides = {}) {
   const config = ENEMY_TYPES[type] ?? ENEMY_TYPES.chaser;
   group.position.set(position.x, position.y, 2);
   world.add(group);
-  const sourceId = ++state.combatSourceSequence;
+  const requestedSourceId = Number(overrides.sourceId);
+  const sourceId = Number.isSafeInteger(requestedSourceId) && requestedSourceId > 0
+    ? requestedSourceId
+    : ++state.combatSourceSequence;
   const enemy = {
     type,
     group,
@@ -1864,7 +1868,7 @@ function createMine(position = randomShardPosition()) {
   });
 }
 
-function createElite(position = randomEdgePosition(1.1), type = "elite") {
+function createElite(position = randomEdgePosition(1.1), type = "elite", overrides = {}) {
   const group = new THREE.Group();
   const shockMaterial = shared.dangerRingMaterial.clone();
   const shockwave = new THREE.Mesh(shared.eliteShockGeometry, shockMaterial);
@@ -1887,6 +1891,7 @@ function createElite(position = randomEdgePosition(1.1), type = "elite") {
     visuals: { shockwave, shield, outer, body },
     ownedMaterials: [shockMaterial],
     priority: 3,
+    ...overrides,
   });
 }
 
@@ -1980,7 +1985,7 @@ function spawnEnemy(type = null, position = null, overrides = {}) {
   if (chosenType === "lancer") return createLancer(spawnPosition, overrides);
   if (chosenType === "mine") return createMine(spawnPosition, overrides);
   if (chosenType === "swarm") return createSwarm(spawnPosition, overrides.wingSign);
-  if (chosenType === "elite" || chosenType === "bulwark") return createElite(spawnPosition, chosenType);
+  if (chosenType === "elite" || chosenType === "bulwark") return createElite(spawnPosition, chosenType, overrides);
   if (chosenType === "boss") return createBoss();
   return createChaser(spawnPosition, overrides);
 }
@@ -2306,10 +2311,9 @@ function startGame() {
     resetState();
     enterStage(resumable.chapterIndex, false);
     pendingTransitionPayload = { resumedCheckpoint: true };
-    const resumed = session.startRoom({
-      id: "v3-checkpoint-entry",
-      chapterIndex: resumable.chapterIndex,
-    });
+    const resumed = session.startRoom(compatibilityCampaign
+      ? { id: `v2.2-compatibility-chapter-${resumable.chapterIndex}`, compatibility: true, chapterIndex: resumable.chapterIndex }
+      : { campaign: true, chapterIndex: resumable.chapterIndex });
     pendingTransitionPayload = null;
     if (resumed) {
       toast("章节信号已恢复", "cyan");
@@ -2320,7 +2324,9 @@ function startGame() {
   resetState();
   pendingTransitionPayload = { newRun: true };
   session.startRun("standard", Math.floor(performance.timeOrigin + performance.now()));
-  session.startRoom({ id: "v2.2-compatibility", chapterIndex: 0 });
+  session.startRoom(compatibilityCampaign
+    ? { id: "v2.2-compatibility-chapter-0", compatibility: true, chapterIndex: 0 }
+    : { campaign: true, chapterIndex: 0 });
   pendingTransitionPayload = null;
   toast("潮汐已接入", "cyan");
   audio.event("start");
@@ -2442,7 +2448,20 @@ function transitionTo(nextMode, payload = {}) {
   if (nextMode === "paused") changed = session.pause();
   else if (nextMode === "playing" && session.snapshot().mode === "paused") changed = session.resume();
   else if (nextMode === "playing" && session.snapshot().mode === "upgrade") {
-    changed = session.startRoom(session.snapshot().room ?? { id: "v2.2-compatibility", chapterIndex: state.stageIndex });
+    const completed = session.snapshot();
+    const completedRooms = completed.stats.roomsStarted;
+    if (completed.room?.compatibility) {
+      changed = session.startRoom({
+        id: `v2.2-compatibility-chapter-${completed.chapterIndex}`,
+        compatibility: true,
+        chapterIndex: completed.chapterIndex,
+      });
+    } else if (completedRooms < 4) {
+      changed = session.startRoom({ campaign: true, chapterIndex: Math.min(3, completedRooms) });
+    } else {
+      changed = session.startRoom({ id: "v2.2-boss-compatibility", compatibility: true, chapterIndex: 3 });
+      if (changed) beginBossStage();
+    }
   } else if (nextMode === "upgrade") changed = session.completeRoom({ nextMode: "upgrade", stageIndex: payload.stageIndex });
   else if (nextMode === "gameover") changed = session.completeRoom({ outcome: "defeat", reason: state.terminalReason });
   else if (nextMode === "victory") changed = session.completeRoom({ outcome: "victory", reason: state.terminalReason });
@@ -2493,6 +2512,9 @@ function applySession(snapshot) {
     if (nextMode !== "paused") clearLaserState();
     resetJoystick();
     audio.suspendBeat();
+  }
+  if (nextMode === "upgrade" && state.upgradeOptions.length === 0) {
+    state.upgradeOptions = [...pickUpgradeOptions(state.ownedUpgrades, Math.random, 3)];
   }
   renderMode(nextMode, previousMode, pendingTransitionPayload ?? {});
   return true;
@@ -2707,6 +2729,11 @@ function chooseUpgrade(upgradeId) {
   state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
   if (transitionTo("playing", { upgraded: true })) {
+    const nextChapter = session.snapshot().chapterIndex;
+    if (nextChapter !== state.stageIndex) {
+      state.stageQueue.length = 0;
+      enterStage(nextChapter);
+    }
     const presentation = REALM_PRESENTATION[state.stageIndex];
     showStageBanner(
       presentation?.title ?? STAGES[state.stageIndex].name,
@@ -4887,6 +4914,7 @@ function enterStage(nextStageIndex, showBanner = true) {
 }
 
 function updateStage() {
+  if (session.isObjectiveManaged()) return;
   const targetStageIndex = getStageIndex(state.elapsed);
   const queuedThrough = state.stageQueue.at(-1) ?? state.stageIndex;
   for (let index = Math.max(state.stageIndex, queuedThrough) + 1; index <= targetStageIndex; index += 1) {
@@ -4907,6 +4935,7 @@ function updateStage() {
   })) return;
   if (!session.startRoom({
     id: `v2.2-compatibility-chapter-${nextStageIndex}`,
+    compatibility: true,
     chapterIndex: nextStageIndex,
   })) return;
   enterStage(nextStageIndex);
@@ -5120,6 +5149,12 @@ function bossPartVulnerability(enemy) {
 }
 
 function ensureCombatObjective(entityWorld) {
+  if (session.isObjectiveManaged()) {
+    if (combatBridge.objectiveEntityId) entityWorld.despawn(combatBridge.objectiveEntityId);
+    combatBridge.objectiveEntityId = 0;
+    combatBridge.objective = null;
+    return null;
+  }
   const current = combatBridge.objective;
   if (!current || current.stageIndex !== state.stageIndex) {
     if (combatBridge.objectiveEntityId) entityWorld.despawn(combatBridge.objectiveEntityId);
@@ -5428,6 +5463,30 @@ function applyCombatSummary(entityWorld, summary) {
 
 function consumePresentationEvent(event) {
   if (!event || typeof event.type !== "string") return false;
+  if (event.type === "objective:spawn") {
+    const payload = event.payload ?? {};
+    if (payload.role === "elite-target" && Array.isArray(payload.targets)) {
+      for (const target of payload.targets) {
+        spawnEnemy("elite", new THREE.Vector2(target.x, target.y), {
+          sourceId: target.sourceId,
+          objectiveTargetId: target.id,
+          objectiveRoomId: payload.objectiveId,
+          objectiveRole: "elite-target",
+        });
+      }
+    } else if (payload.role === "purge") {
+      const count = Math.min(6, Math.max(0, Math.trunc(payload.count ?? 0)));
+      for (let index = 0; index < count; index += 1) {
+        const enemy = spawnEnemy();
+        if (enemy) enemy.objectiveRoomId = payload.objectiveId;
+      }
+    }
+  } else if (event.type === "objective:cleanup") {
+    clearEnvironmentAndProjectiles();
+    for (let index = enemies.length - 1; index >= 0; index -= 1) {
+      if (enemies[index]?.type !== "boss") removeEnemy(index);
+    }
+  }
   if (event.type === "weaponFire" || event.type === "weaponHit") combatBridge.consumedWeaponEvents += 1;
   if (event.type !== "weaponHit" || !combatBridge.pendingFeedback) return true;
   const feedback = combatBridge.pendingFeedback;
@@ -5499,7 +5558,9 @@ function simulate(dt) {
     state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (wallDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     const countdownTarget = state.bossDeadline ?? GAME.bossStart;
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
-    if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
+    if (state.mode === "playing" && !session.isObjectiveManaged() && state.timeLeft <= 0) {
+      finishRun("gameover", "bossDeadline");
+    }
     if (state.mode === "playing") {
       if (input.laserBuffer > 0) attemptLaser();
       updatePlayer(wallDt);

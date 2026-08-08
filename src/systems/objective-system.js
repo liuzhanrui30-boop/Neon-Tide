@@ -25,6 +25,12 @@ function createRandom(seed) {
   };
 }
 
+function stableSourceId(seed, kind, index = 0) {
+  let value = hashSeed(seed) ^ Math.imul(index + 1, 0x9e3779b1);
+  for (const character of kind) value = Math.imul(value ^ character.charCodeAt(0), 16777619) >>> 0;
+  return 0x20000000 + (value % 0x1fffffff);
+}
+
 function finite(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
@@ -88,18 +94,19 @@ function emit(events, type, payload) {
   events?.emit?.(type, Object.freeze(clone(payload)));
 }
 
-function eventKey(event, index) {
-  const payload = event?.payload ?? event ?? {};
-  return `${event?.type ?? 'event'}:${payload.id ?? payload.targetId ?? payload.targetSourceId ?? payload.sourceId ?? index}`;
-}
-
 function newEvents(objective, events, predicate) {
   const result = [];
-  for (const [index, event] of eventInput(events).entries()) {
+  for (const event of eventInput(events)) {
     if (!predicate(event, event?.payload ?? event ?? {})) continue;
-    const key = eventKey(event, index);
-    if (objective._seenEvents.has(key)) continue;
-    objective._seenEvents.add(key);
+    const sequence = Number(event?.sequence);
+    if (Number.isSafeInteger(sequence) && sequence > 0) {
+      if (objective._seenEventSequences.has(sequence)) continue;
+      objective._seenEventSequences.add(sequence);
+      objective._seenEventOrder.push(sequence);
+      if (objective._seenEventOrder.length > 128) {
+        objective._seenEventSequences.delete(objective._seenEventOrder.shift());
+      }
+    }
     result.push(event?.payload ?? event ?? {});
   }
   return result;
@@ -130,7 +137,9 @@ function setupObjective(template, seed) {
     cleanup: clone(template.cleanup ?? []),
     _spawned: false,
     _cleaned: false,
-    _seenEvents: new Set(),
+    _seenEventSequences: new Set(),
+    _seenEventOrder: [],
+    _lastProgressEventKey: null,
   };
 
   if (template.type === 'purge') {
@@ -139,6 +148,7 @@ function setupObjective(template, seed) {
     const count = Math.max(2, Math.min(4, Math.trunc(positive(template.anchorCount, 3))));
     base.anchors = radialPoints(random, count, 3.5, 6.1).map((entry, index) => ({
       ...entry, id: `anchor-${index + 1}`, radius: positive(template.anchorRadius, 1.55),
+      sourceId: stableSourceId(base.seed, 'anchor', index),
       charge: 0, requiredSeconds: positive(template.anchorSeconds, 1.4), completed: false,
     }));
     base.target = count;
@@ -148,7 +158,10 @@ function setupObjective(template, seed) {
     base.path = routeFromPoints(nodes);
     base.pathSpeed = positive(template.pathSpeed, 2.2);
     base.routeDistance = random() * Math.max(0, base.path.at(-1).distance);
-    base.safeZone = { ...interpolateRoute(base.path, base.routeDistance, true), radius: positive(template.zoneRadius, 2.15), kind: 'moving-zone' };
+    base.safeZone = {
+      ...interpolateRoute(base.path, base.routeDistance, true), radius: positive(template.zoneRadius, 2.15),
+      kind: 'moving-zone', sourceId: stableSourceId(base.seed, 'moving-zone'),
+    };
     base.target = positive(template.holdSeconds, 12);
   } else if (template.type === 'escort') {
     const angle = random() * TAU;
@@ -167,20 +180,26 @@ function setupObjective(template, seed) {
     const start = interpolateRoute(route, 0);
     base.escort = {
       ...start, route, routeDistance: 0, routeLength: route.at(-1).distance,
+      sourceId: stableSourceId(base.seed, 'escort'),
       speed: positive(template.escortSpeed, 2.4), supportRadius: positive(template.supportRadius, 2.8),
       hp: positive(template.escortHp, 12), maxHp: positive(template.escortHp, 12), completed: false,
     };
     base.target = positive(template.escortDistance, base.escort.routeLength);
   } else if (template.type === 'elite-hunt') {
     base.target = Math.max(1, Math.trunc(positive(template.eliteTarget, 2)));
-    base.eliteIds = Array.from({ length: base.target }, (_, index) => `elite-${index + 1}`);
+    base.eliteTargets = radialPoints(random, base.target, 3.2, 5.2).map((entry, index) => ({
+      ...entry,
+      id: `elite-${index + 1}`,
+      sourceId: stableSourceId(base.seed, 'elite', index),
+    }));
+    base.eliteIds = base.eliteTargets.map(({ id }) => id);
   } else if (template.type === 'storm-corridor') {
     const count = Math.max(2, Math.trunc(positive(template.corridorSegments, 6)));
     const width = positive(template.corridorWidth, 2.7);
     const horizontal = random() >= 0.5;
     const direction = random() >= 0.5 ? 1 : -1;
     base.corridor = {
-      horizontal, direction, width, activeSegment: 0,
+      horizontal, direction, width, activeSegment: direction > 0 ? 0 : count - 1,
       segments: Array.from({ length: count }, (_, index) => ({
         id: `storm-${index + 1}`,
         x: horizontal ? -arena.halfWidth + ((index + 0.5) / count) * arena.halfWidth * 2 : (random() - 0.5) * 4,
@@ -190,11 +209,16 @@ function setupObjective(template, seed) {
     };
     base.target = positive(template.survivalSeconds, 18);
     const first = base.corridor.segments[direction > 0 ? 0 : count - 1];
-    base.safeZone = { ...first, radius: width, kind: 'storm-corridor' };
+    base.safeZone = { ...first, radius: width, kind: 'storm-corridor', sourceId: stableSourceId(base.seed, 'storm-active') };
+    const nextIndex = direction > 0 ? Math.min(count - 1, 1) : Math.max(0, count - 2);
+    base.nextSafeZone = { ...base.corridor.segments[nextIndex], radius: width, kind: 'storm-telegraph' };
+    base.stormExposure = 0;
+    base.stormGraceSeconds = positive(template.stormGraceSeconds, 2.5);
   } else if (template.type === 'core-harvest') {
     const count = Math.max(2, Math.trunc(positive(template.coreCount, 5)));
     base.cores = radialPoints(random, count, 2.6, 6.4).map((entry, index) => ({
       ...entry, id: `core-${index + 1}`, radius: positive(template.collectRadius, 1.15), collected: false,
+      sourceId: stableSourceId(base.seed, 'core', index),
     }));
     base.target = count;
   } else if (template.type === 'dual-crisis') {
@@ -204,6 +228,7 @@ function setupObjective(template, seed) {
       const angle = rotation + index * Math.PI;
       return point(Math.cos(angle) * (4.4 + random()), Math.sin(angle) * (3.2 + random()), {
         id: `crisis-${index + 1}`, variant: variants[index], radius: positive(template.crisisRadius, 1.7),
+        sourceId: stableSourceId(base.seed, 'crisis', index),
         charge: 0, requiredSeconds: positive(template.crisisSeconds, 3.2), completed: false, escalated: false,
       });
     });
@@ -278,28 +303,56 @@ function updateEscort(objective, player, dt, events) {
 function updateElite(objective, events) {
   const kills = newEvents(objective, events, (event, payload) => (
     ['elite:destroyed', 'eliteDestroyed'].includes(event?.type)
-    || (['enemy:destroyed', 'enemyDestroyed', 'kill'].includes(event?.type) && (payload.elite || payload.role === 'elite-target' || payload.type === 'elite'))
+    || (['enemy:destroyed', 'enemyDestroyed', 'kill'].includes(event?.type)
+      && objective.eliteTargets.some((target) => target.id === payload.id
+        || target.sourceId === payload.sourceId || target.sourceId === payload.targetSourceId))
   ));
   objective.progress += kills.length;
 }
 
 function updateStorm(objective, player, dt) {
   if (player?.dead || finite(player?.hull, 1) <= 0 || finite(player?.hp, 1) <= 0) return 'player-destroyed';
-  objective.progress += dt;
   const count = objective.corridor.segments.length;
-  const normalized = Math.min(0.999999, objective.progress / objective.target);
-  const logical = Math.floor(normalized * count);
-  const index = objective.corridor.direction > 0 ? logical : count - 1 - logical;
-  objective.corridor.activeSegment = index;
-  Object.assign(objective.safeZone, objective.corridor.segments[index]);
+  let remaining = dt;
+  // Segment the update so a large frame cannot skip every corridor gate while
+  // the pilot remains parked in the first safe zone.
+  while (remaining > EPSILON) {
+    const step = Math.min(remaining, 0.1);
+    if (distanceTo(player, objective.safeZone) <= objective.safeZone.radius) {
+      objective.progress += step;
+      objective.stormExposure = Math.max(0, objective.stormExposure - step * 2);
+    } else {
+      objective.progress = Math.max(0, objective.progress - step * 0.5);
+      objective.stormExposure += step;
+      if (objective.stormExposure >= objective.stormGraceSeconds - EPSILON) return 'storm-exposure';
+    }
+    const normalized = Math.min(0.999999, objective.progress / objective.target);
+    const logical = Math.floor(normalized * count);
+    const index = objective.corridor.direction > 0 ? logical : count - 1 - logical;
+    objective.corridor.activeSegment = index;
+    Object.assign(objective.safeZone, objective.corridor.segments[index]);
+    const next = Math.max(0, Math.min(count - 1, index + objective.corridor.direction));
+    Object.assign(objective.nextSafeZone, objective.corridor.segments[next]);
+    remaining -= step;
+  }
   return null;
 }
 
 function updateHarvest(objective, player, events) {
   const collected = newEvents(objective, events, (event) => ['core:collected', 'pickupCollected'].includes(event?.type));
   for (const payload of collected) {
-    const core = objective.cores.find(({ id }) => id === payload.id) ?? objective.cores.find(({ collected: done }) => !done);
-    if (core) core.collected = true;
+    const ids = Array.isArray(payload.ids) ? payload.ids : payload.id != null ? [payload.id] : [];
+    for (const id of ids) {
+      const core = objective.cores.find((entry) => entry.id === id || entry.sourceId === id);
+      if (core) core.collected = true;
+    }
+    let remaining = Math.max(0, Math.trunc(finite(payload.count, ids.length || 1)) - ids.length);
+    while (remaining > 0) {
+      const core = objective.cores.find(({ collected: done }) => !done);
+      if (!core) break;
+      core.collected = true;
+      remaining -= 1;
+    }
   }
   for (const core of objective.cores) {
     if (!core.collected && distanceTo(player, core) <= core.radius) core.collected = true;
@@ -333,7 +386,10 @@ export function updateObjective(objective, world, player, dt, events = null) {
   if (objective.status !== 'active') return getObjectiveSnapshot(objective);
   if (!objective._spawned) {
     objective._spawned = true;
-    for (const hook of objective.spawnHooks) emit(events, 'objective:spawn', { objectiveId: objective.id, ...hook, seed: objective.seed });
+    for (const hook of objective.spawnHooks) emit(events, 'objective:spawn', {
+      objectiveId: objective.id, objectiveType: objective.type, ...hook, seed: objective.seed,
+      targets: objective.type === 'elite-hunt' ? objective.eliteTargets : undefined,
+    });
   }
 
   objective.elapsed += seconds;
@@ -352,7 +408,16 @@ export function updateObjective(objective, world, player, dt, events = null) {
   if (failureReason) finish(objective, events, 'failed', failureReason);
   else if (objective.progress >= objective.target - EPSILON) finish(objective, events, 'completed');
   else if (objective.elapsed >= objective.timeout - EPSILON) finish(objective, events, 'failed', 'timeout');
-  else emit(events, 'objective:progress', getObjectiveSnapshot(objective));
+  else {
+    const progressEventKey = `${Math.floor(objective.progressRatio * 20)}:${Math.floor(objective.timeoutRemaining)}`;
+    if (progressEventKey !== objective._lastProgressEventKey) {
+      objective._lastProgressEventKey = progressEventKey;
+      emit(events, 'objective:progress', {
+        id: objective.id, type: objective.type, status: objective.status,
+        progress: objective.progress, target: objective.target, progressRatio: objective.progressRatio,
+      });
+    }
+  }
   return getObjectiveSnapshot(objective);
 }
 

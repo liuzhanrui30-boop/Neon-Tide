@@ -17,10 +17,29 @@ function roomSeed(seed, roomIndex, templateId) {
   return value;
 }
 
-export function createEncounterDirector({ mode = 'standard', quality = 'desktop', seed = 0, roomIndex: initialRoomIndex = 0 } = {}) {
+function scaledTemplate(template, scale) {
+  if (scale >= 0.999) return template;
+  return {
+    ...template,
+    timeout: Math.max(6, template.timeout * scale),
+    killTarget: Math.max(3, Math.ceil((template.killTarget ?? 1) * scale)),
+    anchorSeconds: Math.max(0.2, (template.anchorSeconds ?? 1) * scale),
+    holdSeconds: Math.max(1, (template.holdSeconds ?? 1) * scale),
+    escortDistance: Math.max(3, (template.escortDistance ?? 1) * scale),
+    eliteTarget: Math.max(1, Math.ceil((template.eliteTarget ?? 1) * scale)),
+    survivalSeconds: Math.max(2, (template.survivalSeconds ?? 1) * scale),
+    coreCount: Math.max(2, Math.ceil((template.coreCount ?? 2) * scale)),
+    crisisSeconds: Math.max(0.4, (template.crisisSeconds ?? 1) * scale),
+  };
+}
+
+export function createEncounterDirector({
+  mode = 'standard', quality = 'desktop', seed = 0, roomIndex: initialRoomIndex = 0, durationScale = 1,
+} = {}) {
   if (!['standard', 'abyss'].includes(mode)) throw new TypeError('encounter mode must be standard or abyss');
   if (!Number.isFinite(Number(seed))) throw new TypeError('encounter seed must be finite');
   if (!Number.isInteger(initialRoomIndex) || initialRoomIndex < 0) throw new TypeError('encounter roomIndex must be a non-negative integer');
+  if (!Number.isFinite(durationScale) || durationScale <= 0 || durationScale > 1) throw new TypeError('durationScale must be in (0, 1]');
   const qualityName = typeof quality === 'string' ? quality : quality?.tier ?? 'desktop';
   let roomIndex = initialRoomIndex;
   let phase = 'idle';
@@ -30,6 +49,7 @@ export function createEncounterDirector({ mode = 'standard', quality = 'desktop'
   let combatFrozen = false;
   let upgradeOffered = false;
   let completionAcknowledged = false;
+  let updateRevision = 0;
 
   function getSnapshot() {
     return Object.freeze({
@@ -47,7 +67,8 @@ export function createEncounterDirector({ mode = 'standard', quality = 'desktop'
   }
 
   function startRoom(templateValue) {
-    const template = getEncounterTemplate(templateValue);
+    const authored = getEncounterTemplate(templateValue);
+    const template = authored ? scaledTemplate(authored, durationScale) : null;
     if (!template) throw new TypeError('startRoom requires a known encounter template');
     const currentIndex = roomIndex;
     objective = createObjective(template, roomSeed(seed, currentIndex, template.id));
@@ -58,11 +79,15 @@ export function createEncounterDirector({ mode = 'standard', quality = 'desktop'
     combatFrozen = false;
     upgradeOffered = false;
     completionAcknowledged = false;
+    updateRevision += 1;
     return getSnapshot();
   }
 
   function update(context = {}, dt = 0, events = null) {
-    if (phase === 'idle' || completionAcknowledged) return getSnapshot();
+    if (phase === 'idle' || completionAcknowledged) return Object.freeze({ phase, combatFrozen, updateRevision, changed: false });
+    const previousPhase = phase;
+    const previousStatus = objective?.status;
+    const previousProgressBucket = Math.floor((objective?.progressRatio ?? 0) * 20);
     let enteredDraining = false;
     if (phase === 'active') {
       updateObjective(objective, context.world ?? null, context.player ?? null, dt, events);
@@ -82,7 +107,17 @@ export function createEncounterDirector({ mode = 'standard', quality = 'desktop'
       upgradeOffered = true;
       emit(events, 'encounter:upgrade-offered', { templateId, objective: getObjectiveSnapshot(objective) });
     }
-    return getSnapshot();
+    updateRevision += 1;
+    return Object.freeze({
+      phase,
+      combatFrozen,
+      updateRevision,
+      changed: phase !== previousPhase || objective?.status !== previousStatus
+        || Math.floor((objective?.progressRatio ?? 0) * 20) !== previousProgressBucket,
+      objectiveStatus: objective?.status ?? null,
+      progress: objective?.progress ?? 0,
+      progressRatio: objective?.progressRatio ?? 0,
+    });
   }
 
   function completeRoom() {
@@ -100,8 +135,12 @@ export function createEncounterDirector({ mode = 'standard', quality = 'desktop'
     combatFrozen = false;
     upgradeOffered = false;
     completionAcknowledged = false;
+    updateRevision += 1;
     return getSnapshot();
   }
 
-  return Object.freeze({ startRoom, update, completeRoom, reset, getSnapshot });
+  return Object.freeze({
+    startRoom, update, completeRoom, reset, getSnapshot,
+    getLiveObjective: () => objective,
+  });
 }

@@ -60,6 +60,7 @@ export function createGameSession(options = {}) {
   const deterministicTestMode = options.deterministicTestMode ?? options.deterministic ?? false;
   const seedFactory = options.seedFactory ?? (() => Math.floor(Date.now() + Math.random() * 0x7fffffff));
   const encounterQuality = options.encounterQuality ?? options.quality ?? 'desktop';
+  const encounterDurationScale = options.encounterDurationScale ?? 1;
   const encounterDirectorFactory = options.encounterDirectorFactory
     ?? ((configuration) => createEncounterDirector(configuration));
   const baseMaxHull = options.maxHull ?? 3;
@@ -74,10 +75,12 @@ export function createGameSession(options = {}) {
   if (typeof seedFactory !== 'function') throw new TypeError('seedFactory must be a function');
   if (typeof encounterDirectorFactory !== 'function') throw new TypeError('encounterDirectorFactory must be a function');
 
-  let encounterDirector = encounterDirectorFactory({ mode: 'standard', quality: encounterQuality, seed: 0 });
+  let encounterDirector = encounterDirectorFactory({
+    mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
+  });
   if (!encounterDirector || typeof encounterDirector.startRoom !== 'function' || typeof encounterDirector.update !== 'function'
     || typeof encounterDirector.completeRoom !== 'function' || typeof encounterDirector.reset !== 'function'
-    || typeof encounterDirector.getSnapshot !== 'function') {
+    || typeof encounterDirector.getSnapshot !== 'function' || typeof encounterDirector.getLiveObjective !== 'function') {
     throw new TypeError('encounterDirectorFactory must return an encounter director');
   }
 
@@ -94,6 +97,8 @@ export function createGameSession(options = {}) {
     terminalReason: null,
     revision: 0,
   };
+  let objectivePublishElapsed = 0;
+  let lastObjectivePublishKey = null;
 
   function snapshot() {
     return Object.freeze({
@@ -196,6 +201,7 @@ export function createGameSession(options = {}) {
     state.terminalReason = null;
     encounterDirector = encounterDirectorFactory({
       mode: 'standard', quality: encounterQuality, seed: checkpoint.seed, roomIndex: checkpoint.stats.roomsStarted,
+      durationScale: encounterDurationScale,
     });
     const restored = publishTransition(previous, 'briefing', {
       checkpointRestored: true,
@@ -237,7 +243,9 @@ export function createGameSession(options = {}) {
     state.maxHull = baseMaxHull;
     state.stats = createStats();
     state.terminalReason = null;
-    encounterDirector = encounterDirectorFactory({ mode: runMode, quality: encounterQuality, seed });
+    encounterDirector = encounterDirectorFactory({
+      mode: runMode, quality: encounterQuality, seed, durationScale: encounterDurationScale,
+    });
     // A new attempt must never inherit an older Standard checkpoint. Abyss
     // additionally guarantees that it cannot expose a stale Continue path.
     runSave?.clear();
@@ -250,7 +258,11 @@ export function createGameSession(options = {}) {
   function startRoom(room) {
     if (!room || typeof room !== 'object' || Array.isArray(room)) throw new TypeError('room must be a room object');
     if (!['briefing', 'upgrade', 'chapterComplete'].includes(state.mode)) return invalid('playing');
-    const authoredTemplate = getEncounterTemplate(room);
+    const explicitTemplate = getEncounterTemplate(room);
+    const compatibility = room.compatibility === true;
+    const authoredTemplate = explicitTemplate ?? (!compatibility
+      ? getCampaignEncounter(state.stats.roomsStarted, { mode: state.runMode, seed: state.seed })
+      : null);
     const compatibilityTemplate = authoredTemplate ?? {
       ...getCampaignEncounter(state.stats.roomsStarted),
       id: String(room.id ?? `room-${state.stats.roomsStarted + 1}`),
@@ -263,12 +275,14 @@ export function createGameSession(options = {}) {
     state.room = {
       ...cloneValue(room),
       templateId: authoredTemplate?.id ?? compatibilityTemplate.id,
-      objectiveManaged: Boolean(authoredTemplate),
+      objectiveManaged: !compatibility,
       objective: cloneValue(encounter.objective),
       threatBudget: cloneValue(encounter.threatBudget),
       encounterPhase: encounter.phase,
       combatFrozen: encounter.combatFrozen,
     };
+    objectivePublishElapsed = 0;
+    lastObjectivePublishKey = null;
     if (Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0) state.chapterIndex = room.chapterIndex;
     state.stats.roomsStarted += 1;
     const changed = transition('playing', { room: state.room });
@@ -278,24 +292,34 @@ export function createGameSession(options = {}) {
 
   function updateRoom(context = {}, dt = 0, objectiveEvents = null) {
     if (state.mode !== 'playing' || !state.room) return false;
-    const encounter = encounterDirector.update(context, dt, objectiveEvents);
-    const previous = snapshot();
-    state.room.objective = cloneValue(encounter.objective);
-    state.room.threatBudget = cloneValue(encounter.threatBudget);
-    state.room.encounterPhase = encounter.phase;
-    state.room.combatFrozen = encounter.combatFrozen;
-    state.revision += 1;
-    const current = snapshot();
-    const changeRecord = Object.freeze({ previous, current, detail: Object.freeze({ objectiveUpdated: true }) });
-    events?.emit('session:changed', changeRecord);
-    onChange(changeRecord);
-    if (encounter.phase === 'failed') {
-      return completeRoom({ outcome: 'defeat', reason: encounter.objective?.failureReason ?? 'objectiveFailed' });
+    const update = encounterDirector.update(context, dt, objectiveEvents);
+    const liveObjective = encounterDirector.getLiveObjective();
+    objectivePublishElapsed += Math.max(0, Number(dt) || 0);
+    const publishKey = `${update.phase}:${liveObjective?.status}:${Math.floor((liveObjective?.progressRatio ?? 0) * 20)}:${Math.floor(liveObjective?.timeoutRemaining ?? 0)}`;
+    const shouldPublish = update.changed || publishKey !== lastObjectivePublishKey || objectivePublishElapsed >= 0.25;
+    let current = null;
+    if (shouldPublish) {
+      const encounter = encounterDirector.getSnapshot();
+      const previous = snapshot();
+      state.room.objective = cloneValue(encounter.objective);
+      state.room.threatBudget = cloneValue(encounter.threatBudget);
+      state.room.encounterPhase = encounter.phase;
+      state.room.combatFrozen = encounter.combatFrozen;
+      state.revision += 1;
+      current = snapshot();
+      const changeRecord = Object.freeze({ previous, current, detail: Object.freeze({ objectiveUpdated: true }) });
+      events?.emit('session:changed', changeRecord);
+      onChange(changeRecord);
+      objectivePublishElapsed = 0;
+      lastObjectivePublishKey = publishKey;
     }
-    if (encounter.phase === 'complete' && encounterDirector.completeRoom()) {
-      return completeRoom({ nextMode: 'upgrade', objective: encounter.objective, score: 100 });
+    if (update.phase === 'failed') {
+      return completeRoom({ outcome: 'defeat', reason: liveObjective?.failureReason ?? 'objectiveFailed' });
     }
-    return current;
+    if (update.phase === 'complete' && encounterDirector.completeRoom()) {
+      return completeRoom({ nextMode: 'upgrade', objective: cloneValue(liveObjective), score: 100 });
+    }
+    return current ?? update;
   }
 
   function pause() {
@@ -314,9 +338,6 @@ export function createGameSession(options = {}) {
       const requested = result.outcome === 'victory' ? 'victory' : result.outcome === 'defeat' ? 'defeat' : result.nextMode ?? 'chapterComplete';
       return invalid(requested);
     }
-    state.stats.roomsCompleted += 1;
-    if (Number.isFinite(result.score)) state.stats.score += result.score;
-    if (Number.isInteger(result.chapterIndex) && result.chapterIndex >= 0) state.chapterIndex = result.chapterIndex;
     const nextMode = result.outcome === 'victory'
       ? 'victory'
       : result.outcome === 'defeat'
@@ -325,6 +346,9 @@ export function createGameSession(options = {}) {
     if (!['upgrade', 'chapterComplete', 'victory', 'defeat'].includes(nextMode)) {
       throw new TypeError('room completion nextMode must be upgrade, chapterComplete, victory, or defeat');
     }
+    if (nextMode !== 'defeat') state.stats.roomsCompleted += 1;
+    if (nextMode !== 'defeat' && Number.isFinite(result.score)) state.stats.score += result.score;
+    if (Number.isInteger(result.chapterIndex) && result.chapterIndex >= 0) state.chapterIndex = result.chapterIndex;
     if (nextMode === 'victory' || nextMode === 'defeat') state.terminalReason = result.reason ?? nextMode;
     if (nextMode === 'defeat') state.hull = 0;
     let checkpoint = null;
@@ -470,7 +494,11 @@ export function createGameSession(options = {}) {
       terminalReason: null,
       revision: previous.revision + 1,
     };
-    encounterDirector = encounterDirectorFactory({ mode: 'standard', quality: encounterQuality, seed: 0 });
+    encounterDirector = encounterDirectorFactory({
+      mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
+    });
+    objectivePublishElapsed = 0;
+    lastObjectivePublishKey = null;
     events?.clear?.();
     const current = snapshot();
     const transitionRecord = Object.freeze({ previous, current, detail: { reset: true } });
@@ -495,6 +523,10 @@ export function createGameSession(options = {}) {
     reset,
     restoreCheckpoint,
     getEncounterSnapshot: () => encounterDirector.getSnapshot(),
+    getLiveEncounterObjective: () => encounterDirector.getLiveObjective(),
+    getMode: () => state.mode,
+    isObjectiveManaged: () => Boolean(state.room?.objectiveManaged),
+    isCombatFrozen: () => Boolean(state.room?.combatFrozen),
     getPersistenceStatus: () => runSave?.getStatus?.() ?? null,
     snapshot,
   });

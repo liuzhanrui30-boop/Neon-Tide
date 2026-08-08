@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import { APP_URL, PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_MS, withPage } from './harness.mjs';
 
+const COMPATIBILITY_URL = new URL('?compatibility-test', APP_URL).href;
+const withLegacyPage = (name, options, callback) => withPage(name, { ...options, appUrl: COMPATIBILITY_URL }, callback);
+
 async function desktopCoreScenario() {
-  await withPage('desktop-core', {}, async (page) => {
+  await withLegacyPage('desktop-core', {}, async (page) => {
     const load = await page.evaluate(`(()=>{
       const root=document.documentElement;
       return {
@@ -343,6 +346,8 @@ async function desktopCoreScenario() {
     // beginUpgrade while a debugger frame is paused can defer its focus
     // callback in headless Chrome and does not represent player input.
     await page.gameEvaluate(`
+      session.completeRoom({nextMode:'upgrade',stageIndex:0});
+      session.startRoom({id:'v2.2-browser-compatibility',compatibility:true,chapterIndex:0});
       $state.stageIndex=0;
       $state.stageQueue=[];
       $state.upgradeTriggered=[false,false];
@@ -457,7 +462,7 @@ async function desktopCoreScenario() {
 }
 
 async function briefingAndLaserUiScenario() {
-  await withPage('briefing-and-laser-ui', {}, async (page) => {
+  await withLegacyPage('briefing-and-laser-ui', {}, async (page) => {
     const briefing = await page.evaluate(`(()=>{
       const overlay=document.querySelector('#overlay');
       const copy=document.querySelector('#overlay-copy').textContent.replace(/\s+/g,' ').trim();
@@ -503,7 +508,7 @@ async function briefingAndLaserUiScenario() {
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
   });
 
-  await withPage('briefing-and-laser-phone', {
+  await withLegacyPage('briefing-and-laser-phone', {
     width: 390,
     height: 844,
     deviceScaleFactor: 2,
@@ -559,7 +564,7 @@ async function briefingAndLaserUiScenario() {
 }
 
 async function chargedLightLanceScenario() {
-  await withPage('charged-light-lance', {}, async (page) => {
+  await withLegacyPage('charged-light-lance', {}, async (page) => {
     page.requireDev('pickup-charged light lance runtime probe');
     await page.startGame();
     const pickupContract = await page.gameEvaluate(`
@@ -740,7 +745,7 @@ async function chargedLightLanceScenario() {
 }
 
 async function lightLanceCombatContractsScenario() {
-  await withPage('light-lance-combat-contracts', {}, async (page) => {
+  await withLegacyPage('light-lance-combat-contracts', {}, async (page) => {
     page.requireDev('light lance damage, quota, execution, recovery, and dash contracts');
     await page.startGame();
     const contracts = await page.gameEvaluate(`
@@ -867,7 +872,7 @@ async function lightLanceCombatContractsScenario() {
 }
 
 async function naturalLightLanceLifecycleScenario() {
-  await withPage('natural-light-lance-lifecycle', {}, async (page) => {
+  await withLegacyPage('natural-light-lance-lifecycle', {}, async (page) => {
     page.requireDev('natural light lance lifecycle and boundary input probe');
     await page.startGame();
     await page.gameEvaluate(`
@@ -967,7 +972,7 @@ function layoutSnapshotExpression() {
 }
 
 async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
-  await withPage(name, { width, height, deviceScaleFactor, mobile: true, touch: true }, async (page) => {
+  await withLegacyPage(name, { width, height, deviceScaleFactor, mobile: true, touch: true }, async (page) => {
     await page.startGame();
     const layout = await page.evaluate(layoutSnapshotExpression());
     assert.equal(layout.coarse, true, `${name}: pointer is not coarse`);
@@ -1002,7 +1007,7 @@ async function coarseLayoutScenario(name, width, height, deviceScaleFactor) {
 
 
 async function highPressureCombatScenario() {
-  await withPage('high-pressure-combat', {}, async (page) => {
+  await withLegacyPage('high-pressure-combat', {}, async (page) => {
     page.requireDev('high-pressure combat statistics probe');
     await page.startGame();
     const snapshot = await page.gameEvaluate(`
@@ -1072,7 +1077,7 @@ async function highPressureCombatScenario() {
 }
 
 async function realmHazardsAndAttackVariantsScenario() {
-  await withPage('realm-hazards-and-attack-variants', {}, async (page) => {
+  await withLegacyPage('realm-hazards-and-attack-variants', {}, async (page) => {
     page.requireDev('environment, projectile pool, and expanded attack contracts');
     await page.startGame();
     const contracts = await page.gameEvaluate(`
@@ -1446,7 +1451,7 @@ async function realmHazardsAndAttackVariantsScenario() {
 }
 
 async function reviewedCombatContractsScenario() {
-  await withPage('reviewed-combat-contracts', {}, async (page) => {
+  await withLegacyPage('reviewed-combat-contracts', {}, async (page) => {
     page.requireDev('beam, material ownership, armor, mine pulse, and enemy trail contracts');
     await page.startGame();
     const contracts = await page.gameEvaluate(`
@@ -1507,7 +1512,7 @@ async function reviewedCombatContractsScenario() {
 }
 
 async function reducedMotionScenario() {
-  await withPage('reduced-motion', { reducedMotion: true }, async (page) => {
+  await withLegacyPage('reduced-motion', { reducedMotion: true }, async (page) => {
     page.requireDev('reduced-motion warning probe');
     await page.startGame();
     assert.equal(await page.evaluate(`matchMedia('(prefers-reduced-motion: reduce)').matches`), true);
@@ -1575,7 +1580,7 @@ async function reducedMotionScenario() {
 }
 
 async function renderQualityScenario() {
-  await withPage('render-quality-desktop', {}, async (page) => {
+  await withLegacyPage('render-quality-desktop', {}, async (page) => {
     page.requireDev('desktop render-quality probe');
     await page.startGame();
     const quality = await page.gameEvaluate(`return {
@@ -1588,7 +1593,7 @@ async function renderQualityScenario() {
     assert.deepEqual(quality, { tier:'desktop', selected:'desktop', composer:true, bloom:true, output:true });
   });
 
-  await withPage('render-quality-coarse', { width:1024, height:768, mobile:true, touch:true }, async (page) => {
+  await withLegacyPage('render-quality-coarse', { width:1024, height:768, mobile:true, touch:true }, async (page) => {
     page.requireDev('coarse render-quality probe');
     await page.startGame();
     const quality = await page.gameEvaluate(`return {
@@ -1599,7 +1604,7 @@ async function renderQualityScenario() {
     assert.deepEqual(quality, { tier:'mobile', selected:'mobile', composer:false });
   });
 
-  await withPage('render-quality-reduced-motion', { reducedMotion:true }, async (page) => {
+  await withLegacyPage('render-quality-reduced-motion', { reducedMotion:true }, async (page) => {
     page.requireDev('reduced-motion render-quality probe');
     await page.startGame();
     const quality = await page.gameEvaluate(`return {
@@ -1613,7 +1618,7 @@ async function renderQualityScenario() {
 
 async function realmArtDirectionsScenario() {
   let desktopObjectCounts = null;
-  await withPage('realm-art-directions-desktop', {}, async (page) => {
+  await withLegacyPage('realm-art-directions-desktop', {}, async (page) => {
     page.requireDev('realm crossfade, boundary, reset, banner, and lifecycle probes');
     await page.startGame();
 
@@ -2166,7 +2171,7 @@ async function realmArtDirectionsScenario() {
   });
 
   let mobileObjectCounts = null;
-  await withPage('realm-art-directions-coarse', {
+  await withLegacyPage('realm-art-directions-coarse', {
     width: 390,
     height: 844,
     mobile: true,
@@ -2228,7 +2233,7 @@ async function realmArtDirectionsScenario() {
 }
 
 async function runtimeGuardScenario() {
-  await withPage('runtime-guards', {}, async (page) => {
+  await withLegacyPage('runtime-guards', {}, async (page) => {
     page.requireDev('runtime guard, cap, and listener lifecycle probe');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -2459,7 +2464,7 @@ async function runtimeGuardScenario() {
 }
 
 async function repairAndAriaScenario() {
-  await withPage('repair-aria', { forcedColors:true }, async (page) => {
+  await withLegacyPage('repair-aria', { forcedColors:true }, async (page) => {
     page.requireDev('Repair Swarm and combat ARIA probe');
     await page.startGame();
     const repair = await page.gameEvaluate(`
@@ -2571,7 +2576,7 @@ async function repairAndAriaScenario() {
 }
 
 async function replayCleanupScenario() {
-  await withPage('replay-cleanup', {}, async (page) => {
+  await withLegacyPage('replay-cleanup', {}, async (page) => {
     page.requireDev('replay cleanup probe');
     await page.startGame();
     const reset = await page.gameEvaluate(`
@@ -2683,7 +2688,7 @@ async function jumpToBoss(page) {
 }
 
 async function victoryScenario() {
-  await withPage('victory', {}, async (page) => {
+  await withLegacyPage('victory', {}, async (page) => {
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const boss = await jumpToBoss(page);
@@ -2736,7 +2741,7 @@ async function victoryScenario() {
 }
 
 async function bossTimeoutScenario() {
-  await withPage('boss-timeout', {}, async (page) => {
+  await withLegacyPage('boss-timeout', {}, async (page) => {
     await page.startGame();
     const boss = await jumpToBoss(page);
     assert.equal(boss.mode, 'playing');
@@ -2758,7 +2763,7 @@ async function bossTimeoutScenario() {
 }
 
 async function bossPhaseTwoScenario() {
-  await withPage('boss-phase-two', {}, async (page) => {
+  await withLegacyPage('boss-phase-two', {}, async (page) => {
     await page.startGame();
     const timing = await page.gameEvaluate(`return {
       boundaries:[0,30,64,100].map((seconds)=>({seconds,stage:getStageIndex(seconds)})),
@@ -2964,7 +2969,7 @@ async function bossPhaseTwoScenario() {
 
 
 async function finalBulwarkAndWarningOwnershipScenario() {
-  await withPage('final-bulwark-warning-ownership', {}, async (page) => {
+  await withLegacyPage('final-bulwark-warning-ownership', {}, async (page) => {
     page.requireDev('natural Bulwark and per-enemy warning ownership probes');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -3133,7 +3138,7 @@ async function finalBulwarkAndWarningOwnershipScenario() {
 }
 
 async function finalNativeControlActivationScenario() {
-  await withPage('final-native-controls', { width:390,height:844,deviceScaleFactor:2,mobile:true,touch:true }, async (page) => {
+  await withLegacyPage('final-native-controls', { width:390,height:844,deviceScaleFactor:2,mobile:true,touch:true }, async (page) => {
     page.requireDev('native Dash and light-lance activation probes');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -3215,7 +3220,7 @@ async function finalNativeControlActivationScenario() {
 }
 
 async function finalBossAriaScenario() {
-  await withPage('final-boss-aria', {}, async (page) => {
+  await withLegacyPage('final-boss-aria', {}, async (page) => {
     page.requireDev('exact Boss stability ARIA probes');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -3251,7 +3256,7 @@ async function finalBossAriaScenario() {
 }
 
 async function finalRuntimeAuditAndProjectileRepairScenario() {
-  await withPage('final-runtime-audit-projectile-repair', {}, async (page) => {
+  await withLegacyPage('final-runtime-audit-projectile-repair', {}, async (page) => {
     page.requireDev('dirty runtime audit and projectile ownership probes');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
@@ -3461,7 +3466,7 @@ async function finalRuntimeAuditAndProjectileRepairScenario() {
 }
 
 async function finalRealmShiftProductionScenario() {
-  await withPage('final-realm-shift-production', {}, async (page) => {
+  await withLegacyPage('final-realm-shift-production', {}, async (page) => {
     page.requireDev('production enterStage realm-shift probe');
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);

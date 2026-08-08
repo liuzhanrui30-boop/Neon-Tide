@@ -48,11 +48,11 @@ test('all eight objective types require their authored gameplay action', () => {
   const elite = createObjective(byType['elite-hunt'], 15);
   update(elite, { x: 0, y: 0 }, 30);
   assert.equal(elite.progress, 0);
-  update(elite, { x: 0, y: 0 }, 0, Array.from({ length: elite.target }, (_, index) => ({ type: 'enemy:destroyed', payload: { id: index, elite: true } })));
+  update(elite, { x: 0, y: 0 }, 0, elite.eliteTargets.map(({ sourceId }) => ({ type: 'enemy:destroyed', payload: { sourceId } })));
   assert.equal(elite.status, 'completed');
 
   const storm = createObjective(byType['storm-corridor'], 16);
-  update(storm, { x: 0, y: 0 }, storm.target);
+  while (storm.status === 'active') update(storm, storm.safeZone, 0.1);
   assert.equal(storm.status, 'completed');
 
   const harvest = createObjective(byType['core-harvest'], 17);
@@ -80,6 +80,51 @@ test('timeouts fail unfinished objectives and terminal cleanup emits exactly onc
   assert.equal(events.emitted.filter(({ type }) => type === 'objective:failed').length, 1);
 });
 
+test('storm survival advances only inside the current safe segment and requires route changes', () => {
+  const template = ENCOUNTER_TEMPLATES.find(({ type }) => type === 'storm-corridor');
+  const objective = createObjective(template, 501);
+  update(objective, { x: 99, y: 99 }, 4);
+  assert.equal(objective.progress, 0);
+  assert.equal(objective.status, 'failed');
+  assert.equal(objective.failureReason, 'storm-exposure');
+
+  const routed = createObjective(template, 501);
+  let visited = 0;
+  while (routed.status === 'active') {
+    const activeBefore = routed.corridor.activeSegment;
+    update(routed, routed.safeZone, 0.1);
+    if (routed.corridor.activeSegment !== activeBefore) visited += 1;
+  }
+  assert.equal(routed.status, 'completed');
+  assert.ok(visited >= 2);
+});
+
+test('elite hunt matches stable target source IDs from bootstrap-shaped destruction events', () => {
+  const template = ENCOUNTER_TEMPLATES.find(({ type }) => type === 'elite-hunt');
+  const objective = createObjective(template, 808);
+  assert.equal(objective.eliteTargets.length, objective.target);
+  for (const target of objective.eliteTargets) {
+    update(objective, { x: 0, y: 0 }, 0, [{ type: 'enemy:destroyed', payload: { targetSourceId: target.sourceId } }]);
+  }
+  assert.equal(objective.status, 'completed');
+});
+
+test('id-less repeated events remain legitimate, sequences dedupe boundedly, and harvest honors counts', () => {
+  const purgeTemplate = { ...ENCOUNTER_TEMPLATES.find(({ type }) => type === 'purge'), killTarget: 3 };
+  const purge = createObjective(purgeTemplate, 9);
+  update(purge, null, 0, [{ type: 'enemy:destroyed', payload: {} }]);
+  update(purge, null, 0, [{ type: 'enemy:destroyed', payload: {} }]);
+  assert.equal(purge.progress, 2);
+  update(purge, null, 0, [{ type: 'enemy:destroyed', sequence: 44, payload: {} }]);
+  update(purge, null, 0, [{ type: 'enemy:destroyed', sequence: 44, payload: {} }]);
+  assert.equal(purge.progress, 3);
+  assert.ok(purge._seenEventOrder.length <= 128);
+
+  const harvest = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'core-harvest'), 10);
+  update(harvest, { x: 99, y: 99 }, 0, [{ type: 'pickupCollected', payload: { count: 3 } }]);
+  assert.equal(harvest.progress, 3);
+});
+
 test('fixed seeds reproduce route geometry while different seeds vary it', () => {
   for (const type of ['anchors', 'moving-zone', 'escort', 'dual-crisis']) {
     const template = ENCOUNTER_TEMPLATES.find((entry) => entry.type === type);
@@ -96,4 +141,3 @@ test('fixed seeds reproduce route geometry while different seeds vary it', () =>
     assert.notDeepEqual(geometry(first), geometry(different), `${type} should use the seed`);
   }
 });
-

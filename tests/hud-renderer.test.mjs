@@ -58,3 +58,19 @@ test('HUD exposes current objective label, progress, and terminal state accessib
   renderer.render({ objective: { label: '破坏潮汐锚点', progress: 4, target: 4, progressRatio: 1, status: 'completed' } });
   assert.equal(missionObjective.dataset.state, 'completed');
 });
+
+test('objective-only HUD renders preserve player state and throttle live announcements', () => {
+  const dashPips = [new FakeElement(), new FakeElement()];
+  const dashProgress = new FakeElement();
+  const deviceLabel = new FakeElement();
+  const missionObjective = new FakeElement();
+  const objectiveStatus = new FakeElement();
+  const renderer = createHudRenderer({ dashPips, dashProgress, deviceLabel, missionObjective, objectiveStatus });
+  renderer.render({ dashCharges: [1, 0.5], inputDevice: 'gamepad', phaseTimer: 0.2 });
+  renderer.render({ objective: { label: '移动占领', progress: 0.11, target: 12, progressRatio: 0.009, status: 'active' } });
+  renderer.render({ objective: { label: '移动占领', progress: 0.12, target: 12, progressRatio: 0.01, status: 'active' } });
+  assert.equal(dashProgress.getAttribute('aria-valuenow'), '1.5');
+  assert.equal(deviceLabel.textContent, 'GAMEPAD');
+  assert.ok(objectiveStatus.textWrites <= 1);
+  assert.deepEqual(renderer.getDebugSnapshot().lastSnapshot.dashCharges, [1, 0.5]);
+});

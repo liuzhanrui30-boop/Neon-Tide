@@ -5,20 +5,20 @@ async function v3WeaponsScenario() {
   await withPage('v3-weapons-no-input', {}, async (page) => {
     await page.startGame();
     await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
-    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length===1&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().renderer.pools.objective.count===1`);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length>0&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().renderer.pools.objective.count>0`);
     page.requireDev('isolated automatic weapon sandbox');
     const naturalObjective = await page.evaluate(`(()=>{
       const api=globalThis.__NEON_TIDE_V3__;
       const id=api.world.query('objective').at(0);
       const objective=api.world.get(id);
       const debug=api.getDebugSnapshot();
-      return {id,objective,bridge:debug.legacy.combatBridge,renderer:debug.renderer.pools.objective};
+      return {id,objective,bridge:debug.objectiveBridge,renderer:debug.renderer.pools.objective};
     })()`);
-    assert.equal(naturalObjective.objective.objectiveType, 'tide-relay');
+    assert.equal(naturalObjective.objective.objectiveType, 'anchors');
     assert.equal(naturalObjective.objective.objective, true);
-    assert.equal(naturalObjective.objective.team, 2);
-    assert.equal(naturalObjective.objective.sourceId, naturalObjective.bridge.objective.sourceId);
-    assert.equal(naturalObjective.renderer.count, 1);
+    assert.equal(naturalObjective.objective.team, 1);
+    assert.ok(naturalObjective.bridge.entities > 0);
+    assert.ok(naturalObjective.renderer.count > 0);
 
     await page.gameEvaluate(`
       clearWorldEntities();
@@ -26,32 +26,6 @@ async function v3WeaponsScenario() {
       $player.position.set(0,0);$player.velocity.set(0,0);syncPlayerTransform();
       return true;
     `);
-    const objectiveLock = await page.gameEvaluate(`
-      const lock=selectTideLanceLock();
-      return {targetId:lock?.target?.id,type:lock?.target?.objectiveType,enemy:Boolean(lock?.enemy),objective:Boolean(lock?.objective)};
-    `);
-    assert.deepEqual(objectiveLock, {
-      targetId: naturalObjective.objective.sourceId,
-      type: 'tide-relay',
-      enemy: false,
-      objective: true,
-    });
-    await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const id=api.world.query('objective').at(0);return id&&api.world.get(id).progress>0;})()`);
-    const objectiveProgress = await page.evaluate(`(()=>{
-      const api=globalThis.__NEON_TIDE_V3__;const id=api.world.query('objective').at(0);const objective=api.world.get(id);
-      return {hp:objective.hp,maxHp:objective.maxHp,progress:objective.progress,events:api.getDebugSnapshot().events,presentation:api.getDebugSnapshot().presentationEvents};
-    })()`);
-    assert.ok(objectiveProgress.hp < objectiveProgress.maxHp, JSON.stringify(objectiveProgress));
-    assert.ok(objectiveProgress.progress > 0, JSON.stringify(objectiveProgress));
-    assert.equal(objectiveProgress.events.queued, 0);
-    assert.equal(objectiveProgress.events.dropped, 0);
-    assert.ok(objectiveProgress.presentation.consumed > 0);
-    await page.evaluate(`(()=>{
-      const api=globalThis.__NEON_TIDE_V3__;const objective=api.world.get(api.world.query('objective').at(0));
-      return api.world.spawn('friendlyProjectile',{x:objective.x,y:objective.y,previousX:objective.x,previousY:objective.y,damage:999,radius:.1,team:1,weaponId:'cleanup-probe',collidable:true});
-    })()`);
-    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length===0&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge.objective.completed`);
-
     const setup = await page.evaluate(`(()=>{
       const api=globalThis.__NEON_TIDE_V3__;
       const world=api.world;
@@ -228,9 +202,10 @@ async function v3WeaponsScenario() {
 
     const bossTransition = await page.gameEvaluate(`
       clearWorldEntities();
-      $state.upgradeTriggered=[true,true];$state.stageIndex=2;$state.stageQueue=[];$state.bossTriggered=false;$state.bossSpawned=false;
-      $state.bossStart=null;$state.bossDeadline=null;$state.elapsed=100;$state.enemySpawnTimer=Infinity;
-      updateStage();
+      session.completeRoom({nextMode:'upgrade',stageIndex:2});
+      session.startRoom({id:'v2.2-boss-compatibility',compatibility:true,chapterIndex:3});
+      enterStage(3,false);
+      beginBossStage();
       const boss=$enemies.find((enemy)=>enemy.type==='boss');
       setEnemyState(boss,'telegraph',10,10);
       return {stage:$state.stageIndex,bossId:boss.sourceId,hp:boss.hp,state:boss.state};

@@ -335,8 +335,11 @@ export function createCollisionSystem({
       state.despawnCount = addUnique(despawnIds, state.despawnCount, pickup.id);
       state.pickups += 1;
       pickupValue += pickup.value;
+      state.pickupSourceIds.push(pickup.sourceId || pickup.id);
     }
-    if (state.pickups > 0) events?.emit?.('pickupCollected', Object.freeze({ count: state.pickups, value: pickupValue }));
+    if (state.pickups > 0) events?.emit?.('pickupCollected', Object.freeze({
+      count: state.pickups, value: pickupValue, ids: Object.freeze([...state.pickupSourceIds]),
+    }));
 
     const objectives = world.query('objective');
     for (let index = 0; index < objectives.length; index += 1) {
@@ -352,7 +355,11 @@ export function createCollisionSystem({
         collidable: completed ? false : objective.collidable,
       });
       state.objectiveOverlaps += 1;
-      if (completed) events?.emit?.('objectiveCompleted', Object.freeze({ id: objective.id, type: objective.objectiveType }));
+      if (completed) {
+        const record = Object.freeze({ id: objective.sourceId || objective.id, type: objective.objectiveType });
+        state.objectiveCompletions.push(record);
+        events?.emit?.('objectiveCompleted', record);
+      }
     }
   }
 
@@ -482,6 +489,8 @@ export function createCollisionSystem({
       perfectPhases: 0,
       pickups: 0,
       objectiveOverlaps: 0,
+      pickupSourceIds: [],
+      objectiveCompletions: [],
     };
     collectFriendlyHits(world, state);
     collectEnemyObjectiveHits(world, state);
@@ -527,6 +536,8 @@ export function createCollisionSystem({
       perfectPhases: state.perfectPhases,
       pickups: state.pickups,
       objectiveOverlaps: state.objectiveOverlaps,
+      pickupSourceIds: Object.freeze([...state.pickupSourceIds]),
+      objectiveCompletions: Object.freeze([...state.objectiveCompletions]),
       weaponHitEventEmitted,
       damageRecords: Object.freeze(damage.records),
     });

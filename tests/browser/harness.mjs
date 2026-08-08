@@ -235,7 +235,7 @@ export class GamePage {
       source: `try { localStorage.removeItem('neon-tide:v3:checkpoint'); } catch {}`,
     });
     const loaded = this.client.waitFor('Page.loadEventFired');
-    await this.client.send('Page.navigate', { url: APP_URL });
+    await this.client.send('Page.navigate', { url: this.options.appUrl ?? APP_URL });
     await loaded;
     await this.client.send('Page.removeScriptToEvaluateOnNewDocument', {
       identifier: checkpointCleanup.identifier,
@@ -295,7 +295,7 @@ export class GamePage {
   }
 
   requireDev(feature) {
-    assert.equal(this.scriptKind, 'dev', `${this.name}: ${feature} requires the Vite dev source (APP_URL=${APP_URL})`);
+    assert.equal(this.scriptKind, 'dev', `${this.name}: ${feature} requires the Vite dev source (APP_URL=${this.options.appUrl ?? APP_URL})`);
   }
 
   async evaluate(expression, { idempotent = true } = {}) {

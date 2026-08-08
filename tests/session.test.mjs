@@ -65,6 +65,16 @@ test('starting an encounter room creates objective and threat ownership in the s
   assert.equal(room.objective.seed, session.getEncounterSnapshot().objective.seed);
 });
 
+test('natural campaign room requests select authored objectives in Standard and Abyss', () => {
+  for (const mode of ['standard', 'abyss']) {
+    const session = createGameSession({ development: true, deterministicTestMode: true });
+    session.startRun(mode, 71);
+    session.startRoom({ campaign: true, chapterIndex: 0 });
+    assert.equal(session.snapshot().room.objectiveManaged, true);
+    assert.equal(session.snapshot().room.objective.type, mode === 'standard' ? 'anchors' : session.getEncounterSnapshot().objective.type);
+  }
+});
+
 test('objective completion freezes for presentation drain before upgrade and next room', () => {
   const events = createEventQueue();
   const session = createGameSession({ development: true, events });
@@ -84,6 +94,50 @@ test('objective completion freezes for presentation drain before upgrade and nex
   assert.equal(session.snapshot().stats.roomsCompleted, 1);
   assert.equal(session.startRoom({ id: 'moving-sanctum' }), true);
   assert.equal(session.snapshot().room.objective.type, 'moving-zone');
+});
+
+test('objective failure enters defeat without incrementing roomsCompleted', () => {
+  const session = createGameSession({ development: true });
+  session.startRun('standard', 12);
+  session.startRoom({ objectiveTemplate: { id: 'fast-fail', type: 'anchors', label: 'fail', timeout: 0.1, anchorCount: 2, spawnHooks: [], cleanup: [] } });
+  session.updateRoom({ player: { x: 99, y: 99 }, presentationPending: 0 }, 0.2);
+  const snapshot = session.snapshot();
+  assert.equal(snapshot.mode, 'defeat');
+  assert.equal(snapshot.stats.roomsStarted, 1);
+  assert.equal(snapshot.stats.roomsCompleted, 0);
+});
+
+test('checkpoint restore reproduces the next authored room index and geometry', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const original = createGameSession({ development: true, runSave, now: () => 222 });
+  original.startRun('standard', 909);
+  original.startRoom({ campaign: true, chapterIndex: 0 });
+  original.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 1 });
+  original.startRoom({ campaign: true, chapterIndex: 1 });
+  const expected = original.snapshot().room.objective;
+
+  const restored = createGameSession({ development: true, runSave, now: () => 333 });
+  assert.equal(restored.restoreCheckpoint(), true);
+  restored.startRoom({ campaign: true, chapterIndex: 1 });
+  assert.equal(restored.getEncounterSnapshot().roomIndex, original.getEncounterSnapshot().roomIndex);
+  assert.deepEqual(restored.snapshot().room.objective.path, expected.path);
+  assert.equal(restored.snapshot().room.objective.seed, expected.seed);
+});
+
+test('fixed-step objective updates publish bounded session changes rather than every tick', () => {
+  let objectiveChanges = 0;
+  const session = createGameSession({
+    development: true,
+    onChange: ({ detail }) => { if (detail?.objectiveUpdated) objectiveChanges += 1; },
+  });
+  session.startRun('standard', 55);
+  session.startRoom({ id: 'moving-sanctum' });
+  for (let index = 0; index < 60; index += 1) {
+    const live = session.getLiveEncounterObjective();
+    session.updateRoom({ player: live.safeZone, presentationPending: 0 }, 1 / 60);
+  }
+  assert.ok(objectiveChanges <= 10, `published ${objectiveChanges} objective changes in one second`);
 });
 
 test('invalid transitions throw in development and return false in production', () => {

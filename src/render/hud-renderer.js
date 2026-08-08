@@ -20,10 +20,18 @@ export function createHudRenderer(options = {}) {
   const phaseStatus = options.phaseStatus ?? root?.querySelector?.('#phase-status') ?? null;
   const missionPanel = options.missionPanel ?? root?.querySelector?.('#mission-panel') ?? null;
   const missionObjective = options.missionObjective ?? root?.querySelector?.('#mission-objective') ?? null;
+  let objectiveStatus = options.objectiveStatus ?? root?.querySelector?.('[data-objective-live]') ?? null;
+  if (!objectiveStatus && root?.createElement && missionPanel?.append) {
+    objectiveStatus = root.createElement('span');
+    objectiveStatus.dataset.objectiveLive = 'true';
+    objectiveStatus.className = 'sr-only';
+    missionPanel.append(objectiveStatus);
+  }
   let disposed = false;
   let renders = 0;
   let lastSnapshot = null;
   let lastPhaseState = null;
+  let lastObjectiveAnnouncementKey = null;
   dashProgress?.setAttribute('role', 'progressbar');
   dashProgress?.setAttribute('aria-label', '相位冲刺充能');
   dashProgress?.setAttribute('aria-valuemin', '0');
@@ -31,10 +39,21 @@ export function createHudRenderer(options = {}) {
   phaseStatus?.setAttribute('role', 'status');
   phaseStatus?.setAttribute('aria-live', 'polite');
   phaseStatus?.setAttribute('aria-atomic', 'true');
+  objectiveStatus?.setAttribute('role', 'status');
+  objectiveStatus?.setAttribute('aria-live', 'polite');
+  objectiveStatus?.setAttribute('aria-atomic', 'true');
 
   function render(snapshot = {}) {
     if (disposed) return false;
-    const charges = Array.isArray(snapshot.dashCharges) ? snapshot.dashCharges.slice(0, 2).map(clamp01) : [0, 0];
+    const merged = { ...(lastSnapshot ?? {}), ...snapshot };
+    const hasPhaseUpdate = ['perfectPhaseWindow', 'phaseTimer', 'autoFireRateBuffTimer']
+      .some((key) => Object.hasOwn(snapshot, key));
+    if (hasPhaseUpdate) {
+      for (const key of ['perfectPhaseWindow', 'phaseTimer', 'autoFireRateBuffTimer']) {
+        if (!Object.hasOwn(snapshot, key)) merged[key] = 0;
+      }
+    }
+    const charges = Array.isArray(merged.dashCharges) ? merged.dashCharges.slice(0, 2).map(clamp01) : [0, 0];
     while (charges.length < 2) charges.push(0);
     dashPips.forEach((pip, index) => {
       const charge = charges[index];
@@ -54,12 +73,12 @@ export function createHudRenderer(options = {}) {
     if (dashRing) {
       dashRing.style.background = `conic-gradient(from -90deg, #ff4fd8 0deg ${firstArc}deg, rgba(255,79,216,.14) ${firstArc}deg 170deg, transparent 170deg 190deg, #64f5ff 190deg ${secondArc}deg, rgba(100,245,255,.14) ${secondArc}deg 360deg)`;
     }
-    const deviceText = String(snapshot.inputDevice ?? 'keyboard').toUpperCase();
+    const deviceText = String(merged.inputDevice ?? 'keyboard').toUpperCase();
     if (deviceLabel && deviceLabel.textContent !== deviceText) deviceLabel.textContent = deviceText;
     if (phaseStatus) {
-      const perfect = Number(snapshot.perfectPhaseWindow) > 0;
-      const phased = Number(snapshot.phaseTimer) > 0;
-      const buffed = Number(snapshot.autoFireRateBuffTimer) > 0;
+      const perfect = Number(merged.perfectPhaseWindow) > 0;
+      const phased = Number(merged.phaseTimer) > 0;
+      const buffed = Number(merged.autoFireRateBuffTimer) > 0;
       const phaseState = perfect ? 'perfect' : phased ? 'phase' : buffed ? 'buff' : 'ready';
       if (phaseState !== lastPhaseState) {
         const phaseText = perfect ? '完美相位窗口' : phased ? '相位中' : buffed ? '武器涌流' : '相位就绪';
@@ -68,21 +87,26 @@ export function createHudRenderer(options = {}) {
         lastPhaseState = phaseState;
       }
     }
-    if (snapshot.objective && missionObjective) {
-      const objective = snapshot.objective;
+    if (merged.objective && missionObjective) {
+      const objective = merged.objective;
       const label = String(objective.label ?? objective.type ?? '当前任务');
       const progress = formatObjectiveUnit(objective.progress);
       const target = formatObjectiveUnit(objective.target);
       const text = `${label} · ${progress} / ${target}`;
       if (missionObjective.textContent !== text) missionObjective.textContent = text;
       missionObjective.dataset.state = String(objective.status ?? 'active');
-      missionObjective.setAttribute('role', 'status');
-      missionObjective.setAttribute('aria-live', 'polite');
-      missionPanel?.setAttribute('aria-label', `当前任务：${label}；进度 ${progress} / ${target}`);
+      missionObjective.setAttribute('aria-live', 'off');
+      const announcementKey = `${objective.status ?? 'active'}:${Math.floor(clamp01(objective.progressRatio) * 10)}`;
+      if (announcementKey !== lastObjectiveAnnouncementKey) {
+        const announcement = `当前任务：${label}；进度 ${progress} / ${target}`;
+        if (objectiveStatus) objectiveStatus.textContent = announcement;
+        missionPanel?.setAttribute('aria-label', announcement);
+        lastObjectiveAnnouncementKey = announcementKey;
+      }
       missionPanel?.setAttribute('data-objective-type', String(objective.type ?? 'unknown'));
       missionPanel?.setAttribute('data-objective-state', String(objective.status ?? 'active'));
     }
-    lastSnapshot = Object.freeze({ ...snapshot, dashCharges: Object.freeze(charges) });
+    lastSnapshot = Object.freeze({ ...merged, dashCharges: Object.freeze(charges) });
     renders += 1;
     return true;
   }
