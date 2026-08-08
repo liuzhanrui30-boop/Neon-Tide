@@ -192,6 +192,30 @@ async function v3PlayerScenario() {
     assert.equal(gamepad.inputDevice, 'gamepad');
     assert.equal(gamepad.moveX, -1);
     assert.equal(gamepad.moveY, 0);
+
+    const mixedDeviceActions = await page.evaluate(`(async()=>{
+      const {createInputSystem}=await import('/src/systems/input-system.js');
+      const dashButton=document.createElement('button');
+      const ultimateButton=document.createElement('button');
+      let pads=[];
+      const system=createInputSystem({window,navigator:{getGamepads:()=>pads},dashButton,ultimateButton});
+      system.setTouchVector(0.6,0.8);
+      dashButton.click();
+      const touchEdge=system.snapshot();
+      const touchHeld=system.snapshot();
+      system.setTouchVector(0,0);
+      pads=[{connected:true,axes:[-1,0],buttons:[]}];
+      system.setGamepadState(pads[0]);
+      ultimateButton.click();
+      const gamepadEdge=system.snapshot();
+      const gamepadHeld=system.snapshot();
+      system.dispose();
+      return {touchEdge,touchHeld,gamepadEdge,gamepadHeld};
+    })()`);
+    assert.deepEqual(mixedDeviceActions.touchEdge, {moveX:0.6,moveY:0.8,dashPressed:true,ultimatePressed:false,inputDevice:'keyboard'});
+    assert.deepEqual(mixedDeviceActions.touchHeld, {moveX:0.6,moveY:0.8,dashPressed:false,ultimatePressed:false,inputDevice:'touch'});
+    assert.deepEqual(mixedDeviceActions.gamepadEdge, {moveX:-1,moveY:0,dashPressed:false,ultimatePressed:true,inputDevice:'keyboard'});
+    assert.deepEqual(mixedDeviceActions.gamepadHeld, {moveX:-1,moveY:0,dashPressed:false,ultimatePressed:false,inputDevice:'gamepad'});
   });
 
   await withPage('v3-player-mobile-390x844', {
@@ -228,12 +252,11 @@ async function v3PlayerScenario() {
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.position.x > ${beforeSwitch + 0.03}`);
     const provenance = await page.evaluate(`(()=>{
       const system=globalThis.__NEON_TIDE_V3__.inputSystem;
-      system.setTouchVector(0,1);
       const before=system.getLastActiveDevice();
       document.querySelector('#dash-button').click();
       return {before,after:system.getLastActiveDevice(),press:system.getLastPressDevice()};
     })()`);
-    assert.deepEqual(provenance, {before:'touch',after:'keyboard',press:'keyboard'});
+    assert.deepEqual(provenance, {before:'keyboard',after:'keyboard',press:'keyboard'});
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player?.dashCharges.some((charge)=>charge<0.2)`);
     const switchDash = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
     await page.dispatchKey('keyUp', 'd', 'KeyD');

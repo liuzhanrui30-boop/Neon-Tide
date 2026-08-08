@@ -122,7 +122,7 @@ export function createInputSystem(options = {}) {
     if (DEVICE_NAMES.has(device)) lastActiveDevice = device;
   }
 
-  function press(action, device = lastActiveDevice, { claimMovement = true } = {}) {
+  function press(action, device = lastActiveDevice, { claimMovement = false } = {}) {
     if (!PRESS_ACTIONS.includes(action)) return false;
     const resolvedDevice = DEVICE_NAMES.has(device) ? device : lastActiveDevice;
     lastPressDevice = resolvedDevice;
@@ -161,7 +161,7 @@ export function createInputSystem(options = {}) {
     const move = gamepadVector(gamepad, deadzone);
     const dash = pressedButton(gamepad.buttons, 0) || pressedButton(gamepad.buttons, 5);
     const ultimate = pressedButton(gamepad.buttons, 1) || pressedButton(gamepad.buttons, 4);
-    if (Math.hypot(move.x, move.y) > 0.001 || dash || ultimate) remember('gamepad');
+    if (Math.hypot(move.x, move.y) > 0.001) remember('gamepad');
     if (dash && !previousGamepadDash) press('dash', 'gamepad');
     if (ultimate && !previousGamepadUltimate) press('ultimate', 'gamepad');
     previousGamepadDash = dash;
@@ -209,7 +209,8 @@ export function createInputSystem(options = {}) {
     if (lastActiveDevice === 'touch') move = touchVector(touch);
     else if (lastActiveDevice === 'gamepad') move = gamepadVector(gamepad, deadzone);
     else move = keyboardVector(keyboard);
-    const result = freezeSnapshot(move, dashBuffered, ultimateBuffered, lastActiveDevice);
+    const actionDevice = dashBuffered || ultimateBuffered ? lastPressDevice : lastActiveDevice;
+    const result = freezeSnapshot(move, dashBuffered, ultimateBuffered, actionDevice);
     dashBuffered = false;
     ultimateBuffered = false;
     dashBufferDevice = null;
@@ -243,7 +244,7 @@ export function createInputSystem(options = {}) {
     // Click is deliberate: native buttons retain keyboard/switch activation and
     // pointer coordinates never enter the gameplay snapshot. A tracked touch
     // remains touch-only provenance; keyboard, mouse and switch-style clicks
-    // claim the keyboard action class without clearing held keyboard movement.
+    // report the keyboard action class without changing continuous movement.
     const bindNativeAction = (button, action) => {
       let pointerDevice = null;
       bind(button, 'pointerdown', (event) => {
@@ -252,7 +253,7 @@ export function createInputSystem(options = {}) {
       bind(button, 'click', (event) => {
         const device = event.detail === 0 ? 'keyboard' : (pointerDevice ?? 'keyboard');
         pointerDevice = null;
-        press(action, device, { claimMovement: device === 'keyboard' });
+        press(action, device);
       });
     };
     bindNativeAction(dashButton, 'dash');

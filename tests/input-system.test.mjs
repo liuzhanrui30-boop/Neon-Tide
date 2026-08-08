@@ -164,9 +164,10 @@ test('native button provenance never erases held keyboard movement', () => {
   dashButton.emit('click', { detail: 1 });
   const touchActivated = system.snapshot();
   assert.equal(touchActivated.moveX, 1);
-  assert.equal(touchActivated.inputDevice, 'keyboard');
+  assert.equal(touchActivated.inputDevice, 'touch');
   assert.equal(touchActivated.dashPressed, true);
   assert.equal(system.getLastPressDevice(), 'touch');
+  assert.equal(system.snapshot().inputDevice, 'keyboard');
 
   ultimateButton.emit('click', { detail: 0 });
   const assistiveActivated = system.snapshot();
@@ -175,32 +176,45 @@ test('native button provenance never erases held keyboard movement', () => {
   assert.equal(assistiveActivated.ultimatePressed, true);
   assert.equal(system.getLastPressDevice(), 'keyboard');
 
+  system.setKeyboardAction('moveRight', false);
   system.setTouchVector(0, 1);
   assert.equal(system.snapshot().inputDevice, 'touch');
   dashButton.emit('click', { detail: 0 });
   const switchAfterTouch = system.snapshot();
   assert.deepEqual(switchAfterTouch, {
-    moveX: 1,
-    moveY: 0,
+    moveX: 0,
+    moveY: 1,
     dashPressed: true,
     ultimatePressed: false,
     inputDevice: 'keyboard',
   });
   assert.equal(system.getLastPressDevice(), 'keyboard');
-  assert.equal(system.snapshot().dashPressed, false, 'one native activation must yield one edge');
+  assert.deepEqual(system.snapshot(), {
+    moveX: 0,
+    moveY: 1,
+    dashPressed: false,
+    ultimatePressed: false,
+    inputDevice: 'touch',
+  }, 'one native activation must yield one edge without stealing held touch movement');
 
   system.setGamepadState({ connected: true, axes: [-1, 0], buttons: [] });
   assert.equal(system.snapshot().inputDevice, 'gamepad');
   ultimateButton.emit('click', { detail: 0 });
   const enterAfterGamepad = system.snapshot();
   assert.deepEqual(enterAfterGamepad, {
-    moveX: 1,
+    moveX: -1,
     moveY: 0,
     dashPressed: false,
     ultimatePressed: true,
     inputDevice: 'keyboard',
   });
   assert.equal(system.getLastPressDevice(), 'keyboard');
-  assert.equal(system.snapshot().ultimatePressed, false, 'keyboard click must not double-fire');
+  assert.deepEqual(system.snapshot(), {
+    moveX: -1,
+    moveY: 0,
+    dashPressed: false,
+    ultimatePressed: false,
+    inputDevice: 'gamepad',
+  }, 'keyboard click must not double-fire or steal held gamepad movement');
   system.dispose();
 });
