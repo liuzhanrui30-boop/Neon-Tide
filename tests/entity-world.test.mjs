@@ -14,6 +14,13 @@ test('projectile capacities are deterministic for desktop and coarse pointers', 
   assert.equal(selectEntityCapacities({ coarsePointer: false }).friendlyProjectile, 96);
   assert.equal(selectEntityCapacities({ coarsePointer: true }).friendlyProjectile, 72);
   assert.equal(selectEntityCapacities({ coarsePointer: true }).enemyProjectile, 72);
+  for (const quality of ['compact', 'coarse', 'touch', 'mobile']) {
+    const capacities = selectEntityCapacities({ quality });
+    assert.equal(capacities.enemy, 42, `${quality} enemy capacity`);
+    assert.equal(capacities.enemyProjectile, 72, `${quality} projectile capacity`);
+    assert.equal(capacities.warning, 72, `${quality} warning capacity`);
+  }
+  assert.equal(selectEntityCapacities({ quality: 'desktop' }).enemy, 56);
 });
 
 test('held snapshots and read targets cannot observe or mutate a replacement generation', () => {

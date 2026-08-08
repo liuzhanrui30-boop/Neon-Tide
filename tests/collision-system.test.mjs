@@ -218,6 +218,25 @@ test('body contact requires an explicit contact-damaging proxy contract', () => 
   assert.equal(damage, 5);
 });
 
+test('lethal hits protect every committed enemy active state from collision-pass despawn', () => {
+  for (const state of ['strike-dash', 'beam-active', 'detonate', 'wall-active', 'counter-active']) {
+    const world = createEntityWorld({ capacities: { enemy: 1, friendlyProjectile: 1 } });
+    const enemyId = world.spawn('enemy', {
+      x: 0, y: 0, hp: 1, maxHp: 1, radius: 0.5, team: 2,
+      state, executingTelegraph: false, collidable: true, weakPoint: true,
+    });
+    world.spawn('friendlyProjectile', {
+      x: 0, y: 0, previousX: 0, previousY: 0, damage: 5, radius: 0.2,
+      team: 1, collidable: true, weaponId: 'pulse-cannon',
+    });
+    const summary = resolveCollisions(world, null, 1 / 60, createEvents());
+    assert.equal(summary.damageRecords[0].executionProtected, true, state);
+    assert.equal(summary.damageRecords[0].destroyed, false, state);
+    assert.equal(world.get(enemyId).hp, 0, state);
+    assert.equal(world.get(enemyId).state, state);
+  }
+});
+
 test('collision event stats only count accepted weapon-hit events', () => {
   const world = createEntityWorld({ capacities: { enemy: 1, friendlyProjectile: 1 } });
   world.spawn('enemy', { x: 0, y: 0, hp: 2, team: 2, collidable: true });

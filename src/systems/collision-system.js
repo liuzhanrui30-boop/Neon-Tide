@@ -1,4 +1,5 @@
 import { createEntityReadTarget } from '../game/entity-world.js';
+import { isEnemyCommittedAttackState } from '../content/enemies.js';
 import { AUTO_PULSE_BUFF_MULTIPLIER, PERFECT_PHASE_REFUND } from './player-system.js';
 
 const FRIENDLY_TARGET_KINDS = Object.freeze(['bossPart', 'enemy', 'objective']);
@@ -298,7 +299,7 @@ export function createCollisionSystem({
     const enemies = world.query('enemy');
     for (let index = 0; index < enemies.length; index += 1) {
       const enemy = world.readInto(enemies.at(index), targetRead);
-      if (!enemy || !enemy.collidable || !enemy.contactDamaging || enemy.hp <= 0) continue;
+      if (!enemy || !enemy.collidable || !enemy.contactDamaging || enemy.hp <= 0 || enemy.hitCooldown > 0) continue;
       if (!overlapsWithRadius(player, enemy, enemy.contactRadius > 0 ? enemy.contactRadius : enemy.radius)) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
@@ -308,6 +309,8 @@ export function createCollisionSystem({
       } else if (!phaseProtected) {
         state.playerDamage += Math.max(0, enemy.damage || 1);
       }
+      world.write(enemy.id, { hitCooldown: 2 });
+      break;
     }
     const objectives = world.query('objective');
     for (let index = 0; index < objectives.length; index += 1) {
@@ -327,7 +330,7 @@ export function createCollisionSystem({
     const hazards = world.query('enemyHazard');
     for (let index = 0; index < hazards.length; index += 1) {
       const hazard = world.readInto(hazards.at(index), hazardRead);
-      if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
+      if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2 || hazard.hitCooldown > 0) continue;
       if (!overlapsWithRadius(player, hazard, hazard.contactRadius > 0 ? hazard.contactRadius : hazard.radius)) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events);
@@ -336,6 +339,10 @@ export function createCollisionSystem({
         state.perfectPhases += 1;
       } else if (!phaseProtected) {
         state.playerDamage += Math.max(0, hazard.damage || 1);
+      }
+      for (let ownerIndex = 0; ownerIndex < hazards.length; ownerIndex += 1) {
+        const owned = world.readInto(hazards.at(ownerIndex), chainRead);
+        if (owned?.ownerId === hazard.ownerId) world.write(owned.id, { hitCooldown: 0.8 });
       }
       break;
     }
@@ -408,7 +415,8 @@ export function createCollisionSystem({
       if (!target || target.hp <= 0) continue;
       const amount = Math.min(target.hp, damageAmounts[index]);
       const hpAfter = Math.max(0, target.hp - amount);
-      const executionProtected = hpAfter <= 0 && target.kind === 'enemy' && target.executingTelegraph;
+      const executionProtected = hpAfter <= 0 && target.kind === 'enemy'
+        && (target.executingTelegraph || isEnemyCommittedAttackState(target.state));
       world.write(target.id, {
         hp: hpAfter,
         state: hpAfter <= 0 ? (executionProtected ? target.state : 'destroyed') : target.state,

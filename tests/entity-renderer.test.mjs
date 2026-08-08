@@ -85,6 +85,38 @@ test('sync interpolates fixed slots without replacing owned resources', () => {
   world.dispose();
 });
 
+test('warning and hazard transforms match authoritative footprint dimensions without allocation growth', () => {
+  const { world, renderer, root } = createFixture({ warning: 2, enemyHazard: 3 });
+  world.spawn('warning', {
+    x: 3, y: -2, rotation: Math.PI / 3, scaleX: 14.21, scaleY: 0.56,
+    opacity: 0.8, collidable: false,
+  });
+  world.spawn('enemyHazard', { x: -2, y: 0, radius: 0.34, scaleX: 0.34, scaleY: 0.34, collidable: true });
+  world.spawn('enemyHazard', { x: 0, y: 0, radius: 1.2, scaleX: 1.2, scaleY: 1.2, collidable: false, role: 'warden-gap' });
+  world.spawn('enemyHazard', { x: 2, y: 0, radius: 1.35, scaleX: 1.35, scaleY: 1.35, collidable: false, role: 'safe-sector' });
+  const ownership = renderer.getStats().ownership;
+  renderer.sync(world, 1);
+
+  const warningMesh = findKind(root, 'warning').children[0];
+  assert.deepEqual(warningMesh.position.toArray(), [3, -2, 0]);
+  assert.ok(Math.abs(warningMesh.rotation.z - Math.PI / 3) < 1e-9);
+  assert.deepEqual(warningMesh.scale.toArray(), [14.21, 0.56, 1]);
+
+  const hazardMesh = findKind(root, 'enemyHazard');
+  const scales = [];
+  const matrix = new THREE.Matrix4();
+  const scale = new THREE.Vector3();
+  for (let index = 0; index < 3; index += 1) {
+    hazardMesh.getMatrixAt(index, matrix);
+    matrix.decompose(new THREE.Vector3(), new THREE.Quaternion(), scale);
+    scales.push(Number(scale.x.toFixed(2)));
+  }
+  assert.deepEqual(scales, [0.34, 1.2, 1.35]);
+  assert.deepEqual(renderer.getStats().ownership, ownership);
+  renderer.dispose();
+  world.dispose();
+});
+
 test('sync clamps extreme finite transforms before writing GPU buffers', () => {
   const { world, renderer, root } = createFixture({ enemy: 1, friendlyProjectile: 1 });
   world.spawn('enemy', {

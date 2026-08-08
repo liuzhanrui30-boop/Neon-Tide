@@ -3,7 +3,12 @@ import assert from 'node:assert/strict';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { getEncounterTemplate } from '../src/content/encounters.js';
 import { ENEMY_ROLE_IDS, ENEMY_ROLES } from '../src/content/enemies.js';
-import { createEncounterDirector, getThreatLimits, selectThreatWave } from '../src/systems/encounter-director.js';
+import {
+  createEncounterDirector,
+  getThreatLimits,
+  scanThreatWorld,
+  selectThreatWave,
+} from '../src/systems/encounter-director.js';
 
 function seeded(seed) {
   let value = seed >>> 0;
@@ -69,6 +74,46 @@ test('health relief and objective burden lower the next combination while clear-
   assert.equal(relief.reliefApplied, true);
 });
 
+test('health relief changes only the subsequent combination and never requires mutating live threats', () => {
+  const liveThreat = Object.freeze({ collidable: true, contactDamaging: true, damage: 0.35 });
+  const healthy = selectThreatWave(context({ waveIndex: 19, playerHealthRatio: 1 }), seeded(777));
+  const lowHull = selectThreatWave(context({ waveIndex: 19, playerHealthRatio: 0.2 }), seeded(777));
+  const abyssLowHull = selectThreatWave(context({
+    mode: 'abyss', waveIndex: 19, playerHealthRatio: 0.2,
+  }), seeded(777));
+  assert.ok(lowHull.cost < healthy.cost);
+  assert.deepEqual(lowHull.roles, []);
+  assert.ok(abyssLowHull.budget > lowHull.budget);
+  assert.deepEqual(liveThreat, { collidable: true, contactDamaging: true, damage: 0.35 });
+});
+
+test('runtime blocked-area scan accounts for committed hazards throughout their active lifetime', () => {
+  const world = createEntityWorld({ capacities: { enemy: 8, enemyHazard: 32, warning: 16 } });
+  const roles = ['lancer', 'mine', 'warden', 'bulwark'];
+  for (let index = 0; index < roles.length; index += 1) {
+    const role = roles[index];
+    const ownerId = world.spawn('enemy', { role, state: `${role}-active`, hp: 2, team: 2 });
+    world.spawn('enemyHazard', {
+      ownerId, role: role === 'warden' ? 'warden-wall' : role,
+      type: `${role}-committed`, radius: 0.4, lifetime: 2, collidable: true, contactDamaging: true, team: 2,
+    });
+    world.spawn('enemyHazard', {
+      ownerId, role: role === 'warden' ? 'warden-gap' : 'safe-sector',
+      radius: 1.2, lifetime: 2, collidable: false, contactDamaging: false, team: 2,
+    });
+  }
+  const scan = scanThreatWorld(world);
+  const expected = roles.reduce((sum, role) => sum + ENEMY_ROLES[role].blockedAreaCost, 0);
+  assert.ok(Math.abs(scan.blockedArea - expected) < 1e-9);
+  assert.equal(scan.highDamageWarnings, 0);
+  const wave = selectThreatWave(context({
+    blockedArea: scan.blockedArea,
+    activeEnemies: scan.activeEnemies,
+    roleCounts: scan.roleCounts,
+  }), seeded(99));
+  assert.ok(wave.roles.every((role) => wave.blockedAreaCost + scan.blockedArea <= wave.limits.blockedAreaBudget + 1e-9));
+});
+
 test('256 seeded selections remain finite, capped and make every role naturally reachable through chapter selection', () => {
   const seen = new Set();
   for (let seed = 0; seed < 256; seed += 1) {
@@ -124,4 +169,19 @@ test('the Task 7 encounter lifecycle naturally selects and spawns pooled threats
   assert.equal(world.query('warning').length, 0);
   assert.equal(world.query('enemyHazard').length, 0);
   assert.equal(world.query('enemyProjectile').length, 0);
+});
+
+test('rolesSeen and runtime enemy caps include only successfully materialized wave members', () => {
+  const world = createEntityWorld({ capacities: { enemy: 1, warning: 8, enemyHazard: 8, enemyProjectile: 8 } });
+  const playerId = world.spawn('player', {
+    x: 0, y: 0, hp: 5, maxHp: 5, radius: 0.4, team: 1, collidable: true,
+  });
+  const director = createEncounterDirector({ seed: 91, mode: 'standard', quality: 'desktop' });
+  director.startRoom(getEncounterTemplate('anchor-break'), { chapterIndex: 3 });
+  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 1 / 60, { emit() {}, input: [] });
+  const actual = [...world.query('enemy')].map((id) => world.get(id).role);
+  const seen = director.getSnapshot().threatState.rolesSeen;
+  assert.equal(actual.length, 1);
+  assert.deepEqual(seen, actual);
+  assert.equal(director.getSnapshot().threatState.enemySystem.rejectedSpawns > 0, true);
 });

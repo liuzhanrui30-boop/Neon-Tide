@@ -24,14 +24,18 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
 
 export const COARSE_ENTITY_CAPACITIES = Object.freeze({
   ...DEFAULT_ENTITY_CAPACITIES,
+  enemy: 42,
   friendlyProjectile: 72,
   enemyProjectile: 72,
   warning: 72,
   enemyHazard: 72,
 });
 
-export function selectEntityCapacities({ coarsePointer = false } = {}) {
-  return coarsePointer ? COARSE_ENTITY_CAPACITIES : DEFAULT_ENTITY_CAPACITIES;
+export function selectEntityCapacities({ coarsePointer = false, quality = 'desktop' } = {}) {
+  const tier = typeof quality === 'string' ? quality : quality?.tier ?? 'desktop';
+  return coarsePointer || ['compact', 'coarse', 'touch', 'mobile'].includes(tier)
+    ? COARSE_ENTITY_CAPACITIES
+    : DEFAULT_ENTITY_CAPACITIES;
 }
 
 export const ENTITY_FLAG_HIDDEN = 1;

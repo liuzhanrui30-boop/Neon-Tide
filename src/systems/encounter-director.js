@@ -52,12 +52,13 @@ export function selectThreatWave(context = {}, random = Math.random) {
   const totalBudget = Math.max(1, finite(context.totalBudget, 30));
   const roleCounts = context.roleCounts ?? {};
   const reliefApplied = playerHealthRatio <= 0.4;
-  const healthFactor = reliefApplied ? (mode === 'abyss' ? 0.82 : 0.58) : playerHealthRatio < 0.7 ? 0.86 : 1;
+  const healthFactor = reliefApplied ? (mode === 'abyss' ? 0.65 : 0.2) : playerHealthRatio < 0.7 ? 0.86 : 1;
   const masteryFactor = 1 + clamp((clearRate - 0.75) * 0.14, -0.12, 0.24)
     + clamp((untouchedSeconds - 8) / 80, 0, 0.18);
   const burdenFactor = 1 - objectiveBurden * (mode === 'abyss' ? 0.22 : 0.34);
   const baseWaveBudget = Math.min(totalBudget, 6 + chapter * 2.25 + (mode === 'abyss' ? 1.5 : 0));
-  const budget = Math.max(1, Math.floor(baseWaveBudget * healthFactor * masteryFactor * burdenFactor));
+  const scaledBudget = Math.floor(baseWaveBudget * healthFactor * masteryFactor * burdenFactor);
+  const budget = reliefApplied && mode === 'standard' ? 0 : Math.max(1, scaledBudget);
   const availableSlots = Math.max(0, limits.activeEnemyCap - activeEnemies);
   if (availableSlots === 0) return Object.freeze({
     roles: Object.freeze([]), cost: 0, budget, projectileCost: 0, blockedAreaCost: 0,
@@ -121,22 +122,45 @@ function objectiveBurdenFor(objective) {
   return burden[objective?.type] ?? 0.35;
 }
 
-function scanThreatWorld(world) {
+export function scanThreatWorld(world) {
   const roleCounts = Object.fromEntries(ENEMY_ROLE_IDS.map((id) => [id, 0]));
   let highDamageWarnings = 0;
   let blockedArea = 0;
   const warned = new Set();
+  const blockers = new Set();
+  const ownerRoles = new Map();
   const enemies = world?.query?.('enemy');
   if (enemies) {
     for (let index = 0; index < enemies.length; index += 1) {
       const enemy = world.get(enemies.at(index));
       if (!enemy || !ENEMY_ROLES[enemy.role]) continue;
       roleCounts[enemy.role] += 1;
-      if (enemy.executingTelegraph && ENEMY_ROLES[enemy.role].highDamage && !warned.has(enemy.id)) {
-        warned.add(enemy.id);
-        highDamageWarnings += 1;
-        blockedArea += ENEMY_ROLES[enemy.role].blockedAreaCost;
+      ownerRoles.set(enemy.id, enemy.role);
+    }
+  }
+  const warnings = world?.query?.('warning');
+  if (warnings) {
+    for (let index = 0; index < warnings.length; index += 1) {
+      const warning = world.get(warnings.at(index));
+      const role = ENEMY_ROLES[warning?.role] ? warning.role : ownerRoles.get(warning?.ownerId);
+      if (!role || !ENEMY_ROLES[role]?.highDamage || warned.has(warning.ownerId)) continue;
+      warned.add(warning.ownerId);
+      highDamageWarnings += 1;
+      if (!blockers.has(warning.ownerId)) {
+        blockers.add(warning.ownerId);
+        blockedArea += ENEMY_ROLES[role].blockedAreaCost;
       }
+    }
+  }
+  const hazards = world?.query?.('enemyHazard');
+  if (hazards) {
+    for (let index = 0; index < hazards.length; index += 1) {
+      const hazard = world.get(hazards.at(index));
+      if (!hazard?.collidable || blockers.has(hazard.ownerId)) continue;
+      const role = ENEMY_ROLES[hazard.role] ? hazard.role : ownerRoles.get(hazard.ownerId);
+      if (!role || !ENEMY_ROLES[role]) continue;
+      blockers.add(hazard.ownerId);
+      blockedArea += ENEMY_ROLES[role].blockedAreaCost;
     }
   }
   return {
@@ -211,9 +235,12 @@ export function createEncounterDirector({
   let updateRevision = 0;
   let antiOrbitDirector = createAntiOrbitDirector({ seed });
   let threatRandom = createThreatRandom(seed);
+  const runtimeThreatLimits = getThreatLimits({ mode, quality });
   const enemySystem = createEnemySystem({
     random: () => threatRandom(),
-    projectileCap: getThreatLimits({ mode, quality }).projectileCap,
+    enemyCap: runtimeThreatLimits.activeEnemyCap,
+    projectileCap: runtimeThreatLimits.projectileCap,
+    warningCap: runtimeThreatLimits.simultaneousWarningCap,
   });
   let chapterIndex = 0;
   let waveTimer = 0;
@@ -333,15 +360,20 @@ export function createEncounterDirector({
       const ids = enemySystem.spawnWave(world, wave.roles, { arena: objective.arena, events });
       if (ids.length > 0) {
         wavesSpawned += 1;
-        for (const role of wave.roles) rolesSeen.add(role);
+        const materializedRoles = [];
+        for (const id of ids) {
+          const role = world.get(id)?.role;
+          if (!ENEMY_ROLES[role]) continue;
+          rolesSeen.add(role);
+          materializedRoles.push(role);
+        }
         emit(events, 'encounter:threat-wave', {
-          templateId, chapterIndex, waveIndex: waveIndex - 1, roles: wave.roles,
+          templateId, chapterIndex, waveIndex: waveIndex - 1, roles: materializedRoles,
           cost: wave.cost, budget: wave.budget, activeEnemyCap: wave.limits.activeEnemyCap,
         });
       }
     }
-    const relief = wave.reliefApplied ? (mode === 'abyss' ? 1.35 : 1.65) : 1;
-    waveTimer = (mode === 'abyss' ? 1.8 : 2.4) * relief;
+    waveTimer = mode === 'abyss' ? 1.8 : 2.4;
     return wave;
   }
 

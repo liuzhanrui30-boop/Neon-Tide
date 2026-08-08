@@ -1,19 +1,29 @@
 import { createEntityReadTarget } from '../game/entity-world.js';
-import { ENEMY_ROLE_IDS, ENEMY_ROLES, getEnemyRole } from '../content/enemies.js';
+import {
+  ENEMY_ROLE_IDS,
+  ENEMY_ROLES,
+  getEnemyRole,
+  isEnemyCommittedAttackState,
+} from '../content/enemies.js';
 
 const EPSILON = 1e-9;
 const DEFAULT_ARENA = Object.freeze({ halfWidth: 10.5, halfHeight: 7.2 });
 const TAU = Math.PI * 2;
-const EXECUTION_STATES = new Set([
-  'cut-dash', 'strike-dash', 'beam-active', 'detonate', 'wall-active', 'counter-active',
-]);
+const MINE_CHAIN_WARNING_FLOOR = 0.55;
+const LANCER_NODE_START = 0.9;
+const LANCER_NODE_STEP = 1.05;
+const LANCER_NODE_LIMIT = 15;
+const LANCER_NODE_RADIUS = 0.28;
+const LANCER_LAST_NODE = LANCER_NODE_START
+  + Math.floor((LANCER_NODE_LIMIT - LANCER_NODE_START) / LANCER_NODE_STEP) * LANCER_NODE_STEP;
+const LANCER_PREVIEW_START = LANCER_NODE_START - LANCER_NODE_RADIUS;
+const LANCER_PREVIEW_END = LANCER_LAST_NODE + LANCER_NODE_RADIUS;
+const LANCER_PREVIEW_LENGTH = LANCER_PREVIEW_END - LANCER_PREVIEW_START;
+const LANCER_PREVIEW_CENTER = (LANCER_PREVIEW_START + LANCER_PREVIEW_END) * 0.5;
+const LANCER_PREVIEW_WIDTH = LANCER_NODE_RADIUS * 2;
 
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
-const normalize = (x, y, fallbackX = 0, fallbackY = 1) => {
-  const length = Math.hypot(x, y);
-  return length > EPSILON ? { x: x / length, y: y / length } : { x: fallbackX, y: fallbackY };
-};
 
 function frozen(value) {
   if (value == null || typeof value !== 'object') return value;
@@ -41,7 +51,8 @@ export function predictHunterTarget(enemy, player, { maximumLeadDistance = 3, ma
 export function selectInterceptorCut(enemy, player, antiOrbit = null, random = Math.random, arena = DEFAULT_ARENA) {
   const sample = clamp(finite(random(), 0.5), 0, 0.999999);
   const angleDegrees = 35 + sample * 20;
-  const direction = finite(antiOrbit?.direction, 0) || (finite(player?.vx) * finite(player?.y) - finite(player?.vy) * finite(player?.x) >= 0 ? 1 : -1);
+  const direction = finite(antiOrbit?.direction, 0)
+    || (finite(player?.x) * finite(player?.vy) - finite(player?.y) * finite(player?.vx) >= 0 ? 1 : -1);
   const baseAngle = Number.isFinite(Number(antiOrbit?.normalizedAngle))
     ? Number(antiOrbit.normalizedAngle)
     : Math.atan2(finite(player?.y), finite(player?.x));
@@ -70,11 +81,12 @@ function contactRadius(role) {
 }
 
 function isPendingExecution(enemy) {
-  return enemy.hp <= 0 && (enemy.executingTelegraph || EXECUTION_STATES.has(enemy.state));
+  return enemy.hp <= 0 && (enemy.executingTelegraph || isEnemyCommittedAttackState(enemy.state));
 }
 
 export function createEnemySystem({
   random = Math.random,
+  enemyCap = 56,
   projectileCap = 96,
   warningCap = 3,
   worldLimit = 18,
@@ -82,6 +94,9 @@ export function createEnemySystem({
   if (typeof random !== 'function') throw new TypeError('enemy random must be a function');
   if (typeof warningCap !== 'function' && (!Number.isFinite(Number(warningCap)) || Number(warningCap) < 1)) {
     throw new TypeError('enemy warningCap must be a positive number or function');
+  }
+  if (typeof enemyCap !== 'function' && (!Number.isFinite(Number(enemyCap)) || Number(enemyCap) < 1)) {
+    throw new TypeError('enemy enemyCap must be a positive number or function');
   }
   const safeProjectileCap = clamp(Math.trunc(finite(projectileCap, 96)), 1, 96);
   const enemyRead = createEntityReadTarget();
@@ -96,7 +111,7 @@ export function createEnemySystem({
   };
   const auxiliaryPatch = {
     previousX: 0, previousY: 0, x: 0, y: 0, age: 0, lifetime: 0,
-    progress: 0, opacity: 0, collidable: false,
+    progress: 0, opacity: 0, collidable: false, hitCooldown: 0,
   };
   let sequence = 0;
   let warningSequence = 0;
@@ -122,9 +137,18 @@ export function createEnemySystem({
     return 0x20000000 + (hash % 0x1fffffff);
   }
 
+  function currentEnemyCap() {
+    const value = typeof enemyCap === 'function' ? enemyCap() : enemyCap;
+    return clamp(Math.trunc(finite(value, 56)), 1, 56);
+  }
+
   function spawnRole(world, roleId, overrides = {}) {
     const role = getEnemyRole(roleId);
     if (!role) throw new TypeError(`unknown enemy role: ${String(roleId)}`);
+    if (world.query('enemy').length >= currentEnemyCap()) {
+      rejectedSpawns += 1;
+      return null;
+    }
     const x = finite(overrides.x);
     const y = finite(overrides.y);
     const speed = Number.isFinite(Number(overrides.speed))
@@ -136,13 +160,13 @@ export function createEnemySystem({
     };
     const timerByRole = {
       hunter: 1.1, interceptor: 0, striker: 0.65, lancer: 0.9,
-      swarm: 0.7, mine: 0.55, warden: 1.2, bulwark: 1.1,
+      swarm: 0.7, mine: 0.55, warden: 0, bulwark: 1.1,
     };
     const id = world.spawn('enemy', {
       x, y, previousX: x, previousY: y,
       vx: finite(overrides.vx), vy: finite(overrides.vy),
       hp: finite(overrides.hp, role.hp), maxHp: finite(overrides.maxHp, overrides.hp ?? role.hp),
-      radius: role.radius, contactRadius: contactRadius(role), damage: role.damage,
+      radius: role.radius, contactRadius: contactRadius(role), damage: Math.min(0.1, role.damage),
       speed, maxSpeed: role.speedRange[1], turnRate: roleId === 'interceptor' ? 8 : 4.5,
       threat: role.threatCost, role: roleId, type: roleId, state: overrides.state ?? stateByRole[roleId],
       stateTimer: finite(overrides.stateTimer, timerByRole[roleId]),
@@ -182,13 +206,14 @@ export function createEnemySystem({
   }
 
   function spawnHazard(world, owner, data = {}) {
+    const radius = finite(data.radius, 0.32);
     const id = world.spawn('enemyHazard', {
       x: finite(data.x, owner.x), y: finite(data.y, owner.y),
       previousX: finite(data.x, owner.x), previousY: finite(data.y, owner.y),
       vx: finite(data.vx), vy: finite(data.vy),
       rotation: finite(data.rotation), previousRotation: finite(data.rotation),
-      scale: finite(data.scale, 1), scaleX: finite(data.scaleX, 1), scaleY: finite(data.scaleY, 1),
-      radius: finite(data.radius, 0.32), contactRadius: finite(data.contactRadius, data.radius ?? 0.32),
+      scale: finite(data.scale, 1), scaleX: finite(data.scaleX, radius), scaleY: finite(data.scaleY, radius),
+      radius, contactRadius: finite(data.contactRadius, radius),
       damage: finite(data.damage, getEnemyRole(owner.role)?.damage ?? 1),
       lifetime: finite(data.lifetime, 0.8), age: 0,
       ownerId: owner.id, sourceId: owner.sourceId, role: data.role ?? owner.role,
@@ -263,16 +288,20 @@ export function createEnemySystem({
     const antiOrbit = objective?.antiOrbit?.analysis ?? objective?.antiOrbit ?? null;
     const cut = selectInterceptorCut(enemy, player, antiOrbit, random, objectiveArena(objective));
     removeOwned(world, enemy.id);
-    const direction = normalize(cut.x - enemy.x, cut.y - enemy.y);
+    const deltaX = cut.x - enemy.x;
+    const deltaY = cut.y - enemy.y;
+    const length = Math.hypot(deltaX, deltaY);
+    const directionX = length > EPSILON ? deltaX / length : 0;
+    const directionY = length > EPSILON ? deltaY / length : 1;
     world.write(enemy.id, {
       state: 'cut-telegraph', stateTimer: getEnemyRole('interceptor').telegraphSeconds,
       telegraphTimer: getEnemyRole('interceptor').telegraphSeconds, duration: getEnemyRole('interceptor').telegraphSeconds,
-      targetX: cut.x, targetY: cut.y, directionX: direction.x, directionY: direction.y,
+      targetX: cut.x, targetY: cut.y, directionX, directionY,
       value: cut.angleDegrees, executingTelegraph: true, contactDamaging: false,
     });
     spawnWarning(world, enemy, 'interceptor-cut', {
       x: (enemy.x + cut.x) * 0.5, y: (enemy.y + cut.y) * 0.5,
-      rotation: Math.atan2(direction.y, direction.x), scaleX: Math.hypot(cut.x - enemy.x, cut.y - enemy.y), scaleY: 0.12,
+      rotation: Math.atan2(directionY, directionX), scaleX: length, scaleY: 0.12,
       duration: getEnemyRole('interceptor').telegraphSeconds, color: 0xff506f,
     });
   }
@@ -301,37 +330,46 @@ export function createEnemySystem({
 
   function beginLancer(world, enemy, player) {
     removeOwned(world, enemy.id);
-    const direction = normalize(player.x - enemy.x, player.y - enemy.y);
+    const deltaX = player.x - enemy.x;
+    const deltaY = player.y - enemy.y;
+    const length = Math.hypot(deltaX, deltaY);
+    const directionX = length > EPSILON ? deltaX / length : 0;
+    const directionY = length > EPSILON ? deltaY / length : 1;
     spawnWarning(world, enemy, 'lancer-beam', {
-      rotation: Math.atan2(direction.y, direction.x), scaleX: 18, scaleY: 0.16,
+      x: enemy.x + directionX * LANCER_PREVIEW_CENTER,
+      y: enemy.y + directionY * LANCER_PREVIEW_CENTER,
+      rotation: Math.atan2(directionY, directionX),
+      scaleX: LANCER_PREVIEW_LENGTH, scaleY: LANCER_PREVIEW_WIDTH,
       duration: getEnemyRole('lancer').telegraphSeconds, color: 0xffd166,
     });
     world.write(enemy.id, {
       state: 'beam-telegraph', stateTimer: getEnemyRole('lancer').telegraphSeconds,
       telegraphTimer: getEnemyRole('lancer').telegraphSeconds, duration: getEnemyRole('lancer').telegraphSeconds,
-      directionX: direction.x, directionY: direction.y, executingTelegraph: true,
+      directionX, directionY, executingTelegraph: true,
       contactDamaging: false,
     });
   }
 
   function activateLancer(world, enemy, player) {
     removeOwned(world, enemy.id);
-    const direction = normalize(enemy.directionX, enemy.directionY);
-    const safeAlong = clamp((player.x - enemy.x) * direction.x + (player.y - enemy.y) * direction.y, 2.4, 6.2);
-    const safeX = enemy.x + direction.x * safeAlong;
-    const safeY = enemy.y + direction.y * safeAlong;
+    const directionLength = Math.hypot(enemy.directionX, enemy.directionY);
+    const directionX = directionLength > EPSILON ? enemy.directionX / directionLength : 0;
+    const directionY = directionLength > EPSILON ? enemy.directionY / directionLength : 1;
+    const safeAlong = clamp((player.x - enemy.x) * directionX + (player.y - enemy.y) * directionY, 2.4, 6.2);
+    const safeX = enemy.x + directionX * safeAlong;
+    const safeY = enemy.y + directionY * safeAlong;
     const safeRadius = 1.35;
-    for (let along = 0.9; along <= 15; along += 1.05) {
-      const x = enemy.x + direction.x * along;
-      const y = enemy.y + direction.y * along;
+    for (let along = LANCER_NODE_START; along <= LANCER_NODE_LIMIT; along += LANCER_NODE_STEP) {
+      const x = enemy.x + directionX * along;
+      const y = enemy.y + directionY * along;
       if (Math.hypot(x - safeX, y - safeY) < safeRadius + 0.3) continue;
-      spawnHazard(world, enemy, { x, y, radius: 0.28, lifetime: 0.8, type: 'lancer-beam-node' });
+      spawnHazard(world, enemy, { x, y, radius: LANCER_NODE_RADIUS, lifetime: 0.8, type: 'lancer-beam-node' });
     }
     spawnHazard(world, enemy, {
       x: safeX, y: safeY, radius: safeRadius, lifetime: 0.8,
       role: 'safe-sector', type: 'lancer-safe-sector', color: 0x78fff1, opacity: 0.95, collidable: false,
     });
-    const base = Math.atan2(direction.y, direction.x);
+    const base = Math.atan2(directionY, directionX);
     for (const offset of [-0.2, 0, 0.2]) spawnEnemyProjectile(world, enemy, base + offset, { speed: 3.2 });
     world.write(enemy.id, {
       state: 'beam-active', stateTimer: 0.8, telegraphTimer: 0,
@@ -341,7 +379,12 @@ export function createEnemySystem({
 
   function beginMine(world, enemy, chained = false, delay = null) {
     removeOwned(world, enemy.id);
-    const duration = delay ?? getEnemyRole('mine').telegraphSeconds;
+    const existingWarning = enemy.state === 'arming' || enemy.state === 'chain-telegraph'
+      ? enemy.stateTimer
+      : 0;
+    const duration = chained
+      ? Math.max(MINE_CHAIN_WARNING_FLOOR, finite(delay), existingWarning)
+      : Math.max(getEnemyRole('mine').telegraphSeconds, existingWarning);
     for (let index = 0; index < 8; index += 1) {
       const angle = index / 8 * TAU;
       spawnWarning(world, enemy, 'mine-ring', {
@@ -370,9 +413,9 @@ export function createEnemySystem({
       const mine = world.readInto(candidates[index].id, mineRead);
       if (!mine) continue;
       if (!canBeginHighDamage(world, mine.id)) continue;
-      const delay = 0.45 + index * 0.12;
+      const delay = MINE_CHAIN_WARNING_FLOOR + index * 0.12;
       if (mine.state === 'chain-telegraph' && mine.stateTimer >= delay) continue;
-      beginMine(world, mine, true, Math.max(delay, mine.state === 'chain-telegraph' ? mine.stateTimer : 0));
+      beginMine(world, mine, true, Math.max(delay, mine.stateTimer));
       chainTriggers += 1;
     }
   }
@@ -472,7 +515,7 @@ export function createEnemySystem({
   }
 
   function applyBulwarkBreak(world, enemy, player) {
-    if (enemy.role !== 'bulwark' || !player) return false;
+    if (enemy.role !== 'bulwark' || enemy.state !== 'chase' || !enemy.armored || !player) return false;
     let token = 0;
     let damage = 0;
     if (player.dashTimer > 0 && player.attackKind === 'dash') {
@@ -483,11 +526,13 @@ export function createEnemySystem({
         world.write(enemy.id, { dashToken });
       }
     } else if (player.attackKind === 'tide-lance' && player.sequence !== enemy.lanceToken) {
-      const direction = normalize(player.directionX, player.directionY);
+      const directionLength = Math.hypot(player.directionX, player.directionY);
+      const directionX = directionLength > EPSILON ? player.directionX / directionLength : 0;
+      const directionY = directionLength > EPSILON ? player.directionY / directionLength : 1;
       const offsetX = enemy.x - player.x;
       const offsetY = enemy.y - player.y;
-      const along = offsetX * direction.x + offsetY * direction.y;
-      const across = Math.abs(offsetX * direction.y - offsetY * direction.x);
+      const along = offsetX * directionX + offsetY * directionY;
+      const across = Math.abs(offsetX * directionY - offsetY * directionX);
       if (along >= 0 && along <= 18 && across <= enemy.radius + 0.5) {
         token = player.sequence >>> 0;
         damage = 2;
@@ -506,10 +551,14 @@ export function createEnemySystem({
   }
 
   function steer(world, enemy, targetX, targetY, dt, response = 4, speed = enemy.speed) {
-    const direction = normalize(targetX - enemy.x, targetY - enemy.y);
+    const deltaX = targetX - enemy.x;
+    const deltaY = targetY - enemy.y;
+    const length = Math.hypot(deltaX, deltaY);
+    const directionX = length > EPSILON ? deltaX / length : 0;
+    const directionY = length > EPSILON ? deltaY / length : 1;
     const blend = 1 - Math.exp(-response * dt);
-    const vx = enemy.vx + (direction.x * speed - enemy.vx) * blend;
-    const vy = enemy.vy + (direction.y * speed - enemy.vy) * blend;
+    const vx = enemy.vx + (directionX * speed - enemy.vx) * blend;
+    const vy = enemy.vy + (directionY * speed - enemy.vy) * blend;
     movementPatch.previousX = enemy.x;
     movementPatch.previousY = enemy.y;
     movementPatch.x = enemy.x + vx * dt;
@@ -522,8 +571,8 @@ export function createEnemySystem({
     movementPatch.telegraphTimer = enemy.telegraphTimer;
     movementPatch.targetX = targetX;
     movementPatch.targetY = targetY;
-    movementPatch.directionX = direction.x;
-    movementPatch.directionY = direction.y;
+    movementPatch.directionX = directionX;
+    movementPatch.directionY = directionY;
     movementPatch.executingTelegraph = enemy.executingTelegraph;
     movementPatch.contactDamaging = enemy.contactDamaging;
     movementPatch.armored = enemy.armored;
@@ -532,8 +581,18 @@ export function createEnemySystem({
   }
 
   function updateHunter(world, enemy, player, dt) {
-    const prediction = predictHunterTarget(enemy, player);
-    steer(world, enemy, prediction.x, prediction.y, dt, 3.8);
+    const relativeDistance = Math.hypot(player.x - enemy.x, player.y - enemy.y);
+    const speed = Math.max(0.1, enemy.speed);
+    const velocityLength = Math.hypot(player.vx, player.vy);
+    const leadSeconds = velocityLength <= EPSILON
+      ? 0.75
+      : Math.min(0.75, relativeDistance / speed * 0.35 + 0.18);
+    const leadLength = velocityLength * leadSeconds;
+    const leadScale = leadLength > 3 ? 3 / leadLength : 1;
+    steer(world, enemy,
+      player.x + player.vx * leadSeconds * leadScale,
+      player.y + player.vy * leadSeconds * leadScale,
+      dt, 3.8);
   }
 
   function updateInterceptor(world, enemy, player, objective, dt) {
@@ -551,7 +610,7 @@ export function createEnemySystem({
         world.write(enemy.id, {
           state: 'cut-dash', stateTimer: 0.78, telegraphTimer: 0,
           vx: enemy.directionX * enemy.speed, vy: enemy.directionY * enemy.speed,
-          executingTelegraph: false, contactDamaging: true,
+          damage: getEnemyRole('interceptor').damage, executingTelegraph: false, contactDamaging: true,
         });
       }
       return;
@@ -576,7 +635,9 @@ export function createEnemySystem({
       movementPatch.armored = false;
       movementPatch.weakPoint = false;
       world.write(enemy.id, movementPatch);
-      if (enemy.stateTimer - dt <= EPSILON) world.write(enemy.id, { state: 'approach', stateTimer: 0.5, contactDamaging: false });
+      if (enemy.stateTimer - dt <= EPSILON) world.write(enemy.id, {
+        state: 'approach', stateTimer: 0.5, damage: 0.1, contactDamaging: false,
+      });
     }
   }
 
@@ -595,14 +656,16 @@ export function createEnemySystem({
         world.write(enemy.id, {
           state: 'strike-dash', stateTimer: 0.5, telegraphTimer: 0,
           vx: enemy.directionX * 10.5, vy: enemy.directionY * 10.5,
-          executingTelegraph: false, contactDamaging: true,
+          damage: getEnemyRole('striker').damage, executingTelegraph: false, contactDamaging: true,
         });
       }
       return;
     }
     if (enemy.state === 'strike-dash') {
       steer(world, enemy, enemy.x + enemy.vx, enemy.y + enemy.vy, dt, 0.1, Math.hypot(enemy.vx, enemy.vy));
-      if (enemy.stateTimer <= dt) world.write(enemy.id, { state: 'track', stateTimer: 0.85, contactDamaging: false, vx: 0, vy: 0 });
+      if (enemy.stateTimer <= dt) world.write(enemy.id, {
+        state: 'track', stateTimer: 0.85, damage: 0.1, contactDamaging: false, vx: 0, vy: 0,
+      });
     }
   }
 
@@ -638,9 +701,13 @@ export function createEnemySystem({
       steer(world, enemy, targetX, targetY, dt, 4.5, enemy.speed);
       if (timer <= EPSILON) world.write(enemy.id, { state: 'formation-split', stateTimer: 0.78 });
     } else {
-      const direction = normalize(player.x - enemy.x, player.y - enemy.y);
-      const targetX = player.x - direction.y * sign * 3.2;
-      const targetY = player.y + direction.x * sign * 2.2;
+      const deltaX = player.x - enemy.x;
+      const deltaY = player.y - enemy.y;
+      const length = Math.hypot(deltaX, deltaY);
+      const directionX = length > EPSILON ? deltaX / length : 0;
+      const directionY = length > EPSILON ? deltaY / length : 1;
+      const targetX = player.x - directionY * sign * 3.2;
+      const targetY = player.y + directionX * sign * 2.2;
       steer(world, enemy, targetX, targetY, dt, 4.8, enemy.speed);
       if (timer <= EPSILON) world.write(enemy.id, { state: 'formation-merge', stateTimer: 0.9 });
     }
@@ -719,6 +786,7 @@ export function createEnemySystem({
   }
 
   const stepDestroyed = [];
+  const updateSummary = { destroyedRecords: stepDestroyed, active: 0 };
   function destroyEnemy(world, enemy, reason = 'destroyed') {
     removeOwned(world, enemy.id);
     if (!world.despawn(enemy.id)) return false;
@@ -727,7 +795,7 @@ export function createEnemySystem({
     return true;
   }
 
-  function updateAuxiliaries(world, dt, reliefActive = false) {
+  function updateAuxiliaries(world, dt) {
     const hazards = world.query('enemyHazard');
     for (let index = hazards.length - 1; index >= 0; index -= 1) {
       const hazard = world.readInto(hazards.at(index), auxiliaryRead);
@@ -745,7 +813,8 @@ export function createEnemySystem({
       auxiliaryPatch.lifetime = hazard.lifetime;
       auxiliaryPatch.progress = hazard.lifetime > 0 ? clamp(age / hazard.lifetime, 0, 1) : 0;
       auxiliaryPatch.opacity = hazard.opacity;
-      auxiliaryPatch.collidable = reliefActive && hazard.role !== 'safe-sector' && hazard.role !== 'warden-gap' ? false : hazard.collidable;
+      auxiliaryPatch.collidable = hazard.collidable;
+      auxiliaryPatch.hitCooldown = Math.max(0, hazard.hitCooldown - dt);
       world.write(hazard.id, auxiliaryPatch);
     }
   }
@@ -758,19 +827,19 @@ export function createEnemySystem({
     const player = Number.isSafeInteger(playerValue)
       ? world.readInto(playerValue, playerRead)
       : playerValue?.id ? world.readInto(playerValue.id, playerRead) ?? playerValue : playerValue;
-    if (!player) return frozen({ destroyedRecords: [], active: world.query('enemy').length });
-    stepDestroyed.length = 0;
-    const reliefActive = finite(player.hp ?? player.hull, 1) / Math.max(1, finite(player.maxHp ?? player.maxHull, 1)) <= 0.4;
-    updateAuxiliaries(world, dt, reliefActive);
-    if (reliefActive) {
-      const projectiles = world.query('enemyProjectile');
-      for (let index = 0; index < projectiles.length; index += 1) world.write(projectiles.at(index), { collidable: false });
+    if (!player) {
+      stepDestroyed.length = 0;
+      updateSummary.active = world.query('enemy').length;
+      return updateSummary;
     }
+    stepDestroyed.length = 0;
+    updateAuxiliaries(world, dt);
     const query = world.query('enemy');
     const initialCount = query.length;
     for (let index = initialCount - 1; index >= 0; index -= 1) {
       const enemy = world.readInto(query.at(index), enemyRead);
       if (!enemy) continue;
+      if (enemy.hitCooldown > 0) world.write(enemy.id, { hitCooldown: Math.max(0, enemy.hitCooldown - dt) });
       if (enemy.hp <= 0 && !isPendingExecution(enemy)) {
         destroyEnemy(world, enemy, 'damage');
         continue;
@@ -786,23 +855,14 @@ export function createEnemySystem({
       const fresh = world.readInto(enemy.id, enemyRead);
       if (!fresh) continue;
       if (fresh.hp <= 0 && isPendingExecution(fresh)) executionProtected += 1;
-      if (reliefActive && fresh.contactDamaging) world.write(fresh.id, { contactDamaging: false });
       if (Math.abs(fresh.x) > worldLimit || Math.abs(fresh.y) > worldLimit) {
         world.write(fresh.id, { x: clamp(fresh.x, -worldLimit, worldLimit), y: clamp(fresh.y, -worldLimit, worldLimit), vx: -fresh.vx * 0.4, vy: -fresh.vy * 0.4 });
       }
     }
-    if (reliefActive) {
-      for (const kind of ['enemyHazard', 'enemyProjectile']) {
-        const reliefQuery = world.query(kind);
-        for (let index = 0; index < reliefQuery.length; index += 1) {
-          const reliefEntity = world.readInto(reliefQuery.at(index), auxiliaryRead);
-          if (reliefEntity?.collidable) world.write(reliefEntity.id, { collidable: false, contactDamaging: false });
-        }
-      }
-    }
     for (const record of stepDestroyed) emit(events, 'enemy:destroyed', record);
     updates += 1;
-    return frozen({ destroyedRecords: [...stepDestroyed], active: world.query('enemy').length });
+    updateSummary.active = world.query('enemy').length;
+    return updateSummary;
   }
 
   function spawnWave(world, roles, options = {}) {
@@ -860,7 +920,9 @@ export function createEnemySystem({
     return frozen({
       updates, spawned, destroyed, rejectedSpawns, warningsSpawned, hazardsSpawned,
       projectilesSpawned, chainTriggers, executionProtected, cleanupCount,
-      activeWarnings, activeHazards, warningCap: currentWarningCap(), roles,
+      activeWarnings, activeHazards,
+      caps: { enemy: currentEnemyCap(), projectile: safeProjectileCap, warning: currentWarningCap() },
+      roles,
     });
   }
 

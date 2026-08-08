@@ -9,6 +9,21 @@ export const ENEMY_ROLE_IDS = Object.freeze([
   'bulwark',
 ]);
 
+export const ENEMY_COMMITTED_ATTACK_STATES = Object.freeze([
+  'cut-dash',
+  'strike-dash',
+  'beam-active',
+  'detonate',
+  'wall-active',
+  'counter-active',
+]);
+
+const COMMITTED_ATTACK_STATE_SET = new Set(ENEMY_COMMITTED_ATTACK_STATES);
+
+export function isEnemyCommittedAttackState(state) {
+  return typeof state === 'string' && COMMITTED_ATTACK_STATE_SET.has(state);
+}
+
 const ROLE_SET = new Set(ENEMY_ROLE_IDS);
 
 function role(definition) {
@@ -41,7 +56,7 @@ export const ENEMY_ROLES = Object.freeze({
     id: 'lancer', speedRange: [3.2, 4], threatCost: 4, minChapter: 1, telegraphSeconds: 0.75,
     activeCap: 4, counterplay: 'Enter the cyan beam sector or phase through the slow bolt group.',
     highDamage: true, blockedAreaCost: 0.12, projectileCost: 3,
-    hp: 3, damage: 0.35, radius: 0.78, color: 0xffd166,
+    hp: 5, damage: 0.35, radius: 0.78, color: 0xffd166,
   }),
   swarm: role({
     id: 'swarm', speedRange: [4, 5], threatCost: 1, minChapter: 0, telegraphSeconds: 0.55,

@@ -44,3 +44,52 @@ Port 4173 was not touched. Browser validation used Vite on temporary port 4174 a
 ## Concerns
 - Vite retains the inherited large-chunk warning; the main production bundle is 848.79 kB minified (235.40 kB gzip). Code splitting remains outside Task 9.
 - One earlier monolithic browser run exposed the inherited core-harvest transition-grace timing edge while staging the boundary-orbit proof. The focused objective scenario then passed, and the subsequent final 30/30 matrix passed in one run without code changes to objective timing.
+
+---
+
+## Review fix round 1/5 — Fair enemy threat contracts
+
+### Status
+DONE — all requested Critical, Important, and allocation findings are fixed and covered by final regression evidence.
+
+### Correctness and fairness fixes
+- Removed low-hull mutation of live enemy bodies, projectiles, and hazards. Hull relief now changes only future wave composition cost: Standard stops admitting new combinations at or below 40% hull, while Abyss retains a reduced positive budget. Existing and newly committed threats stay collidable and damaging before and after healing.
+- Kept body and hazard pressure playable without cancelling it: ordinary body contact uses a bounded 0.1 base hit with deterministic cooldown, committed dash states restore authored role damage, and one owner-group hazard hit is accepted per cooldown window.
+- Made the Lancer preview and active beam share one authoritative node layout. The preview is centered on the future beam and includes the complete first-to-last node footprint plus node radii; renderer observations prove every rendered node remains inside the rendered warning.
+- Corrected the Interceptor fallback cross-product sign for both clockwise and counter-clockwise angular motion.
+- Enforced exact runtime device caps. Coarse worlds allocate 42 enemies and 72 enemy projectiles; Standard/Abyss coarse directors admit 36/42 enemies, 72 projectiles, and 2/3 warning owners respectively. EnemySystem exposes and enforces the same limits.
+- Expanded blocked-area accounting to live collidable hazards for Lancer, Mine, Warden, and Bulwark, deduplicated by owner across warning/active phases, so prospective waves cannot hide already-committed area pressure.
+- Protected lethal-hit execution through every committed active state (`cut-dash`, `strike-dash`, `beam-active`, `detonate`, `wall-active`, and `counter-active`) and cleaned each owner/hazard group exactly once after its authored duration.
+- Prevented Bulwark dash/Tide Lance tokens from restarting or replacing an in-progress counter. Armor breaks are accepted only from the armored chase state.
+- Raised Mine chain warning floor to 0.55 seconds and preserved any longer arming warning already in progress.
+- Matched rendered hazard transforms to authoritative radius/scale for Warden wall nodes, Warden gaps, and the Lancer safe sector without changing ownership or collision flags.
+- Made Warden materialization immediately request its fair telegraph admission. This prevents ordinary auto-fire from removing a newly introduced chapter-two Warden before its readable safe-gap contract can appear.
+- Changed `rolesSeen` and threat-wave telemetry to record only successfully materialized enemies. Browser acceptance now uses stable renderer observations of actual pooled roles, warning concurrency/progress, Lancer containment, and Warden/Lancer safe geometry rather than selected or rejected roster entries.
+
+### Allocation fixes
+- Removed transient normalization and prediction objects from fixed-step Hunter, steering, and Swarm paths.
+- Reused one compact EnemySystem update summary and destroyed-record buffer across fixed steps.
+- Kept renderer acceptance telemetry bounded with preallocated scalar/typed-array observations rather than per-frame geometry snapshots.
+
+### Regression coverage
+- Added actual low-hull → heal collision probes for enemy body, projectile, and hazard damage.
+- Added exact Lancer transform containment, both Interceptor rotation signs, live blocked-area admission, all committed execution states, Bulwark token replay, natural Mine warning preservation, authoritative renderer radius decomposition, materialization-only `rolesSeen`, exact compact caps, and 600-step update-result reuse tests.
+- The headful enemy scenario reaches all eight actually rendered roles through the natural campaign using real WASD/dash input, observes at least two independent concurrent warning owners, and verifies zero hidden warnings plus rendered Lancer/Warden safe-path parity. A second compact scenario proves Standard and Abyss caps end to end.
+
+### Verification
+All Node/npm commands used Node 22.14.0 from the required runtime. Port 4173 remained untouched; browser validation used temporary Vite port 4174 and isolated headful Chrome 146.0.7680.80 on CDP 9358.
+
+- Focused enemy/director/collision/world/renderer tests — PASS: 63/63.
+- Seeded threat stress — PASS: 256 seeds × 24 waves, finite and within all hard budgets, with every role naturally reachable.
+- Final `npm run check` — PASS: 219/219 Node tests and production build.
+- Focused natural enemy acceptance — PASS: 1/1.
+- Focused compact Standard/Abyss cap acceptance — PASS: 1/1.
+- Natural objective acceptance under enemy pressure — PASS in the final full matrix.
+- Natural anti-orbit acceptance under enemy pressure — PASS in the final full matrix.
+- Full browser matrix — PASS: 31/31 in one final run.
+- Breakpoint cleanup failure-path self-test — PASS: 1/1.
+- `git diff --check` — PASS.
+
+### Concerns
+- Vite retains the inherited large-chunk warning; the final main bundle is 852.08 kB minified (236.64 kB gzip). Code splitting remains outside Task 9.
+- Standard low-hull relief intentionally pauses future wave admission at or below 40% hull rather than weakening live threats. Abyss retains reduced future admission. This is deterministic and fully covered, but remains a tuning lever for later playtesting.

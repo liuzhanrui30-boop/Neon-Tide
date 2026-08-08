@@ -38,8 +38,11 @@ export function bootstrapNeonTide(options = {}) {
     viewportWidth: globalThis.innerWidth ?? 1440,
     devicePixelRatio: globalThis.devicePixelRatio ?? 1,
   });
+  const coarseEntityQuality = coarsePointer
+    || ['compact', 'coarse', 'touch', 'mobile'].includes(entityQuality.tier);
   const entityCapacities = options.entityCapacities ?? selectEntityCapacities({
-    coarsePointer: coarsePointer || entityQuality.tier === 'mobile',
+    coarsePointer: coarseEntityQuality,
+    quality: entityQuality,
   });
   const searchParams = new URLSearchParams(globalThis.location?.search ?? '');
   const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
@@ -62,11 +65,13 @@ export function bootstrapNeonTide(options = {}) {
   const collisionSystem = createCollisionSystem();
   let session = null;
   const enemySystem = createEnemySystem({
+    enemyCap: () => session?.snapshot().runMode === 'abyss'
+      ? (coarseEntityQuality ? 42 : 56)
+      : (coarseEntityQuality ? 36 : 48),
     projectileCap: entityCapacities.enemyProjectile,
     warningCap: () => {
       const abyss = session?.snapshot().runMode === 'abyss';
-      const coarse = coarsePointer || entityQuality.tier === 'mobile';
-      return abyss ? (coarse ? 3 : 4) : (coarse ? 2 : 3);
+      return abyss ? (coarseEntityQuality ? 3 : 4) : (coarseEntityQuality ? 2 : 3);
     },
   });
   const objectiveBridge = createObjectiveWorldBridge({ world });

@@ -25,7 +25,7 @@ const BASE_SIZES = Object.freeze({
   friendlyProjectile: 0.16,
   enemyProjectile: 0.19,
   warning: 1,
-  enemyHazard: 0.72,
+  enemyHazard: 1,
   pickup: 0.42,
   objective: 1,
   bossPart: 1,
@@ -255,6 +255,61 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   let corrections = 0;
   let clippedEntities = 0;
   let worldWarningCount = 0;
+  const observedEnemyRoles = new Set();
+  const previewOwners = new Float64Array(8);
+  const previewX = new Float64Array(8);
+  const previewY = new Float64Array(8);
+  const previewCos = new Float64Array(8);
+  const previewSin = new Float64Array(8);
+  const previewHalfLength = new Float64Array(8);
+  const previewHalfWidth = new Float64Array(8);
+  let previewCursor = 0;
+  let lancerPreviewsRendered = 0;
+  let lancerBeamNodesRendered = 0;
+  let lancerBeamNodesOutsidePreview = 0;
+  let wardenGapRenderedRadius = 0;
+  let wardenWallRenderedRadius = 0;
+  let lancerSafeRenderedRadius = 0;
+  const warningFrameOwners = new Float64Array(8);
+  const warningFrameProgress = new Float64Array(8);
+  let maxSimultaneousWarningOwners = 0;
+  let maxIndependentWarningProgress = 0;
+  let maxHiddenActiveWarnings = 0;
+
+  function previewSlot(ownerId, create = false) {
+    for (let index = 0; index < previewOwners.length; index += 1) {
+      if (previewOwners[index] === ownerId) return index;
+    }
+    if (!create) return -1;
+    const slot = previewCursor++ % previewOwners.length;
+    previewOwners[slot] = ownerId;
+    return slot;
+  }
+
+  function recordLancerPreview(entity, renderedScaleX, renderedScaleY) {
+    const slot = previewSlot(entity.ownerId, true);
+    previewX[slot] = entity.x;
+    previewY[slot] = entity.y;
+    previewCos[slot] = Math.cos(entity.rotation);
+    previewSin[slot] = Math.sin(entity.rotation);
+    previewHalfLength[slot] = renderedScaleX * 0.5;
+    previewHalfWidth[slot] = renderedScaleY * 0.5;
+    lancerPreviewsRendered += 1;
+  }
+
+  function recordLancerNode(entity) {
+    const slot = previewSlot(entity.ownerId);
+    if (slot < 0) return;
+    const dx = entity.x - previewX[slot];
+    const dy = entity.y - previewY[slot];
+    const along = dx * previewCos[slot] + dy * previewSin[slot];
+    const across = -dx * previewSin[slot] + dy * previewCos[slot];
+    lancerBeamNodesRendered += 1;
+    if (Math.abs(along) + entity.radius > previewHalfLength[slot] + 1e-6
+      || Math.abs(across) + entity.radius > previewHalfWidth[slot] + 1e-6) {
+      lancerBeamNodesOutsidePreview += 1;
+    }
+  }
 
   function syncInstanced(pool, query, world, alpha) {
     const { object, capacity } = pool;
@@ -287,15 +342,30 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       const baseSize = BASE_SIZES[pool.kind];
       scratch.position.set(x, y, z);
       scratch.rotation.set(0, 0, rotation);
+      const authoritativeScaleX = pool.kind === 'enemyHazard' && entity.scaleX === 1
+        ? entity.radius
+        : entity.scaleX;
+      const authoritativeScaleY = pool.kind === 'enemyHazard' && entity.scaleY === 1
+        ? entity.radius
+        : entity.scaleY;
+      const renderedScaleX = clampFinite(authoritativeScaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
+      const renderedScaleY = clampFinite(authoritativeScaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       scratch.scale.set(
-        clampFinite(entity.scaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
-        clampFinite(entity.scaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
+        renderedScaleX,
+        renderedScaleY,
         clampFinite(entity.scaleZ, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
       );
       scratch.updateMatrix();
       object.setMatrixAt(count, scratch.matrix);
       color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS[pool.kind]);
       setColorComponents(object.instanceColor.array, count * 3, color);
+      if (pool.kind === 'enemy' && entity.role) observedEnemyRoles.add(entity.role);
+      if (pool.kind === 'enemyHazard') {
+        if (entity.type === 'lancer-beam-node') recordLancerNode(entity);
+        if (entity.role === 'warden-gap') wardenGapRenderedRadius = Math.max(wardenGapRenderedRadius, renderedScaleX);
+        else if (entity.role === 'warden-wall') wardenWallRenderedRadius = Math.max(wardenWallRenderedRadius, renderedScaleX);
+        else if (entity.role === 'safe-sector') lancerSafeRenderedRadius = Math.max(lancerSafeRenderedRadius, renderedScaleX);
+      }
       count += 1;
     }
     object.count = count;
@@ -336,6 +406,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function syncWarnings(pool, query, world, alpha) {
     const candidateCount = Math.min(query.length, pool.capacity);
     let count = 0;
+    let frameOwnerCount = 0;
+    warningFrameOwners.fill(0);
     for (let index = 0; index < candidateCount; index += 1) {
       const entity = world.readInto(query.at(index), pool.readTarget);
       if (!entity || (entity.flags & ENTITY_FLAG_HIDDEN) !== 0 || entity.opacity <= 0) continue;
@@ -353,11 +425,34 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         clampFinite(entity.scaleY, 0, RENDER_SCALE_LIMIT, 1) * scale,
         1,
       );
+      if (entity.type === 'lancer-beam') recordLancerPreview(entity, mesh.scale.x, mesh.scale.y);
+      let ownerSlot = -1;
+      for (let ownerIndex = 0; ownerIndex < frameOwnerCount; ownerIndex += 1) {
+        if (warningFrameOwners[ownerIndex] === entity.ownerId) { ownerSlot = ownerIndex; break; }
+      }
+      if (ownerSlot < 0 && frameOwnerCount < warningFrameOwners.length) {
+        ownerSlot = frameOwnerCount++;
+        warningFrameOwners[ownerSlot] = entity.ownerId;
+        warningFrameProgress[ownerSlot] = entity.progress;
+      }
       material.color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS.warning);
       material.opacity = clampFinite(entity.opacity, 0, 1, 0.72);
       mesh.visible = true;
       count += 1;
     }
+    let distinctProgress = 0;
+    for (let ownerIndex = 0; ownerIndex < frameOwnerCount; ownerIndex += 1) {
+      let duplicate = false;
+      for (let previous = 0; previous < ownerIndex; previous += 1) {
+        if (Math.abs(warningFrameProgress[ownerIndex] - warningFrameProgress[previous]) <= 1e-4) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (!duplicate) distinctProgress += 1;
+    }
+    maxSimultaneousWarningOwners = Math.max(maxSimultaneousWarningOwners, frameOwnerCount);
+    maxIndependentWarningProgress = Math.max(maxIndependentWarningProgress, distinctProgress);
     for (let index = count; index < pool.visibleCount; index += 1) {
       pool.warningMeshes[index].visible = false;
       pool.warningMaterials[index].opacity = 0;
@@ -385,6 +480,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       if (query.length > pool.capacity) clippedEntities += query.length - pool.capacity;
     }
     worldWarningCount = world.query('warning').length;
+    maxHiddenActiveWarnings = Math.max(maxHiddenActiveWarnings,
+      Math.max(0, worldWarningCount - (pools.warning?.visibleCount ?? 0)));
     active = nextActive;
     syncs += 1;
     return true;
@@ -563,6 +660,18 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       }
     }
     active = 0;
+    observedEnemyRoles.clear();
+    previewOwners.fill(0);
+    previewCursor = 0;
+    lancerPreviewsRendered = 0;
+    lancerBeamNodesRendered = 0;
+    lancerBeamNodesOutsidePreview = 0;
+    wardenGapRenderedRadius = 0;
+    wardenWallRenderedRadius = 0;
+    lancerSafeRenderedRadius = 0;
+    maxSimultaneousWarningOwners = 0;
+    maxIndependentWarningProgress = 0;
+    maxHiddenActiveWarnings = 0;
     resets += 1;
     return true;
   }
@@ -623,6 +732,18 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       warningVisibility: Object.freeze({
         visible: pools.warning?.visibleCount ?? 0,
         hiddenActive: Math.max(0, (pools.warning ? worldWarningCount : 0) - (pools.warning?.visibleCount ?? 0)),
+      }),
+      observations: Object.freeze({
+        enemyRoles: Object.freeze([...observedEnemyRoles]),
+        lancerPreviewsRendered,
+        lancerBeamNodesRendered,
+        lancerBeamNodesOutsidePreview,
+        wardenGapRenderedRadius,
+        wardenWallRenderedRadius,
+        lancerSafeRenderedRadius,
+        maxSimultaneousWarningOwners,
+        maxIndependentWarningProgress,
+        maxHiddenActiveWarnings,
       }),
       ownership: Object.freeze({
         objects: ENTITY_KINDS.length + 1 + (pools.warning?.capacity ?? 0),
