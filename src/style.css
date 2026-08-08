@@ -1905,3 +1905,45 @@ kbd {
     opacity: 1;
   }
 }
+
+.dash-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 3px;
+  color: rgba(223, 250, 255, 0.54);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  line-height: 1;
+}
+
+.dash-meta i {
+  color: rgba(100, 245, 255, 0.35);
+  font-style: normal;
+}
+
+#phase-status {
+  color: var(--cyan);
+  font-weight: 700;
+}
+
+#phase-status[data-state="perfect"] {
+  color: white;
+  text-shadow: 0 0 10px var(--cyan), 0 0 18px var(--magenta);
+}
+
+#phase-status[data-state="buff"] {
+  color: var(--gold);
+}
+
+#input-device {
+  max-width: 58px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 760px) {
+  .dash-meta {
+    display: none;
+  }
+}

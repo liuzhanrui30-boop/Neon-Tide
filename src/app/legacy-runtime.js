@@ -47,8 +47,9 @@ import {
 } from "../game/director.js";
 import { createPostProcessing, selectRenderQuality } from "../game/render-quality.js";
 import { createRealmBackgrounds } from "../game/realm-backgrounds.js";
+import { normalizeActionSnapshot } from "../systems/input-system.js";
 
-export function createLegacyRuntime({ session, loop, events }) {
+export function createLegacyRuntime({ session, loop, events, inputSystem = null, playerProjection = null, hudRenderer = null }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
 let disposed = false;
@@ -269,6 +270,8 @@ const state = {
   dashTimer: 0,
   dashInvulnTimer: 0,
   dashSequence: 0,
+  perfectPhaseWindow: 0,
+  autoFireRateBuffTimer: 0,
   hurtInvuln: 0,
   get playerAttacking() {
     return this.dashTimer > 0;
@@ -323,6 +326,7 @@ const state = {
 };
 
 const input = {
+  actions: Object.freeze({ moveX: 0, moveY: 0, dashPressed: false, ultimatePressed: false, inputDevice: "keyboard" }),
   keys: new Set(),
   dashBuffer: 0,
   laserBuffer: 0,
@@ -1105,7 +1109,10 @@ function updateProjectiles(dt) {
     });
     const outOfBounds = Math.abs(projectile.mesh.position.x) > view.halfWidth + 2
       || Math.abs(projectile.mesh.position.y) > view.halfHeight + 2;
-    if (hitPlayer && !state.dashInvulnerable && state.hurtInvuln <= 0) {
+    if (hitPlayer && state.perfectPhaseWindow > 0) {
+      triggerPerfectPhase(projectile);
+      resetProjectile(projectile);
+    } else if (hitPlayer && !state.dashInvulnerable && state.hurtInvuln <= 0) {
       damagePlayer(projectile);
       resetProjectile(projectile);
     } else if (projectile.life <= 0 || outOfBounds) {
@@ -2126,6 +2133,8 @@ function resetState() {
   state.dashTimer = 0;
   state.dashInvulnTimer = 0;
   state.dashSequence = 0;
+  state.perfectPhaseWindow = 0;
+  state.autoFireRateBuffTimer = 0;
   state.hurtInvuln = 0;
   state.runFinished = false;
   state.trauma = 0;
@@ -2185,6 +2194,8 @@ function resetState() {
   input.dashBuffer = 0;
   input.laserBuffer = 0;
   input.keys.clear();
+  inputSystem?.resetHeld?.();
+  input.actions = Object.freeze({ moveX: 0, moveY: 0, dashPressed: false, ultimatePressed: false, inputDevice: "keyboard" });
   resetJoystick();
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
@@ -2204,6 +2215,7 @@ function resetState() {
   camera.updateProjectionMatrix();
   realmBackgrounds.reset();
   syncPlayerTransform();
+  playerProjection?.reset?.();
   syncHealthPips();
   syncBossProgress(null);
   seedShards();
@@ -2677,6 +2689,11 @@ function updatePlayer(dt) {
     player.velocity.y *= -0.25;
   }
 
+  const lookAheadTarget = player.velocity.clone().multiplyScalar(0.11);
+  if (lookAheadTarget.length() < 0.02) lookAheadTarget.set(0, 0);
+  lookAheadTarget.clampLength(0, state.reducedMotion ? 0 : 0.72);
+  state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
+
   const speed = player.velocity.length();
   if (speed > 0.08) {
     player.group.rotation.z = Math.atan2(player.facing.y, player.facing.x) - Math.PI / 2;
@@ -2724,6 +2741,19 @@ function updatePlayer(dt) {
     player.trailTimer = trailInterval;
   }
   syncPlayerTransform();
+  const projection = {
+    position: { x: player.position.x, y: player.position.y },
+    velocity: { x: player.velocity.x, y: player.velocity.y },
+    facing: { x: player.facing.x, y: player.facing.y },
+    dashCharges: [...state.dashCharges],
+    dashTimer: state.dashTimer,
+    phaseTimer: state.dashInvulnTimer,
+    perfectPhaseWindow: state.perfectPhaseWindow,
+    autoFireRateBuffTimer: state.autoFireRateBuffTimer,
+    cameraLead: { x: state.cameraLookAhead.x, y: state.cameraLookAhead.y },
+    inputDevice: input.actions.inputDevice,
+  };
+  playerProjection?.publish?.(projection);
 }
 
 function attemptDash(direction) {
@@ -2735,6 +2765,7 @@ function attemptDash(direction) {
   state.dashTimer = DASH_ACTIVE_WINDOW;
   state.dashInvulnTimer = getDerivedValues().dashInvulnerability;
   state.dashSequence += 1;
+  state.perfectPhaseWindow = 0.12;
   player.facing.copy(dashDirection);
   player.velocity.copy(dashDirection).multiplyScalar(DASH_SPEED * getDerivedValues().speedMultiplier);
   if (state.reducedMotion) player.group.scale.setScalar(PLAYER_VISUAL_SCALE);
@@ -2748,14 +2779,30 @@ function attemptDash(direction) {
 }
 
 function readMoveDirection() {
-  const direction = new THREE.Vector2();
-  if (input.keys.has("ArrowLeft") || input.keys.has("a")) direction.x -= 1;
-  if (input.keys.has("ArrowRight") || input.keys.has("d")) direction.x += 1;
-  if (input.keys.has("ArrowDown") || input.keys.has("s")) direction.y -= 1;
-  if (input.keys.has("ArrowUp") || input.keys.has("w")) direction.y += 1;
-  direction.add(input.touch);
-  if (direction.lengthSq() > 1) direction.normalize();
-  return direction;
+  return new THREE.Vector2(input.actions.moveX, input.actions.moveY);
+}
+
+function sampleNamedActions() {
+  const sampled = inputSystem?.snapshot?.() ?? normalizeActionSnapshot({ keyboard: {} });
+  // Compatibility probes and release screenshot automation still write the old
+  // held-key set. Normalize that adapter state before gameplay sees it.
+  const keyboardActive = input.keys.size > 0;
+  if (keyboardActive) {
+    input.actions = normalizeActionSnapshot({
+      inputDevice: "keyboard",
+      keyboard: {
+        left: input.keys.has("ArrowLeft") || input.keys.has("a"),
+        right: input.keys.has("ArrowRight") || input.keys.has("d"),
+        down: input.keys.has("ArrowDown") || input.keys.has("s"),
+        up: input.keys.has("ArrowUp") || input.keys.has("w"),
+        dash: sampled.dashPressed,
+        ultimate: sampled.ultimatePressed,
+      },
+    });
+  } else {
+    input.actions = sampled;
+  }
+  return input.actions;
 }
 
 function updateShards(dt) {
@@ -3815,9 +3862,15 @@ function updateEnemies(dt) {
       && enemy.attackKind !== "trianglePulse" && waveReachedPlayer(enemy, distance);
     const triangleContact = trianglePulseHitsPlayer(enemy);
     const beamContact = beamHitsPlayer(enemy);
-    registerNearMiss(enemy, distance, bodyContact || waveContact || triangleContact || beamContact);
+    const damagingContact = bodyContact || waveContact || triangleContact || beamContact;
+    registerNearMiss(enemy, distance, damagingContact);
+    if (damagingContact && state.perfectPhaseWindow > 0) {
+      enemy.pulseHit = waveContact || triangleContact || enemy.pulseHit;
+      triggerPerfectPhase(enemy);
+      continue;
+    }
     if (state.dashInvulnerable || state.hurtInvuln > 0) continue;
-    if (bodyContact || waveContact || triangleContact || beamContact) {
+    if (damagingContact) {
       enemy.pulseHit = waveContact || triangleContact || enemy.pulseHit;
       damagePlayer(enemy);
     }
@@ -3856,6 +3909,38 @@ function destroyEnemy(enemy, source) {
   }
   audio.event("break");
   if (enemy.type === "boss") finishRun("victory");
+  return true;
+}
+
+function triggerPerfectPhase(source) {
+  if (state.perfectPhaseWindow <= 0) return false;
+  state.perfectPhaseWindow = 0;
+  const refundIndex = state.dashCharges[0] <= state.dashCharges[1] ? 0 : 1;
+  const before = state.dashCharges[refundIndex];
+  state.dashCharges[refundIndex] = Math.min(1, before + 0.35);
+  state.autoFireRateBuffTimer = Math.max(state.autoFireRateBuffTimer, 0.8);
+  source.nearMissCandidate = false;
+  source.nearMissResolved = true;
+  const sourcePosition = source.group?.position ?? source.mesh?.position ?? player.position;
+  const position = new THREE.Vector2(sourcePosition.x, sourcePosition.y);
+  events.emit("perfectPhase", Object.freeze({
+    refundIndex,
+    refunded: state.dashCharges[refundIndex] - before,
+    fireRateMultiplier: 0.75,
+    duration: 0.8,
+  }));
+  triggerFeedback("small", {
+    position,
+    color: 0xe7ffff,
+    particles: 8,
+    speed: 2.8,
+    size: 0.7,
+    rippleScale: 0.9,
+    text: "PERFECT PHASE",
+    tone: "cyan",
+  });
+  toast("完美相位 // 武器涌流", "cyan");
+  audio.event("nearMiss", 0.9);
   return true;
 }
 
@@ -4063,6 +4148,8 @@ function sanitizeRuntimeScalars() {
   state.combatFrame = Math.max(0, Math.trunc(runtimeFinite(state.combatFrame, 0)));
   state.dashTimer = Math.max(0, runtimeFinite(state.dashTimer, 0));
   state.dashInvulnTimer = Math.max(0, runtimeFinite(state.dashInvulnTimer, 0));
+  state.perfectPhaseWindow = clampFinite(state.perfectPhaseWindow, 0, 0.12, 0);
+  state.autoFireRateBuffTimer = Math.max(0, runtimeFinite(state.autoFireRateBuffTimer, 0));
   state.hurtInvuln = Math.max(0, runtimeFinite(state.hurtInvuln, 0));
   state.weaponEnergy = clampFinite(state.weaponEnergy, 0, LASER_RULES.maxEnergy, 0);
   state.laserElapsed = Math.max(0, runtimeFinite(state.laserElapsed, 0));
@@ -4363,9 +4450,6 @@ function sampleShakeAxis(seed, time) {
 function updateVisuals(dt) {
   updatePalette(dt);
   realmBackgrounds.update({ elapsed: state.elapsed, dt, reducedMotion: state.reducedMotion });
-  const lookAheadTarget = player.position.clone().multiplyScalar(0.035).addScaledVector(player.velocity, 0.11);
-  lookAheadTarget.clampLength(0, state.reducedMotion ? 0 : 0.72);
-  state.cameraLookAhead.lerp(lookAheadTarget, 1 - Math.exp(-5.5 * dt));
   state.traumaClock += dt;
   state.trauma = state.reducedMotion ? 0 : Math.max(0, state.trauma - TRAUMA_DECAY * dt);
   const shakeAmount = state.reducedMotion ? 0 : state.trauma * state.trauma;
@@ -4461,6 +4545,13 @@ function updateHUD(dt) {
   const firstArc = Math.round(state.dashCharges[0] * 170);
   const secondArc = 190 + Math.round(state.dashCharges[1] * 170);
   dom.dashRing.style.background = `conic-gradient(from -90deg, #ff4fd8 0deg ${firstArc}deg, rgba(255,79,216,.14) ${firstArc}deg 170deg, transparent 170deg 190deg, #64f5ff 190deg ${secondArc}deg, rgba(100,245,255,.14) ${secondArc}deg 360deg)`;
+  hudRenderer?.render?.({
+    dashCharges: state.dashCharges,
+    phaseTimer: state.dashInvulnTimer,
+    perfectPhaseWindow: state.perfectPhaseWindow,
+    autoFireRateBuffTimer: state.autoFireRateBuffTimer,
+    inputDevice: input.actions.inputDevice,
+  });
   const stage = STAGES[state.stageIndex];
   const stageEnd = state.stageIndex === 3 && state.bossDeadline !== null
     ? state.bossDeadline
@@ -4624,11 +4715,11 @@ function onKeyDown(event) {
   const controlTarget = isControlTarget(event.target);
   const gameplayControlKey = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key);
   if (state.mode === "playing" && gameplayControlKey && !controlTarget) event.preventDefault();
-  if (state.mode === "playing") input.keys.add(key);
-  if (!event.repeat && !controlTarget && event.code === "Space") requestDash();
+  if (state.mode === "playing" && !controlTarget) input.keys.add(key);
+  if (!event.repeat && !controlTarget && event.code === "Space") inputSystem?.press?.("dash", "keyboard");
   if (!event.repeat && !controlTarget && event.code === "KeyE") {
     event.preventDefault();
-    requestLaser();
+    inputSystem?.press?.("ultimate", "keyboard");
   }
   if (!event.repeat && state.mode === "upgrade" && /^[1-3]$/.test(key)) {
     const option = state.upgradeOptions[Number(key) - 1];
@@ -4652,12 +4743,14 @@ function setJoystickFromEvent(event) {
   const vector = new THREE.Vector2(event.clientX - centerX, centerY - event.clientY);
   if (vector.length() > maxDistance) vector.setLength(maxDistance);
   input.touch.set(vector.x / maxDistance, vector.y / maxDistance);
+  inputSystem?.setTouchVector?.(input.touch.x, input.touch.y);
   dom.joystickKnob.style.transform = `translate(calc(-50% + ${vector.x}px), calc(-50% - ${vector.y}px))`;
 }
 
 function resetJoystick() {
   input.joystickPointerId = null;
   input.touch.set(0, 0);
+  inputSystem?.setTouchVector?.(0, 0);
   dom.joystickKnob.style.transform = "translate(-50%, -50%)";
 }
 
@@ -4710,14 +4803,8 @@ function setupInput() {
     const button = event.target.closest("button[data-upgrade-id]");
     if (button) chooseUpgrade(button.dataset.upgradeId);
   });
-  bindInputListener(dom.dashButton, "click", () => {
-    audio.unlock();
-    requestDash();
-  });
-  bindInputListener(dom.laserButton, "click", () => {
-    audio.unlock();
-    requestLaser();
-  });
+  bindInputListener(dom.dashButton, "click", () => audio.unlock());
+  bindInputListener(dom.laserButton, "click", () => audio.unlock());
   bindInputListener(dom.joystick, "pointerdown", (event) => {
     event.preventDefault();
     audio.unlock();
@@ -4758,10 +4845,15 @@ function simulate(dt) {
   }
   if (state.mode === "playing") {
     state.elapsed += wallDt;
-    state.dashTimer = Math.max(0, state.dashTimer - simDt);
-    state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - simDt);
-    state.hurtInvuln = Math.max(0, state.hurtInvuln - simDt);
-    input.dashBuffer = Math.max(0, input.dashBuffer - simDt);
+    const actions = sampleNamedActions();
+    if (actions.dashPressed) requestDash();
+    if (actions.ultimatePressed) requestLaser();
+    state.dashTimer = Math.max(0, state.dashTimer - wallDt);
+    state.dashInvulnTimer = Math.max(0, state.dashInvulnTimer - wallDt);
+    state.perfectPhaseWindow = Math.max(0, state.perfectPhaseWindow - wallDt);
+    state.autoFireRateBuffTimer = Math.max(0, state.autoFireRateBuffTimer - wallDt);
+    state.hurtInvuln = Math.max(0, state.hurtInvuln - wallDt);
+    input.dashBuffer = Math.max(0, input.dashBuffer - wallDt);
     input.laserBuffer = Math.max(0, input.laserBuffer - simDt);
     state.comboTimer = Math.max(0, state.comboTimer - simDt);
     if (state.comboTimer <= 0 && state.combo > 0) {
@@ -4770,13 +4862,13 @@ function simulate(dt) {
     updateStage();
     if (state.mode === "playing") applyEnvironment(wallDt, simDt);
     const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;
-    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (simDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
+    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (wallDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
     const countdownTarget = state.bossDeadline ?? GAME.bossStart;
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
     if (state.mode === "playing" && state.timeLeft <= 0) finishRun("gameover", "bossDeadline");
     if (state.mode === "playing") {
       if (input.laserBuffer > 0) attemptLaser();
-      updatePlayer(simDt);
+      updatePlayer(wallDt);
       updateLaser(simDt);
       updateShards(simDt);
       updateEnemies(simDt);

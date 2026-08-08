@@ -6,6 +6,8 @@ import { createGameSession } from '../game/session.js';
 import { createEntityRenderer } from '../render/entity-renderer.js';
 import { createRunSave } from '../persistence/run-save.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
+import { createInputSystem } from '../systems/input-system.js';
+import { createHudRenderer } from '../render/hud-renderer.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
@@ -30,6 +32,28 @@ export function bootstrapNeonTide(options = {}) {
     quality: options.entityQuality ?? { tier: 'desktop' },
     capacities: entityCapacities,
   });
+  const inputSystem = createInputSystem();
+  const hudRenderer = createHudRenderer();
+  let projectedPlayer = null;
+  const playerProjection = Object.freeze({
+    publish(snapshot) {
+      projectedPlayer = Object.freeze({
+        ...snapshot,
+        position: Object.freeze({ ...snapshot.position }),
+        velocity: Object.freeze({ ...snapshot.velocity }),
+        facing: Object.freeze({ ...snapshot.facing }),
+        dashCharges: Object.freeze([...snapshot.dashCharges]),
+        cameraLead: Object.freeze({ ...snapshot.cameraLead }),
+      });
+      return projectedPlayer;
+    },
+    reset() {
+      projectedPlayer = null;
+    },
+    getSnapshot() {
+      return projectedPlayer;
+    },
+  });
   let runtime = null;
   let loop = null;
   let animationFrameId = null;
@@ -52,6 +76,7 @@ export function bootstrapNeonTide(options = {}) {
       if (detail?.reset) {
         loop?.reset(nowMs);
         runtime?.reset(current);
+        playerProjection.reset();
         world.reset();
         entityRenderer.reset();
         return;
@@ -97,7 +122,7 @@ export function bootstrapNeonTide(options = {}) {
     },
   });
 
-  runtime = createLegacyRuntime({ session, loop, events });
+  runtime = createLegacyRuntime({ session, loop, events, inputSystem, playerProjection, hudRenderer });
   runtime.start();
   loop.reset(performance.now());
 
@@ -115,6 +140,9 @@ export function bootstrapNeonTide(options = {}) {
       world: world.getStats(),
       renderer: entityRenderer.getStats(),
       legacy: runtime.getDebugSnapshot(),
+      player: playerProjection.getSnapshot(),
+      input: Object.freeze({ inputDevice: inputSystem.getLastActiveDevice() }),
+      hud: hudRenderer.getDebugSnapshot(),
       persistence: runSave.getStatus(),
       disposed,
     });
@@ -126,6 +154,8 @@ export function bootstrapNeonTide(options = {}) {
     if (animationFrameId !== null) window.cancelAnimationFrame(animationFrameId);
     animationFrameId = null;
     runtime.dispose();
+    inputSystem.dispose();
+    hudRenderer.dispose();
     entityRenderer.dispose();
     world.dispose();
     events.clear();
@@ -140,6 +170,8 @@ export function bootstrapNeonTide(options = {}) {
     runSave,
     world,
     entityRenderer,
+    inputSystem,
+    hudRenderer,
     dispose,
     getDebugSnapshot,
   });
