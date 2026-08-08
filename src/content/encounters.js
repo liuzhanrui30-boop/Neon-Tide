@@ -12,6 +12,44 @@ export const OBJECTIVE_TYPES = Object.freeze([
 const ARENA = Object.freeze({ halfWidth: 10.5, halfHeight: 7.2 });
 export const OBJECTIVE_BOUNDARY_ORBIT = Object.freeze({ radiusX: 9.2, radiusY: 5.5 });
 
+export const ANTI_ORBIT_COUNTER_TEMPLATES = Object.freeze({
+  intercept: Object.freeze({
+    kind: 'intercept',
+    previewSeconds: 0.7,
+    activeSeconds: 1.1,
+    recoverySeconds: 0.35,
+    projectedAngleDegrees: Object.freeze([35, 55]),
+    tangentHalfLength: 3.2,
+    routeNodes: 7,
+  }),
+  'reverse-wall': Object.freeze({
+    kind: 'reverse-wall',
+    previewSeconds: 0.8,
+    activeSeconds: 3,
+    recoverySeconds: 0.35,
+    safeGapWidth: 2.2,
+    angularSpeed: 0.82,
+    wallNodes: 11,
+  }),
+  'objective-shift': Object.freeze({
+    kind: 'objective-shift',
+    previewSeconds: 0.9,
+    telegraphSeconds: 0.9,
+    activeSeconds: 0.8,
+    recoverySeconds: 0.3,
+    pathNodes: 7,
+  }),
+  'center-pulse': Object.freeze({
+    kind: 'center-pulse',
+    previewSeconds: 0.75,
+    activeSeconds: 2.8,
+    recoverySeconds: 0.35,
+    edgeDangerSeconds: 1.05,
+    centerSafeRadius: 2.7,
+    ringNodes: 16,
+  }),
+});
+
 function template(definition) {
   return Object.freeze({
     ...definition,

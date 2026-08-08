@@ -14,7 +14,8 @@ const COLORS = Object.freeze({
 const PATCH_FIELDS = Object.freeze([
   'x', 'y', 'radius', 'scale', 'scaleX', 'scaleY', 'hp', 'maxHp', 'value', 'team',
   'role', 'type', 'objective', 'objectiveType', 'progress', 'completed', 'state', 'color',
-  'collidable', 'invulnerable', 'sourceId',
+  'collidable', 'invulnerable', 'sourceId', 'rotation', 'contactDamaging', 'damage',
+  'executingTelegraph',
 ]);
 
 function resetPatch(patch, sourceId) {
@@ -42,6 +43,10 @@ function resetPatch(patch, sourceId) {
   patch.collidable = false;
   patch.invulnerable = true;
   patch.sourceId = sourceId;
+  patch.rotation = 0;
+  patch.contactDamaging = false;
+  patch.damage = 0;
+  patch.executingTelegraph = false;
   return patch;
 }
 
@@ -242,6 +247,42 @@ export function createObjectiveWorldBridge({ world } = {}) {
     return upsert('objective', sourceId);
   }
 
+  function counterSourceId(objective, counter, node, index) {
+    if (Number.isSafeInteger(node.sourceId)) return node.sourceId;
+    let value = (Number(objective.seed) ^ Math.imul(index + 1, 0x9e3779b1)) >>> 0;
+    for (const character of `${counter.id}:${node.sequence ?? index}`) {
+      value = Math.imul(value ^ character.charCodeAt(0), 16777619) >>> 0;
+    }
+    return 0x60000000 + (value % 0x0fffffff);
+  }
+
+  function addCounterNode(objective, counter, node, index) {
+    const sourceId = counterSourceId(objective, counter, node, index);
+    resetPatch(patch, sourceId);
+    patch.x = node.x;
+    patch.y = node.y;
+    patch.radius = node.radius;
+    patch.scale = node.scale ?? node.radius;
+    patch.scaleX = node.scaleX ?? 1;
+    patch.scaleY = node.scaleY ?? 1;
+    patch.rotation = node.rotation ?? 0;
+    patch.role = node.role ?? `counter-${counter.kind}`;
+    patch.type = counter.kind;
+    patch.objectiveType = 'anti-orbit';
+    patch.state = node.state ?? counter.phase;
+    patch.color = node.color ?? COLORS.stormNext;
+    patch.team = 2;
+    patch.collidable = Boolean(node.collidable);
+    patch.invulnerable = true;
+    patch.contactDamaging = Boolean(node.collidable);
+    // Route counters tax a stubborn line without becoming hidden guaranteed hits.
+    // Repeated fixed-orbit pressure can still end a run, while one readable
+    // contact leaves enough hull to learn and take the authored gap next time.
+    patch.damage = node.collidable ? 0.35 : 0;
+    patch.executingTelegraph = counter.phase === 'preview';
+    return upsert('objective', sourceId);
+  }
+
   function sync(objective) {
     if (!objective || objective.status !== 'active') return false;
     if (objectiveId !== null && objectiveId !== objective.id) clear();
@@ -265,6 +306,12 @@ export function createObjectiveWorldBridge({ world } = {}) {
       const next = Math.max(0, Math.min(objective.corridor.segments.length - 1, active + objective.corridor.direction));
       for (let index = 0; index < objective.corridor.segments.length; index += 1) {
         addStormSegment(objective, objective.corridor.segments[index], index, active, next);
+      }
+    }
+    const counter = objective.antiOrbit?.activeCounter;
+    if (counter?.geometry) {
+      for (let index = 0; index < counter.geometry.length; index += 1) {
+        addCounterNode(objective, counter, counter.geometry[index], index);
       }
     }
     removeUntouched();

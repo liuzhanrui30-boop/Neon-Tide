@@ -35,6 +35,11 @@ test('director owns deterministic start, freeze, drain, upgrade and reset lifecy
   assert.deepEqual(director.getSnapshot(), {
     mode: 'standard', quality: 'desktop', seed: 91, roomIndex: 0, phase: 'idle', combatFrozen: false,
     upgradeOffered: false, objective: null, threatBudget: null, templateId: null,
+    antiOrbit: {
+      analysis: { orbitPressure: 0, direction: 0, radiusVariance: 1, quadrantCoverage: 0, stalled: true },
+      activeCounter: null, cooldownRemaining: 0, countersStarted: 0, countersCompleted: 0,
+      routeChangesRequired: 0, historyLength: 0,
+    },
   });
 });
 

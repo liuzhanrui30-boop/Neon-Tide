@@ -53,6 +53,69 @@ function point(x, y, extra = {}) {
   return { x: Math.round(x * 1e6) / 1e6, y: Math.round(y * 1e6) / 1e6, ...extra };
 }
 
+function shiftableTarget(objective) {
+  if (objective?.type === 'anchors') return objective.anchors.find(({ completed }) => !completed) ?? null;
+  if (objective?.type === 'core-harvest') return objective.cores.find(({ collected }) => !collected) ?? null;
+  if (objective?.type === 'moving-zone') return objective.safeZone ?? null;
+  if (objective?.type === 'escort') return objective.escort ?? null;
+  if (objective?.type === 'dual-crisis') return objective.crises.find(({ completed }) => !completed) ?? null;
+  return null;
+}
+
+export function createObjectiveShiftPlan(objective, { pathNodes = 7, variant = 0 } = {}) {
+  const target = shiftableTarget(objective);
+  if (!target || !Number.isSafeInteger(target.sourceId)) return null;
+  const arena = objective.arena ?? { halfWidth: 10.5, halfHeight: 7.2 };
+  const marginX = Math.max(2.8, finite(target.radius ?? target.supportRadius, 1) + 0.8);
+  const marginY = Math.max(2.5, finite(target.radius ?? target.supportRadius, 1) + 0.8);
+  const sign = (Math.trunc(finite(variant, 0)) & 1) === 0 ? 1 : -1;
+  let destinationX = Math.max(-arena.halfWidth + marginX, Math.min(arena.halfWidth - marginX, -target.x));
+  let destinationY = Math.max(-arena.halfHeight + marginY, Math.min(arena.halfHeight - marginY, -target.y));
+  if (Math.abs(destinationX - target.x) < 3.5) destinationX = sign * (arena.halfWidth - marginX);
+  if (Math.abs(destinationY - target.y) < 2.5) destinationY = -sign * (arena.halfHeight - marginY);
+  const count = Math.max(3, Math.min(12, Math.trunc(positive(pathNodes, 7))));
+  const path = Array.from({ length: count }, (_, index) => {
+    const amount = index / (count - 1);
+    const curve = Math.sin(amount * Math.PI) * 0.65 * sign;
+    return point(
+      target.x + (destinationX - target.x) * amount + curve * (destinationY - target.y) * 0.12,
+      target.y + (destinationY - target.y) * amount - curve * (destinationX - target.x) * 0.12,
+    );
+  });
+  path[0] = point(target.x, target.y);
+  path[path.length - 1] = point(destinationX, destinationY);
+  return {
+    targetSourceId: target.sourceId,
+    targetType: objective.type,
+    path,
+  };
+}
+
+export function commitObjectiveShift(objective, plan) {
+  if (!objective || !plan || !Number.isSafeInteger(plan.targetSourceId) || !Array.isArray(plan.path) || plan.path.length < 2) {
+    return false;
+  }
+  const target = shiftableTarget(objective);
+  if (!target || target.sourceId !== plan.targetSourceId) return false;
+  const destination = plan.path.at(-1);
+  const dx = destination.x - target.x;
+  const dy = destination.y - target.y;
+  if (objective.type === 'moving-zone') {
+    for (const entry of objective.path) {
+      entry.x = point(entry.x + dx, 0).x;
+      entry.y = point(0, entry.y + dy).y;
+    }
+  } else if (objective.type === 'escort') {
+    for (const entry of objective.escort.route) {
+      entry.x = point(entry.x + dx, 0).x;
+      entry.y = point(0, entry.y + dy).y;
+    }
+  }
+  target.x = destination.x;
+  target.y = destination.y;
+  return true;
+}
+
 function radialPoints(random, count, radiusMin, radiusMax, offset = random() * TAU) {
   return Array.from({ length: count }, (_, index) => {
     const jitter = (random() - 0.5) * (TAU / Math.max(3, count)) * 0.35;

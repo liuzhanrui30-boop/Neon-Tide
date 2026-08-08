@@ -2235,7 +2235,7 @@ async function realmArtDirectionsScenario() {
 async function runtimeGuardScenario() {
   await withLegacyPage('runtime-guards', {}, async (page) => {
     page.requireDev('runtime guard, cap, and listener lifecycle probe');
-    await page.click('#primary-button');
+    await page.trustedClick('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
     await page.click('#mute-button');
@@ -3468,7 +3468,7 @@ async function finalRuntimeAuditAndProjectileRepairScenario() {
 async function finalRealmShiftProductionScenario() {
   await withLegacyPage('final-realm-shift-production', {}, async (page) => {
     page.requireDev('production enterStage realm-shift probe');
-    await page.click('#primary-button');
+    await page.trustedClick('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     assert.equal(await page.gameEvaluate(`return $state.mode`), 'playing');
     const contract=await page.gameEvaluate(`

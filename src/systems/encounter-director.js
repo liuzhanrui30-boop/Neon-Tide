@@ -1,5 +1,6 @@
 import { getEncounterTemplate, getThreatBudget } from '../content/encounters.js';
 import { createObjective, getObjectiveSnapshot, updateObjective } from './objective-system.js';
+import { createAntiOrbitDirector } from './anti-orbit-director.js';
 
 function clone(value) {
   if (value == null || typeof value !== 'object') return value;
@@ -62,6 +63,7 @@ export function createEncounterDirector({
   let upgradeOffered = false;
   let completionAcknowledged = false;
   let updateRevision = 0;
+  let antiOrbitDirector = createAntiOrbitDirector({ seed });
   if (objectiveAuthority) {
     Object.defineProperty(objectiveAuthority, 'visit', {
       configurable: true,
@@ -86,6 +88,7 @@ export function createEncounterDirector({
       objective: getObjectiveSnapshot(objective),
       threatBudget: threatBudget ? cloneFrozen(threatBudget) : null,
       templateId,
+      antiOrbit: antiOrbitDirector.getSnapshot(),
     });
   }
 
@@ -94,7 +97,9 @@ export function createEncounterDirector({
     const template = authored ? scaledTemplate(authored, durationScale) : null;
     if (!template) throw new TypeError('startRoom requires a known encounter template');
     const currentIndex = roomIndex;
-    objective = createObjective(template, roomSeed(seed, currentIndex, template.id));
+    const selectedRoomSeed = roomSeed(seed, currentIndex, template.id);
+    objective = createObjective(template, selectedRoomSeed);
+    antiOrbitDirector = createAntiOrbitDirector({ seed: selectedRoomSeed });
     threatBudget = getThreatBudget(template, { mode, quality });
     templateId = template.id;
     roomIndex += 1;
@@ -114,6 +119,12 @@ export function createEncounterDirector({
     let enteredDraining = false;
     if (phase === 'active') {
       updateObjective(objective, context.world ?? null, context.player ?? null, dt, events);
+      if (objective.status === 'active') {
+        antiOrbitDirector.update({ player: context.player ?? null, objective }, dt, events);
+      } else {
+        antiOrbitDirector.reset({ seed: objective.seed, objectiveId: objective.id });
+        if (objective.antiOrbit) objective.antiOrbit.activeCounter = null;
+      }
       if (objective.status === 'completed') {
         phase = 'draining';
         enteredDraining = true;
@@ -158,6 +169,7 @@ export function createEncounterDirector({
     combatFrozen = false;
     upgradeOffered = false;
     completionAcknowledged = false;
+    antiOrbitDirector = createAntiOrbitDirector({ seed });
     updateRevision += 1;
     return getSnapshot();
   }

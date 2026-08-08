@@ -14,7 +14,7 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
   friendlyProjectile: 96,
   enemyProjectile: 96,
   pickup: 32,
-  objective: 8,
+  objective: 24,
   bossPart: 32,
 });
 

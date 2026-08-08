@@ -307,6 +307,21 @@ export function createCollisionSystem({
         state.playerDamage += Math.max(0, enemy.damage || 1);
       }
     }
+    const objectives = world.query('objective');
+    for (let index = 0; index < objectives.length; index += 1) {
+      const hazard = world.readInto(objectives.at(index), objectiveRead);
+      if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
+      if (!overlapsWithRadius(player, hazard, hazard.contactRadius > 0 ? hazard.contactRadius : hazard.radius)) continue;
+      if (perfectAvailable) {
+        applyPerfectPhase(world, player, events);
+        perfectAvailable = false;
+        phaseProtected = true;
+        state.perfectPhases += 1;
+      } else if (!phaseProtected) {
+        state.playerDamage += Math.max(0, hazard.damage || 1);
+      }
+      break;
+    }
   }
 
   function collectEnemyObjectiveHits(world, state) {
