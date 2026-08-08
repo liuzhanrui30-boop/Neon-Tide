@@ -44,3 +44,17 @@ test('HUD exposes truthful dash progress and changes live phase text only semant
   renderer.render({ dashCharges: [1, 0.35], autoFireRateBuffTimer: 0.7, inputDevice: 'keyboard' });
   assert.equal(phaseStatus.textWrites, 2);
 });
+
+test('HUD exposes current objective label, progress, and terminal state accessibly', () => {
+  const missionObjective = new FakeElement();
+  const missionPanel = new FakeElement();
+  const renderer = createHudRenderer({ missionObjective, missionPanel });
+  renderer.render({
+    objective: { label: '破坏潮汐锚点', progress: 2, target: 4, progressRatio: 0.5, status: 'active' },
+  });
+  assert.equal(missionObjective.textContent, '破坏潮汐锚点 · 2 / 4');
+  assert.equal(missionObjective.dataset.state, 'active');
+  assert.equal(missionPanel.attributes.get('aria-label'), '当前任务：破坏潮汐锚点；进度 2 / 4');
+  renderer.render({ objective: { label: '破坏潮汐锚点', progress: 4, target: 4, progressRatio: 1, status: 'completed' } });
+  assert.equal(missionObjective.dataset.state, 'completed');
+});

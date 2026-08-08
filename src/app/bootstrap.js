@@ -87,6 +87,7 @@ export function bootstrapNeonTide(options = {}) {
     development: import.meta.env.DEV,
     events,
     runSave,
+    encounterQuality: entityQuality,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
       const startsNewAttempt = current.mode === 'briefing'
@@ -146,6 +147,17 @@ export function bootstrapNeonTide(options = {}) {
     maxCatchUpSteps: MAX_CATCH_UP_STEPS,
     onStep(dt) {
       try {
+        const beforeStep = session.snapshot();
+        if (beforeStep.mode === 'playing' && beforeStep.room?.objectiveManaged && beforeStep.room.combatFrozen) {
+          const frozenPlayerId = world.query('player').at(0);
+          session.updateRoom({
+            world,
+            player: frozenPlayerId ? world.get(frozenPlayerId) : projectedPlayer,
+            presentationPending: events.getStats().queued,
+          }, dt, events);
+          hudRenderer.render({ objective: session.snapshot().room?.objective });
+          return;
+        }
         runtime?.simulate(dt);
         if (session.snapshot().mode !== 'playing') return;
         const playerId = runtime?.syncCombatWorld(world);
@@ -154,6 +166,20 @@ export function bootstrapNeonTide(options = {}) {
         projectileSystem.update(world, dt, events);
         const summary = collisionSystem.resolve(world, session, dt, events);
         runtime?.applyCombatSummary(world, summary);
+        if (session.snapshot().room?.objectiveManaged) {
+          const objectiveInput = summary.damageRecords
+            .filter((record) => record.destroyed && record.targetKind === 'enemy')
+            .map((record) => ({
+              type: 'enemy:destroyed',
+              payload: { id: record.targetId, sourceId: record.targetSourceId },
+            }));
+          session.updateRoom({
+            world,
+            player: world.get(playerId),
+            presentationPending: events.getStats().queued,
+          }, dt, { input: objectiveInput, emit: events.emit });
+          hudRenderer.render({ objective: session.snapshot().room?.objective });
+        }
       } finally {
         events.drain(presentationEvents.consume);
       }
@@ -193,6 +219,7 @@ export function bootstrapNeonTide(options = {}) {
       weapons: weaponSystem.getStats(),
       projectiles: projectileSystem.getStats(),
       collisions: collisionSystem.getStats(),
+      encounter: session.getEncounterSnapshot(),
       legacy: runtime.getDebugSnapshot(),
       player: playerProjection.getSnapshot(),
       input: Object.freeze({

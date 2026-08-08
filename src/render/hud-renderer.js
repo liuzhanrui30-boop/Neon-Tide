@@ -3,6 +3,13 @@ function clamp01(value) {
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : 0;
 }
 
+function formatObjectiveUnit(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '0';
+  if (Math.abs(number - Math.round(number)) < 0.01) return String(Math.round(number));
+  return number.toFixed(1);
+}
+
 export function createHudRenderer(options = {}) {
   const root = options.root ?? globalThis.document ?? null;
   const dashPips = options.dashPips ?? Array.from(root?.querySelectorAll?.('#dash-pips i') ?? []);
@@ -11,6 +18,8 @@ export function createHudRenderer(options = {}) {
   const dashRing = options.dashRing ?? root?.querySelector?.('#dash-ring') ?? null;
   const deviceLabel = options.deviceLabel ?? root?.querySelector?.('#input-device') ?? null;
   const phaseStatus = options.phaseStatus ?? root?.querySelector?.('#phase-status') ?? null;
+  const missionPanel = options.missionPanel ?? root?.querySelector?.('#mission-panel') ?? null;
+  const missionObjective = options.missionObjective ?? root?.querySelector?.('#mission-objective') ?? null;
   let disposed = false;
   let renders = 0;
   let lastSnapshot = null;
@@ -58,6 +67,20 @@ export function createHudRenderer(options = {}) {
         phaseStatus.dataset.state = phaseState;
         lastPhaseState = phaseState;
       }
+    }
+    if (snapshot.objective && missionObjective) {
+      const objective = snapshot.objective;
+      const label = String(objective.label ?? objective.type ?? '当前任务');
+      const progress = formatObjectiveUnit(objective.progress);
+      const target = formatObjectiveUnit(objective.target);
+      const text = `${label} · ${progress} / ${target}`;
+      if (missionObjective.textContent !== text) missionObjective.textContent = text;
+      missionObjective.dataset.state = String(objective.status ?? 'active');
+      missionObjective.setAttribute('role', 'status');
+      missionObjective.setAttribute('aria-live', 'polite');
+      missionPanel?.setAttribute('aria-label', `当前任务：${label}；进度 ${progress} / ${target}`);
+      missionPanel?.setAttribute('data-objective-type', String(objective.type ?? 'unknown'));
+      missionPanel?.setAttribute('data-objective-state', String(objective.status ?? 'active'));
     }
     lastSnapshot = Object.freeze({ ...snapshot, dashCharges: Object.freeze(charges) });
     renders += 1;

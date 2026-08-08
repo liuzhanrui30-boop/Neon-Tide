@@ -54,6 +54,38 @@ test('session locks the public mode vocabulary and valid campaign transitions', 
   assert.equal(events.getStats().emitted > 0, true);
 });
 
+test('starting an encounter room creates objective and threat ownership in the session snapshot', () => {
+  const session = createGameSession({ development: true });
+  session.startRun('standard', 4455);
+  session.startRoom({ id: 'anchor-break', chapterIndex: 0 });
+  const room = session.snapshot().room;
+  assert.equal(room.templateId, 'anchor-break');
+  assert.equal(room.objective.type, 'anchors');
+  assert.ok(room.threatBudget.total > 0);
+  assert.equal(room.objective.seed, session.getEncounterSnapshot().objective.seed);
+});
+
+test('objective completion freezes for presentation drain before upgrade and next room', () => {
+  const events = createEventQueue();
+  const session = createGameSession({ development: true, events });
+  session.startRun('standard', 9001);
+  session.startRoom({ id: 'purge-tide' });
+  const target = session.snapshot().room.objective.target;
+  session.updateRoom({ player: { x: 0, y: 0 }, presentationPending: 0 }, 1 / 60, {
+    input: Array.from({ length: target }, (_, id) => ({ type: 'enemy:destroyed', payload: { id } })),
+    emit: events.emit,
+  });
+  assert.equal(session.snapshot().mode, 'playing');
+  assert.equal(session.snapshot().room.encounterPhase, 'draining');
+  assert.equal(session.snapshot().room.combatFrozen, true);
+  events.drain(() => {});
+  session.updateRoom({ player: { x: 0, y: 0 }, presentationPending: 0 }, 1 / 60, events);
+  assert.equal(session.snapshot().mode, 'upgrade');
+  assert.equal(session.snapshot().stats.roomsCompleted, 1);
+  assert.equal(session.startRoom({ id: 'moving-sanctum' }), true);
+  assert.equal(session.snapshot().room.objective.type, 'moving-zone');
+});
+
 test('invalid transitions throw in development and return false in production', () => {
   const development = createGameSession({ development: true });
   assert.throws(() => development.pause(), /Invalid GameSession transition menu -> paused/);
