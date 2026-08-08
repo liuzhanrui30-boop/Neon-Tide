@@ -30,3 +30,25 @@ test('bridge renders current and telegraphed storm segments from the same safe p
   const active = [...world.query('objective')].map((id) => world.get(id)).find(({ state }) => state === 'active');
   assert.deepEqual({ x: active.x, y: active.y }, { x: storm.safeZone.x, y: storm.safeZone.y });
 });
+
+test('stable objective sync avoids allocating entity snapshots and skips unchanged writes', () => {
+  const baseWorld = createEntityWorld();
+  let getCalls = 0;
+  let writes = 0;
+  const world = {
+    spawn: baseWorld.spawn,
+    despawn: baseWorld.despawn,
+    query: baseWorld.query,
+    readInto: baseWorld.readInto,
+    write(...args) { writes += 1; return baseWorld.write(...args); },
+    get(...args) { getCalls += 1; return baseWorld.get(...args); },
+  };
+  const bridge = createObjectiveWorldBridge({ world });
+  const anchors = createObjective(getEncounterTemplate('anchor-break'), 88);
+  bridge.sync(anchors);
+  const writesAfterSpawn = writes;
+  for (let index = 0; index < 5_000; index += 1) bridge.sync(anchors);
+  assert.equal(getCalls, 0, 'bridge must use allocation-safe reads rather than world.get snapshots');
+  assert.equal(writes, writesAfterSpawn, 'unchanged objective geometry should not be rewritten every tick');
+  assert.ok(bridge.getStats().skippedWrites >= 5_000 * anchors.anchors.length);
+});

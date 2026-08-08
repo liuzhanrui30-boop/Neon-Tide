@@ -40,10 +40,13 @@ export function bootstrapNeonTide(options = {}) {
   const entityCapacities = options.entityCapacities ?? selectEntityCapacities({
     coarsePointer: coarsePointer || entityQuality.tier === 'mobile',
   });
-  const objectiveTestMode = import.meta.env.DEV
-    && new URLSearchParams(globalThis.location?.search ?? '').has('objective-test');
-  const compatibilityTestMode = import.meta.env.DEV
-    && new URLSearchParams(globalThis.location?.search ?? '').has('compatibility-test');
+  const searchParams = new URLSearchParams(globalThis.location?.search ?? '');
+  const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
+  const compatibilityTestMode = import.meta.env.DEV && searchParams.has('compatibility-test');
+  const requestedCampaignSeed = Number(searchParams.get('objective-seed'));
+  const campaignSeed = import.meta.env.DEV && Number.isFinite(requestedCampaignSeed)
+    ? requestedCampaignSeed
+    : null;
   const entityScene = new THREE.Scene();
   const world = createEntityWorld({ capacities: entityCapacities });
   const entityRenderer = createEntityRenderer({
@@ -57,6 +60,7 @@ export function bootstrapNeonTide(options = {}) {
   const projectileSystem = createProjectileSystem();
   const collisionSystem = createCollisionSystem();
   const objectiveBridge = createObjectiveWorldBridge({ world });
+  const objectiveAuthority = {};
   let objectiveInputSequence = 0;
   let projectedPlayer = null;
   const playerProjection = Object.freeze({
@@ -97,6 +101,7 @@ export function bootstrapNeonTide(options = {}) {
     runSave,
     encounterQuality: entityQuality,
     encounterDurationScale: options.encounterDurationScale ?? (objectiveTestMode ? 0.18 : 1),
+    objectiveAuthority,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
       const startsNewAttempt = current.mode === 'briefing'
@@ -153,6 +158,18 @@ export function bootstrapNeonTide(options = {}) {
   // gameplay session. The menu remains the explicit Continue boundary.
   session.restoreCheckpoint();
 
+  function syncObjectiveWorld(objective) {
+    objectiveBridge.sync(objective);
+  }
+
+  function renderObjectiveHud(objective) {
+    hudRenderer.render({
+      ...(projectedPlayer ?? {}),
+      inputDevice: inputSystem.getLastActiveDevice(),
+      objective,
+    });
+  }
+
   loop = createFixedLoop({
     stepSeconds: STEP_SECONDS,
     maxCatchUpSteps: MAX_CATCH_UP_STEPS,
@@ -165,18 +182,14 @@ export function bootstrapNeonTide(options = {}) {
             player: frozenPlayerId ? world.get(frozenPlayerId) : projectedPlayer,
             presentationPending: events.getStats().queued,
           }, dt, events);
-          hudRenderer.render({
-            ...(projectedPlayer ?? {}),
-            inputDevice: inputSystem.getLastActiveDevice(),
-            objective: session.getLiveEncounterObjective(),
-          });
+          objectiveAuthority.visit(renderObjectiveHud);
           return;
         }
         runtime?.simulate(dt);
         if (session.getMode() !== 'playing') return;
         const playerId = runtime?.syncCombatWorld(world);
         if (!Number.isSafeInteger(playerId)) return;
-        if (session.isObjectiveManaged()) objectiveBridge.sync(session.getLiveEncounterObjective());
+        if (session.isObjectiveManaged()) objectiveAuthority.visit(syncObjectiveWorld);
         weaponSystem.update(world, playerId, dt, events);
         projectileSystem.update(world, dt, events);
         const summary = collisionSystem.resolve(world, session, dt, events);
@@ -207,11 +220,7 @@ export function bootstrapNeonTide(options = {}) {
             player: world.get(playerId),
             presentationPending: events.getStats().queued,
           }, dt, { input: objectiveInput, emit: events.emit });
-          hudRenderer.render({
-            ...(projectedPlayer ?? {}),
-            inputDevice: inputSystem.getLastActiveDevice(),
-            objective: session.getLiveEncounterObjective(),
-          });
+          objectiveAuthority.visit(renderObjectiveHud);
         }
       } finally {
         events.drain(presentationEvents.consume);
@@ -232,6 +241,7 @@ export function bootstrapNeonTide(options = {}) {
     hudRenderer,
     entityRenderer,
     compatibilityCampaign: compatibilityTestMode,
+    campaignSeed,
   });
   runtime.start();
   loop.reset(performance.now());

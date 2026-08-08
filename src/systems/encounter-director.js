@@ -7,6 +7,14 @@ function clone(value) {
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, clone(entry)]));
 }
 
+function cloneFrozen(value) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
+  return Object.freeze(Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, cloneFrozen(entry)]),
+  ));
+}
+
 function emit(events, type, payload) {
   events?.emit?.(type, Object.freeze(clone(payload)));
 }
@@ -35,11 +43,15 @@ function scaledTemplate(template, scale) {
 
 export function createEncounterDirector({
   mode = 'standard', quality = 'desktop', seed = 0, roomIndex: initialRoomIndex = 0, durationScale = 1,
+  objectiveAuthority = null,
 } = {}) {
   if (!['standard', 'abyss'].includes(mode)) throw new TypeError('encounter mode must be standard or abyss');
   if (!Number.isFinite(Number(seed))) throw new TypeError('encounter seed must be finite');
   if (!Number.isInteger(initialRoomIndex) || initialRoomIndex < 0) throw new TypeError('encounter roomIndex must be a non-negative integer');
   if (!Number.isFinite(durationScale) || durationScale <= 0 || durationScale > 1) throw new TypeError('durationScale must be in (0, 1]');
+  if (objectiveAuthority !== null && (!objectiveAuthority || typeof objectiveAuthority !== 'object' || Array.isArray(objectiveAuthority))) {
+    throw new TypeError('objectiveAuthority must be an internal channel object');
+  }
   const qualityName = typeof quality === 'string' ? quality : quality?.tier ?? 'desktop';
   let roomIndex = initialRoomIndex;
   let phase = 'idle';
@@ -50,6 +62,17 @@ export function createEncounterDirector({
   let upgradeOffered = false;
   let completionAcknowledged = false;
   let updateRevision = 0;
+  if (objectiveAuthority) {
+    Object.defineProperty(objectiveAuthority, 'visit', {
+      configurable: true,
+      value(visitor) {
+        if (typeof visitor !== 'function') throw new TypeError('objective authority visitor must be a function');
+        if (!objective) return false;
+        visitor(objective);
+        return true;
+      },
+    });
+  }
 
   function getSnapshot() {
     return Object.freeze({
@@ -61,7 +84,7 @@ export function createEncounterDirector({
       combatFrozen,
       upgradeOffered,
       objective: getObjectiveSnapshot(objective),
-      threatBudget: threatBudget ? Object.freeze(clone(threatBudget)) : null,
+      threatBudget: threatBudget ? cloneFrozen(threatBudget) : null,
       templateId,
     });
   }
@@ -141,6 +164,5 @@ export function createEncounterDirector({
 
   return Object.freeze({
     startRoom, update, completeRoom, reset, getSnapshot,
-    getLiveObjective: () => objective,
   });
 }

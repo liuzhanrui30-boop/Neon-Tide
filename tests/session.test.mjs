@@ -127,17 +127,61 @@ test('checkpoint restore reproduces the next authored room index and geometry', 
 
 test('fixed-step objective updates publish bounded session changes rather than every tick', () => {
   let objectiveChanges = 0;
+  const authority = {};
   const session = createGameSession({
     development: true,
+    objectiveAuthority: authority,
     onChange: ({ detail }) => { if (detail?.objectiveUpdated) objectiveChanges += 1; },
   });
   session.startRun('standard', 55);
   session.startRoom({ id: 'moving-sanctum' });
   for (let index = 0; index < 60; index += 1) {
-    const live = session.getLiveEncounterObjective();
-    session.updateRoom({ player: live.safeZone, presentationPending: 0 }, 1 / 60);
+    let player;
+    authority.visit((objective) => { player = { x: objective.safeZone.x, y: objective.safeZone.y }; });
+    session.updateRoom({ player, presentationPending: 0 }, 1 / 60);
   }
   assert.ok(objectiveChanges <= 10, `published ${objectiveChanges} objective changes in one second`);
+});
+
+test('session public snapshots cannot mutate objective authority and expose no live getter', () => {
+  const authority = {};
+  const session = createGameSession({ development: true, objectiveAuthority: authority });
+  session.startRun('standard', 616);
+  session.startRoom({ id: 'anchor-break' });
+  const publicSnapshot = session.snapshot();
+  const encounterSnapshot = session.getEncounterSnapshot();
+  const original = publicSnapshot.room.objective.anchors[0].x;
+  assert.equal(Object.isFrozen(publicSnapshot.room.objective.anchors[0]), true);
+  assert.throws(() => { publicSnapshot.room.objective.anchors[0].x = 888; }, TypeError);
+  assert.throws(() => { encounterSnapshot.objective.anchors.push({ x: 0, y: 0 }); }, TypeError);
+  let authoritativeX;
+  authority.visit((objective) => { authoritativeX = objective.anchors[0].x; });
+  assert.equal(authoritativeX, original);
+  assert.equal('getLiveEncounterObjective' in session, false);
+});
+
+test('thousands of internal fixed steps do not publish or clone a full objective each tick', () => {
+  let objectiveChanges = 0;
+  const authority = {};
+  const session = createGameSession({
+    development: true,
+    objectiveAuthority: authority,
+    onChange: ({ detail }) => { if (detail?.objectiveUpdated) objectiveChanges += 1; },
+  });
+  session.startRun('standard', 717);
+  session.startRoom({ id: 'moving-sanctum' });
+  let snapshotCount = 0;
+  for (let index = 0; index < 3_000; index += 1) {
+    let player;
+    authority.visit((objective) => {
+      player = { x: objective.safeZone.x, y: objective.safeZone.y };
+      snapshotCount = objective._snapshotCount;
+    });
+    session.updateRoom({ player, presentationPending: 1 }, 0.001);
+  }
+  authority.visit((objective) => { snapshotCount = objective._snapshotCount; });
+  assert.ok(snapshotCount < 30, `created ${snapshotCount} full objective snapshots`);
+  assert.ok(objectiveChanges < 30, `published ${objectiveChanges} full session changes`);
 });
 
 test('invalid transitions throw in development and return false in production', () => {

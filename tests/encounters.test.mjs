@@ -23,8 +23,8 @@ test('encounter content registers one complete authored template per objective t
 
 test('natural campaign rooms use the authored route-changing teaching sequence', () => {
   assert.deepEqual(
-    Array.from({ length: 4 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'standard', seed: 77 }).type),
-    ['anchors', 'moving-zone', 'core-harvest', 'escort'],
+    Array.from({ length: 5 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'standard', seed: 77 }).type),
+    ['anchors', 'moving-zone', 'core-harvest', 'escort', 'elite-hunt'],
   );
   assert.deepEqual(
     Array.from({ length: 4 }, (_, roomIndex) => getCampaignEncounter(roomIndex, { mode: 'abyss', seed: 77 }).type),

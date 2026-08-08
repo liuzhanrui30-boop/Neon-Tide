@@ -32,6 +32,14 @@ function cloneValue(value) {
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, cloneValue(entry)]));
 }
 
+function cloneFrozen(value) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
+  return Object.freeze(Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, cloneFrozen(entry)]),
+  ));
+}
+
 function createStats() {
   return {
     roomsStarted: 0,
@@ -61,6 +69,7 @@ export function createGameSession(options = {}) {
   const seedFactory = options.seedFactory ?? (() => Math.floor(Date.now() + Math.random() * 0x7fffffff));
   const encounterQuality = options.encounterQuality ?? options.quality ?? 'desktop';
   const encounterDurationScale = options.encounterDurationScale ?? 1;
+  const objectiveAuthority = options.objectiveAuthority ?? null;
   const encounterDirectorFactory = options.encounterDirectorFactory
     ?? ((configuration) => createEncounterDirector(configuration));
   const baseMaxHull = options.maxHull ?? 3;
@@ -74,14 +83,31 @@ export function createGameSession(options = {}) {
   if (typeof now !== 'function') throw new TypeError('now must be a function');
   if (typeof seedFactory !== 'function') throw new TypeError('seedFactory must be a function');
   if (typeof encounterDirectorFactory !== 'function') throw new TypeError('encounterDirectorFactory must be a function');
+  if (objectiveAuthority !== null && (!objectiveAuthority || typeof objectiveAuthority !== 'object' || Array.isArray(objectiveAuthority))) {
+    throw new TypeError('objectiveAuthority must be an internal channel object');
+  }
 
-  let encounterDirector = encounterDirectorFactory({
+  let directorAuthority = null;
+  function createDirector(configuration) {
+    directorAuthority = {};
+    return encounterDirectorFactory({ ...configuration, objectiveAuthority: directorAuthority });
+  }
+  let encounterDirector = createDirector({
     mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
   });
   if (!encounterDirector || typeof encounterDirector.startRoom !== 'function' || typeof encounterDirector.update !== 'function'
     || typeof encounterDirector.completeRoom !== 'function' || typeof encounterDirector.reset !== 'function'
-    || typeof encounterDirector.getSnapshot !== 'function' || typeof encounterDirector.getLiveObjective !== 'function') {
+    || typeof encounterDirector.getSnapshot !== 'function' || typeof directorAuthority.visit !== 'function') {
     throw new TypeError('encounterDirectorFactory must return an encounter director');
+  }
+  if (objectiveAuthority) {
+    Object.defineProperty(objectiveAuthority, 'visit', {
+      configurable: true,
+      value(visitor) {
+        if (typeof visitor !== 'function') throw new TypeError('objective authority visitor must be a function');
+        return directorAuthority.visit(visitor);
+      },
+    });
   }
 
   let state = {
@@ -106,11 +132,11 @@ export function createGameSession(options = {}) {
       runMode: state.runMode,
       seed: state.seed,
       chapterIndex: state.chapterIndex,
-      room: cloneValue(state.room),
-      build: cloneValue(state.build),
+      room: cloneFrozen(state.room),
+      build: cloneFrozen(state.build),
       hull: state.hull,
       maxHull: state.maxHull,
-      stats: Object.freeze(cloneValue(state.stats)),
+      stats: cloneFrozen(state.stats),
       terminalReason: state.terminalReason,
       revision: state.revision,
     });
@@ -199,7 +225,7 @@ export function createGameSession(options = {}) {
     state.hull = Math.min(state.maxHull, checkpoint.hull);
     state.stats = cloneValue(checkpoint.stats);
     state.terminalReason = null;
-    encounterDirector = encounterDirectorFactory({
+    encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: checkpoint.seed, roomIndex: checkpoint.stats.roomsStarted,
       durationScale: encounterDurationScale,
     });
@@ -243,7 +269,7 @@ export function createGameSession(options = {}) {
     state.maxHull = baseMaxHull;
     state.stats = createStats();
     state.terminalReason = null;
-    encounterDirector = encounterDirectorFactory({
+    encounterDirector = createDirector({
       mode: runMode, quality: encounterQuality, seed, durationScale: encounterDurationScale,
     });
     // A new attempt must never inherit an older Standard checkpoint. Abyss
@@ -293,7 +319,8 @@ export function createGameSession(options = {}) {
   function updateRoom(context = {}, dt = 0, objectiveEvents = null) {
     if (state.mode !== 'playing' || !state.room) return false;
     const update = encounterDirector.update(context, dt, objectiveEvents);
-    const liveObjective = encounterDirector.getLiveObjective();
+    let liveObjective = null;
+    directorAuthority.visit((objective) => { liveObjective = objective; });
     objectivePublishElapsed += Math.max(0, Number(dt) || 0);
     const publishKey = `${update.phase}:${liveObjective?.status}:${Math.floor((liveObjective?.progressRatio ?? 0) * 20)}:${Math.floor(liveObjective?.timeoutRemaining ?? 0)}`;
     const shouldPublish = update.changed || publishKey !== lastObjectivePublishKey || objectivePublishElapsed >= 0.25;
@@ -494,7 +521,7 @@ export function createGameSession(options = {}) {
       terminalReason: null,
       revision: previous.revision + 1,
     };
-    encounterDirector = encounterDirectorFactory({
+    encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
     });
     objectivePublishElapsed = 0;
@@ -523,8 +550,10 @@ export function createGameSession(options = {}) {
     reset,
     restoreCheckpoint,
     getEncounterSnapshot: () => encounterDirector.getSnapshot(),
-    getLiveEncounterObjective: () => encounterDirector.getLiveObjective(),
     getMode: () => state.mode,
+    getHull: () => state.hull,
+    getMaxHull: () => state.maxHull,
+    getChapterIndex: () => state.chapterIndex,
     isObjectiveManaged: () => Boolean(state.room?.objectiveManaged),
     isCombatFrozen: () => Boolean(state.room?.combatFrozen),
     getPersistenceStatus: () => runSave?.getStatus?.() ?? null,

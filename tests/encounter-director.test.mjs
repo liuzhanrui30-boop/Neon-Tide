@@ -46,3 +46,15 @@ test('director placement is stable for checkpoint-equivalent room sequence', () 
   assert.deepEqual(run(), run());
 });
 
+test('director snapshots are recursively immutable detached views of objective authority', () => {
+  const director = createEncounterDirector({ seed: 5150 });
+  const started = director.startRoom(getEncounterTemplate('anchor-break'));
+  const originalX = started.objective.anchors[0].x;
+  assert.equal(Object.isFrozen(started.objective.anchors), true);
+  assert.equal(Object.isFrozen(started.objective.anchors[0]), true);
+  assert.throws(() => { started.objective.anchors[0].x = 999; }, TypeError);
+  const fresh = director.getSnapshot();
+  assert.equal(fresh.objective.anchors[0].x, originalX);
+  assert.notEqual(fresh.objective, started.objective);
+  assert.equal('getLiveObjective' in director, false);
+});

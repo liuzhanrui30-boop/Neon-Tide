@@ -89,11 +89,16 @@ test('storm survival advances only inside the current safe segment and requires 
   assert.equal(objective.failureReason, 'storm-exposure');
 
   const routed = createObjective(template, 501);
+  const player = { x: routed.safeZone.x, y: routed.safeZone.y };
   let visited = 0;
   while (routed.status === 'active') {
     const activeBefore = routed.corridor.activeSegment;
-    update(routed, routed.safeZone, 0.1);
-    if (routed.corridor.activeSegment !== activeBefore) visited += 1;
+    update(routed, player, 0.1);
+    if (routed.corridor.activeSegment !== activeBefore) {
+      visited += 1;
+      player.x = routed.safeZone.x;
+      player.y = routed.safeZone.y;
+    }
   }
   assert.equal(routed.status, 'completed');
   assert.ok(visited >= 2);
@@ -123,6 +128,52 @@ test('id-less repeated events remain legitimate, sequences dedupe boundedly, and
   const harvest = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'core-harvest'), 10);
   update(harvest, { x: 99, y: 99 }, 0, [{ type: 'pickupCollected', payload: { count: 3 } }]);
   assert.equal(harvest.progress, 3);
+});
+
+test('semantic destroyed target IDs dedupe across distinct transport sequences and repeated identities', () => {
+  const purgeTemplate = { ...ENCOUNTER_TEMPLATES.find(({ type }) => type === 'purge'), killTarget: 5 };
+  const purge = createObjective(purgeTemplate, 99);
+  update(purge, null, 0, [
+    { type: 'enemy:destroyed', sequence: 1, payload: { targetSourceId: 7001 } },
+    { type: 'enemy:destroyed', sequence: 2, payload: { targetSourceId: 7001 } },
+  ]);
+  assert.equal(purge.progress, 1);
+  const aggregatePayload = { count: 2 };
+  update(purge, null, 0, [{ type: 'enemy:destroyed', payload: aggregatePayload }]);
+  update(purge, null, 0, [{ type: 'enemy:destroyed', payload: aggregatePayload }]);
+  assert.equal(purge.progress, 3, 'the same id-less payload object must count only once');
+
+  const elite = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'elite-hunt'), 101);
+  const [first] = elite.eliteTargets;
+  update(elite, null, 0, [
+    { type: 'enemy:destroyed', sequence: 10, payload: { targetSourceId: first.sourceId } },
+    { type: 'enemy:destroyed', sequence: 11, payload: { targetSourceId: first.sourceId } },
+  ]);
+  assert.equal(elite.progress, 1);
+  const eliteAggregate = { type: 'elite:destroyed', payload: { count: 1 } };
+  update(elite, null, 0, [eliteAggregate]);
+  update(elite, null, 0, [eliteAggregate]);
+  assert.equal(elite.progress, 2);
+  assert.ok(elite._destroyedTargetOrder.length <= 256);
+
+  const targetIdElite = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'elite-hunt'), 102);
+  update(targetIdElite, null, 0, [
+    { type: 'enemyDestroyed', payload: { targetId: targetIdElite.eliteTargets[0].id } },
+  ]);
+  assert.equal(targetIdElite.progress, 1);
+});
+
+test('fixed-step updates return compact metadata without cloning full objective snapshots', () => {
+  const objective = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'moving-zone'), 404);
+  const player = { x: objective.safeZone.x, y: objective.safeZone.y };
+  for (let index = 0; index < 5_000; index += 1) {
+    player.x = objective.safeZone.x;
+    player.y = objective.safeZone.y;
+    const result = updateObjective(objective, null, player, 0.001);
+    assert.equal('path' in result, false);
+  }
+  assert.equal(objective._snapshotCount, 0);
+  assert.ok(objective.progress > 4.9);
 });
 
 test('fixed seeds reproduce route geometry while different seeds vary it', () => {

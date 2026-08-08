@@ -9,6 +9,14 @@ function clone(value) {
   return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, clone(entry)]));
 }
 
+function cloneFrozen(value) {
+  if (value == null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
+  return Object.freeze(Object.fromEntries(
+    Object.entries(value).map(([key, entry]) => [key, cloneFrozen(entry)]),
+  ));
+}
+
 function hashSeed(seed) {
   if (Number.isFinite(Number(seed))) return Math.trunc(Number(seed)) >>> 0;
   return String(seed ?? '').split('').reduce((hash, character) => Math.imul(hash ^ character.charCodeAt(0), 16777619) >>> 0, 2166136261);
@@ -97,7 +105,8 @@ function emit(events, type, payload) {
 function newEvents(objective, events, predicate) {
   const result = [];
   for (const event of eventInput(events)) {
-    if (!predicate(event, event?.payload ?? event ?? {})) continue;
+    const payload = event?.payload ?? event ?? {};
+    if (!predicate(event, payload)) continue;
     const sequence = Number(event?.sequence);
     if (Number.isSafeInteger(sequence) && sequence > 0) {
       if (objective._seenEventSequences.has(sequence)) continue;
@@ -107,9 +116,47 @@ function newEvents(objective, events, predicate) {
         objective._seenEventSequences.delete(objective._seenEventOrder.shift());
       }
     }
-    result.push(event?.payload ?? event ?? {});
+    const hasSemanticId = ['targetSourceId', 'sourceId', 'targetId', 'id']
+      .some((key) => payload[key] !== undefined && payload[key] !== null);
+    const identity = payload && typeof payload === 'object' ? payload : event;
+    if (!hasSemanticId && identity && typeof identity === 'object') {
+      if (objective._seenIdlessEventObjects.has(identity)) continue;
+      objective._seenIdlessEventObjects.add(identity);
+    }
+    result.push(payload);
   }
   return result;
+}
+
+function destroyedTargetKey(payload) {
+  for (const key of ['targetSourceId', 'sourceId', 'targetId', 'id']) {
+    const value = payload?.[key];
+    if (value !== undefined && value !== null) return `${typeof value}:${String(value)}`;
+  }
+  return null;
+}
+
+function markDestroyedTarget(objective, key) {
+  if (key === null || objective._destroyedTargetIds.has(key)) return false;
+  objective._destroyedTargetIds.add(key);
+  objective._destroyedTargetOrder.push(key);
+  if (objective._destroyedTargetOrder.length > 256) {
+    objective._destroyedTargetIds.delete(objective._destroyedTargetOrder.shift());
+  }
+  return true;
+}
+
+function aggregateCount(payload, fallback = 1, maximum = Number.MAX_SAFE_INTEGER) {
+  const value = payload?.count === undefined ? fallback : Math.trunc(finite(payload.count, 0));
+  return Math.max(0, Math.min(maximum, value));
+}
+
+function findEliteTarget(objective, payload) {
+  const candidates = [payload?.targetSourceId, payload?.sourceId, payload?.targetId, payload?.id]
+    .filter((value) => value !== undefined && value !== null);
+  return objective.eliteTargets.find((target) => (
+    candidates.some((value) => target.sourceId === value || target.id === value)
+  ));
 }
 
 function setupObjective(template, seed) {
@@ -139,7 +186,11 @@ function setupObjective(template, seed) {
     _cleaned: false,
     _seenEventSequences: new Set(),
     _seenEventOrder: [],
+    _seenIdlessEventObjects: new WeakSet(),
+    _destroyedTargetIds: new Set(),
+    _destroyedTargetOrder: [],
     _lastProgressEventKey: null,
+    _snapshotCount: 0,
   };
 
   if (template.type === 'purge') {
@@ -260,7 +311,9 @@ function finish(objective, events, status, reason = null) {
     objective.progress = objective.target;
     objective.progressRatio = 1;
   }
-  emit(events, status === 'completed' ? 'objective:completed' : 'objective:failed', getObjectiveSnapshot(objective));
+  if (events?.emit) {
+    emit(events, status === 'completed' ? 'objective:completed' : 'objective:failed', getObjectiveSnapshot(objective));
+  }
   if (!objective._cleaned) {
     objective._cleaned = true;
     emit(events, 'objective:cleanup', { id: objective.id, kinds: objective.cleanup, status });
@@ -270,7 +323,11 @@ function finish(objective, events, status, reason = null) {
 
 function updatePurge(objective, events) {
   const kills = newEvents(objective, events, (event) => ['enemy:destroyed', 'enemyDestroyed', 'kill'].includes(event?.type));
-  objective.progress += kills.length;
+  for (const payload of kills) {
+    const key = destroyedTargetKey(payload);
+    if (key !== null) objective.progress += markDestroyedTarget(objective, key) ? 1 : 0;
+    else objective.progress += aggregateCount(payload, 1, Math.max(0, objective.target - objective.progress));
+  }
 }
 
 function updateAnchors(objective, player, dt) {
@@ -304,10 +361,24 @@ function updateElite(objective, events) {
   const kills = newEvents(objective, events, (event, payload) => (
     ['elite:destroyed', 'eliteDestroyed'].includes(event?.type)
     || (['enemy:destroyed', 'enemyDestroyed', 'kill'].includes(event?.type)
-      && objective.eliteTargets.some((target) => target.id === payload.id
-        || target.sourceId === payload.sourceId || target.sourceId === payload.targetSourceId))
+      && Boolean(findEliteTarget(objective, payload)))
   ));
-  objective.progress += kills.length;
+  for (const payload of kills) {
+    const key = destroyedTargetKey(payload);
+    if (key !== null) {
+      const target = findEliteTarget(objective, payload);
+      if (target) objective.progress += markDestroyedTarget(objective, `number:${target.sourceId}`) ? 1 : 0;
+      continue;
+    }
+    let remaining = aggregateCount(payload, 1, Math.max(0, objective.target - objective.progress));
+    for (const target of objective.eliteTargets) {
+      if (remaining <= 0) break;
+      if (markDestroyedTarget(objective, `number:${target.sourceId}`)) {
+        objective.progress += 1;
+        remaining -= 1;
+      }
+    }
+  }
 }
 
 function updateStorm(objective, player, dt) {
@@ -383,7 +454,11 @@ export function updateObjective(objective, world, player, dt, events = null) {
   if (!objective || typeof objective !== 'object') throw new TypeError('objective must be an objective object');
   const seconds = Number(dt);
   if (!Number.isFinite(seconds) || seconds < 0) throw new TypeError('objective dt must be non-negative and finite');
-  if (objective.status !== 'active') return getObjectiveSnapshot(objective);
+  if (objective.status !== 'active') return Object.freeze({
+    status: objective.status, progress: objective.progress, progressRatio: objective.progressRatio, changed: false,
+  });
+  const previousStatus = objective.status;
+  const previousProgressBucket = Math.floor(objective.progressRatio * 20);
   if (!objective._spawned) {
     objective._spawned = true;
     for (const hook of objective.spawnHooks) emit(events, 'objective:spawn', {
@@ -418,15 +493,22 @@ export function updateObjective(objective, world, player, dt, events = null) {
       });
     }
   }
-  return getObjectiveSnapshot(objective);
+  return Object.freeze({
+    status: objective.status,
+    progress: objective.progress,
+    progressRatio: objective.progressRatio,
+    changed: objective.status !== previousStatus
+      || Math.floor(objective.progressRatio * 20) !== previousProgressBucket,
+  });
 }
 
 export function getObjectiveSnapshot(objective) {
   if (!objective) return null;
+  objective._snapshotCount = Math.max(0, Math.trunc(objective._snapshotCount ?? 0)) + 1;
   const snapshot = {};
   for (const [key, value] of Object.entries(objective)) {
     if (key.startsWith('_')) continue;
-    snapshot[key] = clone(value);
+    snapshot[key] = cloneFrozen(value);
   }
   return Object.freeze(snapshot);
 }

@@ -68,6 +68,7 @@ export function createLegacyRuntime({
   hudRenderer = null,
   entityRenderer = null,
   compatibilityCampaign = false,
+  campaignSeed = null,
 }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
@@ -2323,7 +2324,9 @@ function startGame() {
   }
   resetState();
   pendingTransitionPayload = { newRun: true };
-  session.startRun("standard", Math.floor(performance.timeOrigin + performance.now()));
+  session.startRun("standard", Number.isFinite(campaignSeed)
+    ? campaignSeed
+    : Math.floor(performance.timeOrigin + performance.now()));
   session.startRoom(compatibilityCampaign
     ? { id: "v2.2-compatibility-chapter-0", compatibility: true, chapterIndex: 0 }
     : { campaign: true, chapterIndex: 0 });
@@ -2446,8 +2449,8 @@ function transitionTo(nextMode, payload = {}) {
   pendingTransitionPayload = payload;
   let changed = false;
   if (nextMode === "paused") changed = session.pause();
-  else if (nextMode === "playing" && session.snapshot().mode === "paused") changed = session.resume();
-  else if (nextMode === "playing" && session.snapshot().mode === "upgrade") {
+  else if (nextMode === "playing" && session.getMode() === "paused") changed = session.resume();
+  else if (nextMode === "playing" && session.getMode() === "upgrade") {
     const completed = session.snapshot();
     const completedRooms = completed.stats.roomsStarted;
     if (completed.room?.compatibility) {
@@ -2456,7 +2459,7 @@ function transitionTo(nextMode, payload = {}) {
         compatibility: true,
         chapterIndex: completed.chapterIndex,
       });
-    } else if (completedRooms < 4) {
+    } else if (completedRooms < 5) {
       changed = session.startRoom({ campaign: true, chapterIndex: Math.min(3, completedRooms) });
     } else {
       changed = session.startRoom({ id: "v2.2-boss-compatibility", compatibility: true, chapterIndex: 3 });
@@ -2729,7 +2732,7 @@ function chooseUpgrade(upgradeId) {
   state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
   if (transitionTo("playing", { upgraded: true })) {
-    const nextChapter = session.snapshot().chapterIndex;
+    const nextChapter = session.getChapterIndex();
     if (nextChapter !== state.stageIndex) {
       state.stageQueue.length = 0;
       enterStage(nextChapter);
@@ -4256,7 +4259,7 @@ function triggerPerfectPhase(source) {
 function damagePlayer(enemy) {
   if (projectedHull !== null && (state.health !== projectedHull || state.maxHealth !== projectedMaxHull)) {
     const reconciled = session.reconcileCompatibilityHull(state.health, { maxHull: state.maxHealth });
-    if (!reconciled || session.snapshot().mode === "defeat") return false;
+    if (!reconciled || session.getMode() === "defeat") return false;
   }
   if (!session.damageHull(1)) return false;
   enemy.nearMissCandidate = false;
@@ -5239,6 +5242,8 @@ function ensureCombatObjective(entityWorld) {
 function syncCombatWorld(entityWorld) {
   if (!entityWorld?.spawn || !entityWorld?.readInto || !entityWorld?.write
     || state.mode !== "playing" || state.elapsed < V3_COMBAT_WARMUP_SECONDS) return null;
+  const sessionHull = session.getHull();
+  const sessionMaxHull = session.getMaxHull();
   let playerEntity = combatBridge.playerId
     ? entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget)
     : null;
@@ -5246,8 +5251,8 @@ function syncCombatWorld(entityWorld) {
     combatBridge.playerId = entityWorld.spawn("player", {
       x: player.position.x,
       y: player.position.y,
-      hp: session.snapshot().hull,
-      maxHp: session.snapshot().maxHull,
+      hp: sessionHull,
+      maxHp: sessionMaxHull,
       radius: player.radius,
       team: 1,
       flags: ENTITY_FLAG_HIDDEN,
@@ -5263,8 +5268,8 @@ function syncCombatWorld(entityWorld) {
     y: player.position.y,
     vx: player.velocity.x,
     vy: player.velocity.y,
-    hp: session.snapshot().hull,
-    maxHp: session.snapshot().maxHull,
+    hp: sessionHull,
+    maxHp: sessionMaxHull,
     radius: player.radius,
     team: 1,
     flags: ENTITY_FLAG_HIDDEN,
@@ -5571,7 +5576,7 @@ function simulate(dt) {
       updateShards(simDt);
       updateEnemies(simDt);
       updateProjectiles(simDt);
-      if (state.mode === "playing") updateSpawning(simDt);
+      if (state.mode === "playing" && !session.isObjectiveManaged()) updateSpawning(simDt);
       updateParticles(simDt);
       updateRipples(simDt);
       updateTrails(simDt);

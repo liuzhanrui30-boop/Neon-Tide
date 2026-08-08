@@ -104,6 +104,7 @@ const STANDARD_CAMPAIGN_SEQUENCE = Object.freeze([
   'moving-sanctum',
   'core-harvest',
   'escort-skiff',
+  'elite-pursuit',
 ]);
 
 export function getCampaignEncounter(roomIndex = 0, { mode = 'standard', seed = 0 } = {}) {
