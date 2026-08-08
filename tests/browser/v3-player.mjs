@@ -20,8 +20,8 @@ async function v3PlayerScenario() {
     assert.deepEqual(surface.touchActions, ['潮矛E', '相位']);
     assert.deepEqual(surface.aimIds, []);
     assert.deepEqual(Object.keys(surface.player).sort(), [
-      'autoFireRateBuffTimer', 'cameraLead', 'dashCharges', 'dashTimer', 'facing', 'inputDevice',
-      'perfectPhaseWindow', 'phaseTimer', 'position', 'velocity',
+      'autoFireRateBuffTimer', 'autoPulseTimer', 'autoShotsFired', 'cameraLead', 'dashCharges', 'dashTimer',
+      'facing', 'inputDevice', 'perfectPhaseWindow', 'phaseTimer', 'position', 'velocity',
     ]);
 
     const start = surface.player.position;
@@ -39,6 +39,48 @@ async function v3PlayerScenario() {
     assert.ok(distance(beforePointer, afterPointer.position) < 0.25, JSON.stringify({ beforePointer, afterPointer }));
     assert.equal('aimX' in afterPointer, false);
     assert.equal('aimY' in afterPointer, false);
+
+    const accessiblePhase = await page.evaluate(`({
+      role:document.querySelector('#dash-pips').getAttribute('role'),
+      min:document.querySelector('#dash-pips').getAttribute('aria-valuemin'),
+      max:document.querySelector('#dash-pips').getAttribute('aria-valuemax'),
+      now:document.querySelector('#dash-pips').getAttribute('aria-valuenow'),
+      text:document.querySelector('#dash-pips').getAttribute('aria-valuetext'),
+      live:document.querySelector('#phase-status').getAttribute('aria-live'),
+    })`);
+    assert.deepEqual(accessiblePhase, {
+      role:'progressbar',min:'0',max:'2',now:'2',text:'相位冲刺 2.00 / 2；2 格就绪',live:'polite',
+    });
+
+    const autoLock = await page.gameEvaluate(`
+      clearWorldEntities();
+      $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
+      const nearest=spawnEnemy('chaser',new THREE.Vector2(1.4,0));
+      const priority=spawnEnemy('chaser',new THREE.Vector2(-5,1));
+      priority.weakPoint=true;
+      nearest.group.visible=true;priority.group.visible=true;
+      $state.weaponEnergy=100;$state.laserState='ready';$state.dashTimer=0;$state.dashInvulnTimer=0;
+      const started=startLaserCharge();
+      const locked={x:$state.laserDirection.x,y:$state.laserDirection.y,mode:$state.laserTargetMode,index:$state.laserTargetIndex};
+      input.actions=Object.freeze({moveX:1,moveY:0,dashPressed:false,ultimatePressed:false,inputDevice:'keyboard'});
+      updatePlayer(1/60);
+      syncLaserTransform();
+      const afterMove={direction:{x:$state.laserDirection.x,y:$state.laserDirection.y},facing:{x:$player.facing.x,y:$player.facing.y}};
+      clearLaserState();clearWorldEntities();
+      $player.facing.set(0,-1);$state.weaponEnergy=100;$state.laserState='ready';
+      const neutralStarted=startLaserCharge();
+      const neutral={started:neutralStarted,mode:$state.laserTargetMode,index:$state.laserTargetIndex,direction:{x:$state.laserDirection.x,y:$state.laserDirection.y}};
+      clearLaserState();
+      return {started,locked,afterMove,neutral};
+    `);
+    assert.equal(autoLock.started, true);
+    assert.equal(autoLock.locked.mode, 'target');
+    assert.equal(autoLock.locked.index, 1);
+    assert.ok(autoLock.locked.x < 0, JSON.stringify(autoLock));
+    assert.ok(autoLock.afterMove.facing.x > 0, JSON.stringify(autoLock));
+    assert.ok(Math.abs(autoLock.afterMove.direction.x-autoLock.locked.x)<1e-12);
+    assert.ok(Math.abs(autoLock.afterMove.direction.y-autoLock.locked.y)<1e-12);
+    assert.deepEqual(autoLock.neutral, {started:true,mode:'neutral',index:-1,direction:{x:0,y:-1}});
 
     await page.pressKey(' ', 'Space');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.dashCharges[0] < 0.1`);
@@ -61,33 +103,61 @@ async function v3PlayerScenario() {
     assert.equal(perfect.slow, 0);
     assert.equal(perfect.queuedAfter, perfect.queuedBefore + 1);
 
+    const cadence = await page.gameEvaluate(`
+      clearWorldEntities();$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      const measure=(buff)=>{
+        $state.autoFireRateBuffTimer=buff;$state.autoPulseTimer=AUTO_PULSE_INTERVAL;
+        $state.stats.autoPulseShots=0;$state.stats.autoPulseLog=[];
+        const startedAt=$state.elapsed;
+        for(let guard=0;guard<120&&$state.stats.autoPulseLog.length<2;guard+=1){
+          $state.elapsed+=1/60;
+          updateAutomaticPulse(1/60);
+          $state.autoFireRateBuffTimer=Math.max(0,$state.autoFireRateBuffTimer-1/60);
+        }
+        const times=$state.stats.autoPulseLog.map((entry)=>entry.elapsed-startedAt);
+        return {times,interval:times[1]-times[0]};
+      };
+      return {base:measure(0),buffed:measure(0.8)};
+    `);
+    assert.ok(cadence.base.interval > cadence.buffed.interval, JSON.stringify(cadence));
+    assert.ok(Math.abs(cadence.buffed.interval/cadence.base.interval-0.75)<0.08, JSON.stringify(cadence));
+
     const equivalence = await page.evaluate(`(async()=>{
-      const {createPlayerState,updatePlayerState,FIXED_PLAYER_STEP}=await import('/src/systems/player-system.js');
+      const [{createPlayerState,updatePlayerState},{createFixedLoop}]=await Promise.all([
+        import('/src/systems/player-system.js'),
+        import('/src/game/fixed-loop.js'),
+      ]);
       const replay=(renderHz)=>{
         const player=createPlayerState();
-        const fixedPerRender=60/renderHz;
-        for(let frame=0;frame<renderHz*3;frame+=1){
-          for(let fixed=0;fixed<fixedPerRender;fixed+=1){
-            const step=frame*fixedPerRender+fixed;
-            updatePlayerState(player,{
-              moveX:step<90?1:step<140?-0.45:0.2,
-              moveY:step<60?0.35:-0.25,
-              dashPressed:step===40||step===130,
-              ultimatePressed:false,
-              inputDevice:'keyboard',
-            },FIXED_PLAYER_STEP);
-          }
-        }
-        return player.position;
+        let simulatedAt=0;
+        let renderCount=0;
+        const actionAt=(time)=>({
+          moveX:time<1.5?1:time<2.34?-0.45:0.2,
+          moveY:time<1?0.35:-0.25,
+          dashPressed:Math.abs(time-0.6666666667)<1e-6||Math.abs(time-2.1666666667)<1e-6,
+          ultimatePressed:false,
+          inputDevice:'keyboard',
+        });
+        const loop=createFixedLoop({
+          stepSeconds:1/60,
+          maxCatchUpSteps:6,
+          onStep(dt){ updatePlayerState(player,actionAt(simulatedAt),dt);simulatedAt+=dt; },
+          onRender(){ renderCount+=1; },
+        });
+        loop.reset(0);
+        const frameMs=1000/renderHz;
+        for(let frame=1;frame<=renderHz*3;frame+=1) loop.tick(frame*frameMs);
+        return {position:player.position,stats:loop.getStats(),renderCount};
       };
       return {sixty:replay(60),thirty:replay(30)};
     })()`);
-    assert.ok(distance(equivalence.sixty, equivalence.thirty) <= 0.03, JSON.stringify(equivalence));
+    assert.equal(equivalence.sixty.stats.steps, equivalence.thirty.stats.steps);
+    assert.notEqual(equivalence.sixty.renderCount, equivalence.thirty.renderCount);
+    assert.ok(distance(equivalence.sixty.position, equivalence.thirty.position) <= 0.03, JSON.stringify(equivalence));
 
-    const gamepad = await page.evaluate(`(()=>{
-      const input=globalThis.__NEON_TIDE_V3__.inputSystem;
-      input.setGamepadState({axes:[-1,0],buttons:[]});
-      return input.snapshot();
+    const gamepad = await page.evaluate(`(async()=>{
+      const {normalizeActionSnapshot}=await import('/src/systems/input-system.js');
+      return normalizeActionSnapshot({gamepad:{axes:[-1,0],buttons:[]}});
     })()`);
     assert.equal(gamepad.inputDevice, 'gamepad');
     assert.equal(gamepad.moveX, -1);
@@ -123,10 +193,17 @@ async function v3PlayerScenario() {
       assert.ok(box.left >= 0 && box.top >= 0 && box.right <= layout.viewport.width && box.bottom <= layout.viewport.height, JSON.stringify(layout));
     }
 
-    await page.tap('#dash-button');
-    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player?.inputDevice === 'touch'`);
-    const touchDash = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player`);
-    assert.ok(touchDash.dashCharges.some((charge) => charge < 0.2));
+    const beforeSwitch = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.position.x`);
+    await page.dispatchKey('rawKeyDown', 'd', 'KeyD');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.position.x > ${beforeSwitch + 0.03}`);
+    await page.click('#dash-button');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player?.dashCharges.some((charge)=>charge<0.2)`);
+    const switchDash = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    await page.dispatchKey('keyUp', 'd', 'KeyD');
+    assert.equal(switchDash.player.inputDevice, 'keyboard');
+    assert.equal(switchDash.input.pressDevice, 'keyboard');
+    assert.ok(switchDash.player.position.x > beforeSwitch);
+    assert.ok(switchDash.player.facing.x > 0);
     assert.equal(await page.evaluate(`document.querySelector('#dash-button').tagName`), 'BUTTON');
     assert.equal(await page.evaluate(`document.querySelector('#laser-button').tagName`), 'BUTTON');
   });

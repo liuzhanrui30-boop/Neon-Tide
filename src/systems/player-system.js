@@ -3,6 +3,8 @@ import { createEntityReadTarget } from '../game/entity-world.js';
 export const FIXED_PLAYER_STEP = 1 / 60;
 export const PERFECT_PHASE_WINDOW = 0.12;
 export const PERFECT_PHASE_REFUND = 0.35;
+export const AUTO_PULSE_INTERVAL = 0.55;
+export const AUTO_PULSE_BUFF_MULTIPLIER = 0.75;
 
 const MOVE_ACCELERATION = 17.5;
 const TURN_ACCELERATION = 31;
@@ -18,6 +20,7 @@ const CAMERA_RESPONSE = 5.5;
 const CAMERA_MAX_LEAD = 0.72;
 const CAMERA_VELOCITY_SCALE = 0.11;
 const CAMERA_DEADZONE = 0.02;
+const AUTO_TARGET_RANGE = 30;
 
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
 const approachZero = (value) => Math.max(0, value);
@@ -47,6 +50,48 @@ function emit(events, type, payload) {
   return events?.emit?.(type, Object.freeze({ ...payload })) ?? false;
 }
 
+
+export function selectAutomaticTarget(candidates, origin = { x: 0, y: 0 }) {
+  if (!Array.isArray(candidates)) throw new TypeError('automatic target candidates must be an array');
+  const originX = Number.isFinite(origin?.x) ? origin.x : 0;
+  const originY = Number.isFinite(origin?.y) ? origin.y : 0;
+  const ranked = candidates.flatMap((candidate, index) => {
+    if (!candidate || candidate.visible === false || candidate.dead) return [];
+    const x = Number(candidate.x);
+    const y = Number(candidate.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return [];
+    const distance = Math.hypot(x - originX, y - originY);
+    if (!Number.isFinite(distance) || distance > AUTO_TARGET_RANGE) return [];
+    const threat = clamp(Number(candidate.threat) || 0, 0, 20);
+    const priority = clamp(
+      (candidate.weakPoint ? 100 : 0)
+        + (candidate.type === 'boss' ? 60 : 0)
+        + (candidate.executing ? 30 : 0)
+        + threat,
+      0,
+      200,
+    );
+    const stableId = Number.isFinite(candidate.id) ? candidate.id : index;
+    return [{ candidate, x, y, distance, priority, stableId }];
+  });
+  if (ranked.length === 0) return null;
+  const hasPriority = ranked.some((entry) => entry.priority > 0);
+  ranked.sort((left, right) => {
+    if (hasPriority && right.priority !== left.priority) return right.priority - left.priority;
+    if (left.distance !== right.distance) return left.distance - right.distance;
+    return left.stableId - right.stableId;
+  });
+  const selected = ranked[0];
+  const direction = normalize(selected.x - originX, selected.y - originY);
+  return Object.freeze({
+    mode: 'target',
+    target: selected.candidate,
+    score: selected.priority,
+    distance: selected.distance,
+    direction: Object.freeze({ x: direction.x, y: direction.y }),
+  });
+}
+
 export function createPlayerState(overrides = {}) {
   const facing = vector(overrides.facing, 0, 1);
   const facingDirection = normalize(facing.x, facing.y);
@@ -62,6 +107,10 @@ export function createPlayerState(overrides = {}) {
     phaseTimer: approachZero(Number(overrides.phaseTimer) || 0),
     perfectPhaseWindow: clamp(Number(overrides.perfectPhaseWindow) || 0, 0, PERFECT_PHASE_WINDOW),
     autoFireRateBuffTimer: approachZero(Number(overrides.autoFireRateBuffTimer) || 0),
+    autoFireTimer: Number.isFinite(overrides.autoFireTimer) && overrides.autoFireTimer > 0
+      ? overrides.autoFireTimer
+      : AUTO_PULSE_INTERVAL,
+    autoShotsFired: Math.max(0, Math.trunc(Number(overrides.autoShotsFired) || 0)),
     maxSpeed: Number.isFinite(overrides.maxSpeed) && overrides.maxSpeed > 0 ? overrides.maxSpeed : MAX_SPEED,
     cameraLead: vector(overrides.cameraLead),
     bounds: overrides.bounds ? { ...overrides.bounds } : null,
@@ -161,6 +210,23 @@ function updateCameraLead(player, dt) {
   player.cameraLead.y += (target.y - player.cameraLead.y) * blend;
 }
 
+function updateAutomaticPulse(player, dt, events) {
+  const buffed = player.autoFireRateBuffTimer > 0;
+  const interval = AUTO_PULSE_INTERVAL * (buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1);
+  player.autoFireTimer -= dt;
+  let guard = 0;
+  while (player.autoFireTimer <= 1e-9 && guard < 4) {
+    player.autoShotsFired += 1;
+    emit(events, 'player:autoPulse', {
+      sequence: player.autoShotsFired,
+      interval,
+      buffed,
+    });
+    player.autoFireTimer += interval;
+    guard += 1;
+  }
+}
+
 export function updatePlayerState(player, input, dt, events = null) {
   if (!player || typeof player !== 'object') throw new TypeError('player state is required');
   if (!input || typeof input !== 'object') throw new TypeError('named action input is required');
@@ -169,6 +235,7 @@ export function updatePlayerState(player, input, dt, events = null) {
   player.dashTimer = approachZero(player.dashTimer - dt);
   player.phaseTimer = approachZero(player.phaseTimer - dt);
   player.perfectPhaseWindow = approachZero(player.perfectPhaseWindow - dt);
+  updateAutomaticPulse(player, dt, events);
   player.autoFireRateBuffTimer = approachZero(player.autoFireRateBuffTimer - dt);
   for (let index = 0; index < 2; index += 1) {
     player.dashCharges[index] = clamp(player.dashCharges[index] + dt / DASH_RECOVERY, 0, 1);
@@ -224,6 +291,8 @@ export function updatePlayer(world, session, input, dt, events) {
     phaseTimer: readTarget.phaseTimer,
     perfectPhaseWindow: readTarget.perfectPhaseWindow,
     autoFireRateBuffTimer: readTarget.fireTimer,
+    autoFireTimer: readTarget.cooldown || AUTO_PULSE_INTERVAL,
+    autoShotsFired: readTarget.value,
     maxSpeed: readTarget.maxSpeed || MAX_SPEED,
     cameraLead: { x: readTarget.cameraLeadX, y: readTarget.cameraLeadY },
   });
@@ -241,6 +310,8 @@ export function updatePlayer(world, session, input, dt, events) {
     phaseTimer: state.phaseTimer,
     perfectPhaseWindow: state.perfectPhaseWindow,
     fireTimer: state.autoFireRateBuffTimer,
+    cooldown: state.autoFireTimer,
+    value: state.autoShotsFired,
     cameraLeadX: state.cameraLead.x,
     cameraLeadY: state.cameraLead.y,
     maxSpeed: state.maxSpeed,

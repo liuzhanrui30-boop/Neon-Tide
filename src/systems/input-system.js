@@ -108,8 +108,12 @@ export function createInputSystem(options = {}) {
   let lastActiveDevice = 'keyboard';
   let dashBuffered = false;
   let ultimateBuffered = false;
+  let dashBufferDevice = null;
+  let ultimateBufferDevice = null;
   let previousGamepadDash = false;
   let previousGamepadUltimate = false;
+  let gamepadConnected = false;
+  let lastPressDevice = 'keyboard';
   let started = false;
   let disposed = false;
   const listeners = [];
@@ -118,11 +122,18 @@ export function createInputSystem(options = {}) {
     if (DEVICE_NAMES.has(device)) lastActiveDevice = device;
   }
 
-  function press(action, device = lastActiveDevice) {
+  function press(action, device = lastActiveDevice, { claimMovement = true } = {}) {
     if (!PRESS_ACTIONS.includes(action)) return false;
-    remember(device);
-    if (action === 'dash') dashBuffered = true;
-    else ultimateBuffered = true;
+    const resolvedDevice = DEVICE_NAMES.has(device) ? device : lastActiveDevice;
+    lastPressDevice = resolvedDevice;
+    if (claimMovement) remember(resolvedDevice);
+    if (action === 'dash') {
+      dashBuffered = true;
+      dashBufferDevice = resolvedDevice;
+    } else {
+      ultimateBuffered = true;
+      ultimateBufferDevice = resolvedDevice;
+    }
     return true;
   }
 
@@ -142,6 +153,7 @@ export function createInputSystem(options = {}) {
   }
 
   function setGamepadState(next = {}) {
+    gamepadConnected = next.connected !== false;
     gamepad = {
       axes: Array.isArray(next.axes) ? [next.axes[0] ?? 0, next.axes[1] ?? 0] : [0, 0],
       buttons: Array.isArray(next.buttons) ? next.buttons : [],
@@ -157,10 +169,37 @@ export function createInputSystem(options = {}) {
     return move;
   }
 
+  function fallbackMovementDevice() {
+    const keyboardMove = keyboardVector(keyboard);
+    if (Math.hypot(keyboardMove.x, keyboardMove.y) > 0.001) return 'keyboard';
+    if (Math.hypot(touch.x, touch.y) > 0.001) return 'touch';
+    return 'keyboard';
+  }
+
+  function disconnectGamepad() {
+    const wasConnected = gamepadConnected || lastActiveDevice === 'gamepad';
+    gamepadConnected = false;
+    gamepad = { axes: [0, 0], buttons: [] };
+    previousGamepadDash = false;
+    previousGamepadUltimate = false;
+    if (dashBufferDevice === 'gamepad') {
+      dashBuffered = false;
+      dashBufferDevice = null;
+    }
+    if (ultimateBufferDevice === 'gamepad') {
+      ultimateBuffered = false;
+      ultimateBufferDevice = null;
+    }
+    if (lastActiveDevice === 'gamepad') lastActiveDevice = fallbackMovementDevice();
+    return wasConnected;
+  }
+
   function pollGamepad() {
-    const pads = hostNavigator?.getGamepads?.();
+    if (typeof hostNavigator?.getGamepads !== 'function') return;
+    const pads = hostNavigator.getGamepads();
     const active = pads ? Array.from(pads).find((pad) => pad?.connected !== false) : null;
     if (active) setGamepadState(active);
+    else if (gamepadConnected || lastActiveDevice === 'gamepad') disconnectGamepad();
   }
 
   function snapshot() {
@@ -173,6 +212,8 @@ export function createInputSystem(options = {}) {
     const result = freezeSnapshot(move, dashBuffered, ultimateBuffered, lastActiveDevice);
     dashBuffered = false;
     ultimateBuffered = false;
+    dashBufferDevice = null;
+    ultimateBufferDevice = null;
     return result;
   }
 
@@ -200,9 +241,23 @@ export function createInputSystem(options = {}) {
     const dashButton = options.dashButton ?? hostDocument?.querySelector?.('#dash-button');
     const ultimateButton = options.ultimateButton ?? hostDocument?.querySelector?.('#laser-button');
     // Click is deliberate: native buttons retain keyboard/switch activation and
-    // pointer coordinates never enter the gameplay snapshot.
-    bind(dashButton, 'click', () => press('dash', 'touch'));
-    bind(ultimateButton, 'click', () => press('ultimate', 'touch'));
+    // pointer coordinates never enter the gameplay snapshot. Pointer provenance
+    // is tracked separately from movement ownership, so a touch/mouse/assistive
+    // action cannot erase a simultaneously held keyboard or stick vector.
+    const bindNativeAction = (button, action) => {
+      let pointerDevice = null;
+      bind(button, 'pointerdown', (event) => {
+        pointerDevice = event.pointerType === 'touch' ? 'touch' : lastActiveDevice;
+      });
+      bind(button, 'click', (event) => {
+        const device = pointerDevice ?? (event.detail === 0 ? lastActiveDevice : lastActiveDevice);
+        pointerDevice = null;
+        press(action, device, { claimMovement: false });
+      });
+    };
+    bindNativeAction(dashButton, 'dash');
+    bindNativeAction(ultimateButton, 'ultimate');
+    bind(hostWindow, 'gamepaddisconnected', disconnectGamepad);
     return true;
   }
 
@@ -210,9 +265,16 @@ export function createInputSystem(options = {}) {
     for (const action of MOVE_ACTIONS) keyboard[action] = false;
     touch.x = 0;
     touch.y = 0;
+    gamepadConnected = false;
     gamepad = { axes: [0, 0], buttons: [] };
     previousGamepadDash = false;
     previousGamepadUltimate = false;
+    dashBuffered = false;
+    ultimateBuffered = false;
+    dashBufferDevice = null;
+    ultimateBufferDevice = null;
+    lastActiveDevice = 'keyboard';
+    lastPressDevice = 'keyboard';
   }
 
   function dispose() {
@@ -220,8 +282,6 @@ export function createInputSystem(options = {}) {
     disposed = true;
     listeners.splice(0).forEach((remove) => remove());
     resetHeld();
-    dashBuffered = false;
-    ultimateBuffered = false;
     return true;
   }
 
@@ -232,9 +292,12 @@ export function createInputSystem(options = {}) {
     setKeyboardAction,
     setTouchVector,
     setGamepadState,
+    disconnectGamepad,
     resetHeld,
+    reset: resetHeld,
     start,
     dispose,
     getLastActiveDevice: () => lastActiveDevice,
+    getLastPressDevice: () => lastPressDevice,
   });
 }

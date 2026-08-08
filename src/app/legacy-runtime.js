@@ -48,6 +48,11 @@ import {
 import { createPostProcessing, selectRenderQuality } from "../game/render-quality.js";
 import { createRealmBackgrounds } from "../game/realm-backgrounds.js";
 import { normalizeActionSnapshot } from "../systems/input-system.js";
+import {
+  AUTO_PULSE_BUFF_MULTIPLIER,
+  AUTO_PULSE_INTERVAL,
+  selectAutomaticTarget,
+} from "../systems/player-system.js";
 
 export function createLegacyRuntime({ session, loop, events, inputSystem = null, playerProjection = null, hudRenderer = null }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
@@ -251,6 +256,9 @@ const state = {
   laserSequence: 0,
   laserSequenceTargets: 0,
   laserDirection: new THREE.Vector2(0, 1),
+  laserTargetMode: "neutral",
+  laserTargetIndex: -1,
+  autoPulseTimer: AUTO_PULSE_INTERVAL,
   combo: 0,
   comboTimer: 0,
   stageIndex: 0,
@@ -316,6 +324,8 @@ const state = {
     laserHits: 0,
     laserInterrupts: 0,
     laserPeakTargets: 0,
+    autoPulseShots: 0,
+    autoPulseLog: [],
     projectilePeak: 0,
     environmentEvents: 0,
     environmentActiveFrames: 0,
@@ -2116,6 +2126,9 @@ function resetState() {
   state.laserSequence = 0;
   state.laserSequenceTargets = 0;
   state.laserDirection.set(0, 1);
+  state.laserTargetMode = "neutral";
+  state.laserTargetIndex = -1;
+  state.autoPulseTimer = AUTO_PULSE_INTERVAL;
   state.stageIndex = 0;
   state.spawnSequence = 0;
   state.enemySpawnTimer = 0.72;
@@ -2170,6 +2183,8 @@ function resetState() {
   state.stats.laserHits = 0;
   state.stats.laserInterrupts = 0;
   state.stats.laserPeakTargets = 0;
+  state.stats.autoPulseShots = 0;
+  state.stats.autoPulseLog = [];
   state.stats.projectilePeak = 0;
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
@@ -2414,6 +2429,7 @@ function applySession(snapshot) {
     input.keys.clear();
     input.dashBuffer = 0;
     input.laserBuffer = 0;
+    inputSystem?.reset?.();
     if (nextMode !== "paused") clearLaserState();
     resetJoystick();
     audio.suspendBeat();
@@ -2646,6 +2662,28 @@ function updateHighScore() {
   localStorage.setItem(STORAGE_KEY, String(state.highScore));
 }
 
+function updateAutomaticPulse(dt) {
+  const buffed = state.autoFireRateBuffTimer > 0;
+  const interval = AUTO_PULSE_INTERVAL * (buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1);
+  state.autoPulseTimer -= dt;
+  let fired = 0;
+  while (state.autoPulseTimer <= 1e-9 && fired < 4) {
+    state.stats.autoPulseShots += 1;
+    const record = Object.freeze({
+      sequence: state.stats.autoPulseShots,
+      elapsed: state.elapsed,
+      interval,
+      buffed,
+    });
+    state.stats.autoPulseLog.push(record);
+    if (state.stats.autoPulseLog.length > 16) state.stats.autoPulseLog.shift();
+    events.emit("player:autoPulse", record);
+    state.autoPulseTimer += interval;
+    fired += 1;
+  }
+  return fired;
+}
+
 function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
@@ -2750,6 +2788,8 @@ function updatePlayer(dt) {
     phaseTimer: state.dashInvulnTimer,
     perfectPhaseWindow: state.perfectPhaseWindow,
     autoFireRateBuffTimer: state.autoFireRateBuffTimer,
+    autoPulseTimer: state.autoPulseTimer,
+    autoShotsFired: state.stats.autoPulseShots,
     cameraLead: { x: state.cameraLookAhead.x, y: state.cameraLookAhead.y },
     inputDevice: input.actions.inputDevice,
   };
@@ -2893,15 +2933,50 @@ function canStartLaser() {
   return getLaserAvailability().canStart;
 }
 
+function selectTideLanceLock() {
+  const candidates = enemies.map((enemy, index) => ({
+    id: index,
+    x: enemy.group.position.x,
+    y: enemy.group.position.y,
+    visible: enemy.group.visible !== false
+      && !enemy.dead
+      && Math.abs(enemy.group.position.x) <= view.halfWidth + 1
+      && Math.abs(enemy.group.position.y) <= view.halfHeight + 1,
+    dead: enemy.dead,
+    type: enemy.type,
+    weakPoint: Boolean(enemy.weakPoint),
+    executing: isEnemyAttackExecuting(enemy),
+    threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
+  }));
+  const selected = selectAutomaticTarget(candidates, player.position);
+  if (!selected) return null;
+  return Object.freeze({ ...selected, enemy: enemies[selected.target.id] ?? null });
+}
+
 function startLaserCharge() {
   if (!canStartLaser()) return false;
   state.weaponEnergy = 0;
   state.laserElapsed = 0;
   state.laserSequence += 1;
   state.laserSequenceTargets = 0;
-  state.laserDirection.copy(player.facing);
-  if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
-  else state.laserDirection.normalize();
+  const lock = selectTideLanceLock();
+  if (lock?.enemy) {
+    state.laserDirection.set(lock.direction.x, lock.direction.y);
+    state.laserTargetMode = "target";
+    state.laserTargetIndex = lock.target.id;
+  } else {
+    state.laserDirection.copy(player.facing);
+    if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
+    else state.laserDirection.normalize();
+    state.laserTargetMode = "neutral";
+    state.laserTargetIndex = -1;
+  }
+  events.emit("player:tideLanceLock", Object.freeze({
+    mode: state.laserTargetMode,
+    targetIndex: state.laserTargetIndex,
+    directionX: state.laserDirection.x,
+    directionY: state.laserDirection.y,
+  }));
   state.laserState = "charge";
   state.stats.laserShots += 1;
   player.laser.group.visible = true;
@@ -4150,6 +4225,7 @@ function sanitizeRuntimeScalars() {
   state.dashInvulnTimer = Math.max(0, runtimeFinite(state.dashInvulnTimer, 0));
   state.perfectPhaseWindow = clampFinite(state.perfectPhaseWindow, 0, 0.12, 0);
   state.autoFireRateBuffTimer = Math.max(0, runtimeFinite(state.autoFireRateBuffTimer, 0));
+  state.autoPulseTimer = Math.max(0, runtimeFinite(state.autoPulseTimer, AUTO_PULSE_INTERVAL));
   state.hurtInvuln = Math.max(0, runtimeFinite(state.hurtInvuln, 0));
   state.weaponEnergy = clampFinite(state.weaponEnergy, 0, LASER_RULES.maxEnergy, 0);
   state.laserElapsed = Math.max(0, runtimeFinite(state.laserElapsed, 0));
@@ -4869,6 +4945,7 @@ function simulate(dt) {
     if (state.mode === "playing") {
       if (input.laserBuffer > 0) attemptLaser();
       updatePlayer(wallDt);
+      updateAutomaticPulse(wallDt);
       updateLaser(simDt);
       updateShards(simDt);
       updateEnemies(simDt);
@@ -4995,6 +5072,17 @@ function getDebugSnapshot() {
     renderCalls,
     lastSimulationSeconds,
     eventStats: events.getStats(),
+    automaticPulse: Object.freeze({
+      shots: state.stats.autoPulseShots,
+      timer: state.autoPulseTimer,
+      recent: Object.freeze([...state.stats.autoPulseLog]),
+    }),
+    tideLanceLock: Object.freeze({
+      mode: state.laserTargetMode,
+      targetIndex: state.laserTargetIndex,
+      directionX: state.laserDirection.x,
+      directionY: state.laserDirection.y,
+    }),
   });
 }
 

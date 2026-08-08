@@ -93,3 +93,86 @@ test('last active device owns movement without combining unlike device vectors',
   });
   system.dispose();
 });
+
+test('gamepad disconnect zeros movement and button history then relinquishes ownership', () => {
+  let pads = [{ connected: true, axes: [0.8, 0], buttons: [{ pressed: true }] }];
+  const system = createInputSystem({ autoStart: false, navigator: { getGamepads: () => pads } });
+  const active = system.snapshot();
+  assert.equal(active.inputDevice, 'gamepad');
+  assert.ok(active.moveX > 0);
+  assert.equal(active.dashPressed, true);
+
+  pads = [];
+  const disconnected = system.snapshot();
+  assert.deepEqual(disconnected, {
+    moveX: 0,
+    moveY: 0,
+    dashPressed: false,
+    ultimatePressed: false,
+    inputDevice: 'keyboard',
+  });
+  pads = [{ connected: true, axes: [0, 0], buttons: [{ pressed: true }] }];
+  assert.equal(system.snapshot().dashPressed, true, 'fresh reconnect press must not inherit stale history');
+  system.disconnectGamepad();
+  system.setGamepadState({ connected: true, axes: [0, 0], buttons: [{ pressed: true }] });
+  system.disconnectGamepad();
+  pads = [];
+  assert.equal(system.snapshot().dashPressed, false, 'disconnect must discard an unconsumed gamepad edge');
+  system.dispose();
+});
+
+test('blur and explicit reset clear buffered edges as well as held vectors', () => {
+  const system = createInputSystem({ autoStart: false });
+  system.setKeyboardAction('moveRight', true);
+  system.press('dash', 'keyboard');
+  system.press('ultimate', 'keyboard');
+  system.reset();
+  assert.deepEqual(system.snapshot(), {
+    moveX: 0,
+    moveY: 0,
+    dashPressed: false,
+    ultimatePressed: false,
+    inputDevice: 'keyboard',
+  });
+  system.dispose();
+});
+
+class FakeTarget {
+  constructor() { this.listeners = new Map(); }
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) ?? [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+  removeEventListener(type, listener) {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((candidate) => candidate !== listener));
+  }
+  emit(type, event = {}) {
+    for (const listener of this.listeners.get(type) ?? []) listener({ target: this, detail: 0, ...event });
+  }
+  closest() { return null; }
+}
+
+test('native button provenance never erases held keyboard movement', () => {
+  const hostWindow = new FakeTarget();
+  const dashButton = new FakeTarget();
+  const ultimateButton = new FakeTarget();
+  const system = createInputSystem({ window: hostWindow, dashButton, ultimateButton });
+  system.setKeyboardAction('moveRight', true);
+
+  dashButton.emit('pointerdown', { pointerType: 'touch' });
+  dashButton.emit('click', { detail: 1 });
+  const touchActivated = system.snapshot();
+  assert.equal(touchActivated.moveX, 1);
+  assert.equal(touchActivated.inputDevice, 'keyboard');
+  assert.equal(touchActivated.dashPressed, true);
+  assert.equal(system.getLastPressDevice(), 'touch');
+
+  ultimateButton.emit('click', { detail: 0 });
+  const assistiveActivated = system.snapshot();
+  assert.equal(assistiveActivated.moveX, 1);
+  assert.equal(assistiveActivated.inputDevice, 'keyboard');
+  assert.equal(assistiveActivated.ultimatePressed, true);
+  assert.equal(system.getLastPressDevice(), 'keyboard');
+  system.dispose();
+});

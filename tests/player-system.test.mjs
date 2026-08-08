@@ -7,6 +7,7 @@ import {
   PERFECT_PHASE_REFUND,
   createPlayerState,
   resolvePlayerHit,
+  selectAutomaticTarget,
   updatePlayer,
   updatePlayerState,
 } from '../src/systems/player-system.js';
@@ -122,4 +123,48 @@ test('updatePlayer uses numeric EntityWorld ids and writes immutable snapshots',
   assert.ok(snapshot.cameraLeadX > 0);
   assert.ok(Object.isFrozen(snapshot));
   world.dispose();
+});
+
+
+test('automatic target selection prioritizes visible weak points and is deterministic', () => {
+  const candidates = [
+    { id: 30, x: 1, y: 0, visible: true, type: 'chaser', threat: 1 },
+    { id: 20, x: 5, y: 0, visible: true, type: 'boss', threat: 8 },
+    { id: 10, x: 7, y: 1, visible: true, type: 'bossPart', weakPoint: true, threat: 4 },
+    { id: 5, x: 0.2, y: 0, visible: false, type: 'bossPart', weakPoint: true, threat: 20 },
+  ];
+  const selected = selectAutomaticTarget(candidates, { x: 0, y: 0 });
+  assert.equal(selected.target.id, 10);
+  assert.equal(selected.mode, 'target');
+  assert.ok(Math.abs(Math.hypot(selected.direction.x, selected.direction.y) - 1) < 1e-9);
+
+  const nearest = selectAutomaticTarget([
+    { id: 2, x: 3, y: 0, visible: true },
+    { id: 1, x: 2, y: 0, visible: true },
+  ], { x: 0, y: 0 });
+  assert.equal(nearest.target.id, 1);
+  assert.equal(selectAutomaticTarget([], { x: 0, y: 0 }), null);
+});
+
+test('perfect-phase buff measurably shortens automatic pulse cadence', () => {
+  const collectIntervals = (buffSeconds) => {
+    const player = createPlayerState({ autoFireRateBuffTimer: buffSeconds });
+    const times = [];
+    let elapsed = 0;
+    const events = {
+      emit(type) {
+        if (type === 'player:autoPulse') times.push(elapsed);
+        return true;
+      },
+    };
+    while (times.length < 3) {
+      elapsed += FIXED_PLAYER_STEP;
+      updatePlayerState(player, input(), FIXED_PLAYER_STEP, events);
+    }
+    return times[1] - times[0];
+  };
+  const base = collectIntervals(0);
+  const buffed = collectIntervals(2);
+  assert.ok(base > buffed, JSON.stringify({ base, buffed }));
+  assert.ok(Math.abs(buffed / base - 0.75) < 0.08, JSON.stringify({ base, buffed }));
 });

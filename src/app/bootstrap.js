@@ -141,7 +141,10 @@ export function bootstrapNeonTide(options = {}) {
       renderer: entityRenderer.getStats(),
       legacy: runtime.getDebugSnapshot(),
       player: playerProjection.getSnapshot(),
-      input: Object.freeze({ inputDevice: inputSystem.getLastActiveDevice() }),
+      input: Object.freeze({
+        inputDevice: inputSystem.getLastActiveDevice(),
+        pressDevice: inputSystem.getLastPressDevice(),
+      }),
       hud: hudRenderer.getDebugSnapshot(),
       persistence: runSave.getStatus(),
       disposed,
