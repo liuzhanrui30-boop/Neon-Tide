@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createObjective, updateObjective } from '../src/systems/objective-system.js';
-import { ENCOUNTER_TEMPLATES } from '../src/content/encounters.js';
+import { ENCOUNTER_TEMPLATES, OBJECTIVE_BOUNDARY_ORBIT } from '../src/content/encounters.js';
 
 function sink() {
   const emitted = [];
@@ -126,6 +126,7 @@ test('id-less repeated events remain legitimate, sequences dedupe boundedly, and
   assert.ok(purge._seenEventOrder.length <= 128);
 
   const harvest = createObjective(ENCOUNTER_TEMPLATES.find(({ type }) => type === 'core-harvest'), 10);
+  update(harvest, { x: 99, y: 99 }, harvest.activationDelay);
   update(harvest, { x: 99, y: 99 }, 0, [{ type: 'pickupCollected', payload: { count: 3 } }]);
   assert.equal(harvest.progress, 3);
 });
@@ -174,6 +175,44 @@ test('fixed-step updates return compact metadata without cloning full objective 
   }
   assert.equal(objective._snapshotCount, 0);
   assert.ok(objective.progress > 4.9);
+});
+
+test('route objective placement preserves a fair authored margin from the arena-boundary orbit', () => {
+  const templateByType = Object.fromEntries(ENCOUNTER_TEMPLATES.map((template) => [template.type, template]));
+  for (let seed = 0; seed < 64; seed += 1) {
+    for (const type of ['anchors', 'moving-zone', 'core-harvest', 'escort']) {
+      const objective = createObjective(templateByType[type], seed);
+      const targets = type === 'anchors'
+        ? objective.anchors.map((entry) => ({ ...entry, clearanceRadius: entry.radius }))
+        : type === 'moving-zone'
+          ? objective.path.map((entry) => ({ ...entry, clearanceRadius: objective.safeZone.radius }))
+          : type === 'core-harvest'
+            ? objective.cores.map((entry) => ({ ...entry, clearanceRadius: entry.radius }))
+            : objective.escort.route.map((entry) => ({ ...entry, clearanceRadius: objective.escort.supportRadius }));
+      let minimumGap = Number.POSITIVE_INFINITY;
+      for (let index = 0; index < 360; index += 1) {
+        const angle = (index / 360) * Math.PI * 2;
+        const x = Math.cos(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusX;
+        const y = Math.sin(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusY;
+        for (const target of targets) {
+          minimumGap = Math.min(minimumGap,
+            Math.hypot(x - target.x, y - target.y) - target.clearanceRadius);
+        }
+      }
+      assert.ok(minimumGap >= 0.45, `${type} seed ${seed} boundary gap ${minimumGap}`);
+      if (type === 'escort') assert.ok(objective.escort.routeLength >= objective.target);
+    }
+  }
+});
+
+test('core harvest transition grace prevents unavoidable room-entry collection', () => {
+  const template = ENCOUNTER_TEMPLATES.find(({ type }) => type === 'core-harvest');
+  const objective = createObjective(template, 300);
+  const [core] = objective.cores;
+  update(objective, core, objective.activationDelay - 0.1);
+  assert.equal(objective.progress, 0);
+  update(objective, core, 0.11);
+  assert.equal(objective.progress, 1);
 });
 
 test('fixed seeds reproduce route geometry while different seeds vary it', () => {

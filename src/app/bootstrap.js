@@ -8,7 +8,7 @@ import { createEntityRenderer } from '../render/entity-renderer.js';
 import { createRunSave } from '../persistence/run-save.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
 import { createInputSystem } from '../systems/input-system.js';
-import { createHudRenderer } from '../render/hud-renderer.js';
+import { createHudObjectiveViewModel, createHudRenderer } from '../render/hud-renderer.js';
 import { createWeaponSystem } from '../systems/weapon-system.js';
 import { createProjectileSystem } from '../systems/projectile-system.js';
 import { createCollisionSystem } from '../systems/collision-system.js';
@@ -166,7 +166,7 @@ export function bootstrapNeonTide(options = {}) {
     hudRenderer.render({
       ...(projectedPlayer ?? {}),
       inputDevice: inputSystem.getLastActiveDevice(),
-      objective,
+      objective: createHudObjectiveViewModel(objective),
     });
   }
 

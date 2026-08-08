@@ -62,6 +62,15 @@ function radialPoints(random, count, radiusMin, radiusMax, offset = random() * T
   });
 }
 
+function ellipticalRadialPoints(random, count, radiusMin, radiusMax, yScale = 0.45, offset = random() * TAU) {
+  return Array.from({ length: count }, (_, index) => {
+    const jitter = (random() - 0.5) * (TAU / Math.max(3, count)) * 0.35;
+    const angle = offset + (index / count) * TAU + jitter;
+    const radius = radiusMin + random() * (radiusMax - radiusMin);
+    return point(Math.cos(angle) * radius, Math.sin(angle) * radius * yScale);
+  });
+}
+
 function routeFromPoints(points) {
   let total = 0;
   return points.map((entry, index) => {
@@ -197,14 +206,14 @@ function setupObjective(template, seed) {
     base.target = Math.max(1, Math.trunc(positive(template.killTarget, 18)));
   } else if (template.type === 'anchors') {
     const count = Math.max(2, Math.min(4, Math.trunc(positive(template.anchorCount, 3))));
-    base.anchors = radialPoints(random, count, 3.5, 6.1).map((entry, index) => ({
+    base.anchors = ellipticalRadialPoints(random, count, 3.5, 5.8).map((entry, index) => ({
       ...entry, id: `anchor-${index + 1}`, radius: positive(template.anchorRadius, 1.55),
       sourceId: stableSourceId(base.seed, 'anchor', index),
       charge: 0, requiredSeconds: positive(template.anchorSeconds, 1.4), completed: false,
     }));
     base.target = count;
   } else if (template.type === 'moving-zone') {
-    const nodes = radialPoints(random, 5, 2.1, 5.8);
+    const nodes = ellipticalRadialPoints(random, 5, 2.1, 5.4);
     nodes.push({ ...nodes[0] });
     base.path = routeFromPoints(nodes);
     base.pathSpeed = positive(template.pathSpeed, 2.2);
@@ -216,18 +225,11 @@ function setupObjective(template, seed) {
     base.target = positive(template.holdSeconds, 12);
   } else if (template.type === 'escort') {
     const angle = random() * TAU;
-    const normalX = -Math.sin(angle);
-    const normalY = Math.cos(angle);
     const length = positive(template.escortDistance, 24);
-    const axisX = Math.cos(angle);
-    const axisY = Math.sin(angle);
-    const route = routeFromPoints([
-      point(-axisX * 5.1, -axisY * 5.1),
-      point(normalX * (3.6 + random()), normalY * (3.6 + random())),
-      point(axisX * 5.1, axisY * 5.1),
-      point(-normalX * (3.6 + random()), -normalY * (3.6 + random())),
-      point(axisX * 4.4, axisY * 4.4),
-    ]);
+    const route = routeFromPoints(Array.from({ length: 13 }, (_, index) => {
+      const routeAngle = angle + index * (TAU / 8);
+      return point(Math.cos(routeAngle) * 4, Math.sin(routeAngle) * 1.6);
+    }));
     const start = interpolateRoute(route, 0);
     base.escort = {
       ...start, route, routeDistance: 0, routeLength: route.at(-1).distance,
@@ -267,10 +269,11 @@ function setupObjective(template, seed) {
     base.stormGraceSeconds = positive(template.stormGraceSeconds, 2.5);
   } else if (template.type === 'core-harvest') {
     const count = Math.max(2, Math.trunc(positive(template.coreCount, 5)));
-    base.cores = radialPoints(random, count, 2.6, 6.4).map((entry, index) => ({
+    base.cores = ellipticalRadialPoints(random, count, 2.6, 6).map((entry, index) => ({
       ...entry, id: `core-${index + 1}`, radius: positive(template.collectRadius, 1.15), collected: false,
       sourceId: stableSourceId(base.seed, 'core', index),
     }));
+    base.activationDelay = positive(template.activationDelay, 0.75);
     base.target = count;
   } else if (template.type === 'dual-crisis') {
     const rotation = random() * TAU;
@@ -410,6 +413,7 @@ function updateStorm(objective, player, dt) {
 }
 
 function updateHarvest(objective, player, events) {
+  if (objective.elapsed < objective.activationDelay - EPSILON) return;
   const collected = newEvents(objective, events, (event) => ['core:collected', 'pickupCollected'].includes(event?.type));
   for (const payload of collected) {
     const ids = Array.isArray(payload.ids) ? payload.ids : payload.id != null ? [payload.id] : [];

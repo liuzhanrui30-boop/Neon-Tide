@@ -52,3 +52,14 @@ test('stable objective sync avoids allocating entity snapshots and skips unchang
   assert.equal(writes, writesAfterSpawn, 'unchanged objective geometry should not be rewritten every tick');
   assert.ok(bridge.getStats().skippedWrites >= 5_000 * anchors.anchors.length);
 });
+
+test('core bridge keeps pickups non-collidable during room-entry grace', () => {
+  const world = createEntityWorld();
+  const bridge = createObjectiveWorldBridge({ world });
+  const harvest = createObjective(getEncounterTemplate('core-harvest'), 91);
+  bridge.sync(harvest);
+  assert.ok([...world.query('pickup')].every((id) => world.get(id).collidable === false));
+  harvest.elapsed = harvest.activationDelay;
+  bridge.sync(harvest);
+  assert.ok([...world.query('pickup')].every((id) => world.get(id).collidable === true));
+});

@@ -192,7 +192,7 @@ export function createObjectiveWorldBridge({ world } = {}) {
     return upsert('objective', escort.sourceId);
   }
 
-  function addCore(core) {
+  function addCore(objective, core) {
     resetPatch(patch, core.sourceId);
     patch.x = core.x;
     patch.y = core.y;
@@ -203,7 +203,7 @@ export function createObjectiveWorldBridge({ world } = {}) {
     patch.type = 'objective-core';
     patch.objectiveType = 'core-harvest';
     patch.color = COLORS.core;
-    patch.collidable = true;
+    patch.collidable = objective.elapsed >= objective.activationDelay;
     patch.invulnerable = false;
     return upsert('pickup', core.sourceId);
   }
@@ -256,7 +256,7 @@ export function createObjectiveWorldBridge({ world } = {}) {
       addEscort(objective);
     } else if (objective.type === 'core-harvest') {
       for (let index = 0; index < objective.cores.length; index += 1) {
-        if (!objective.cores[index].collected) addCore(objective.cores[index]);
+        if (!objective.cores[index].collected) addCore(objective, objective.cores[index]);
       }
     } else if (objective.type === 'dual-crisis') {
       for (let index = 0; index < objective.crises.length; index += 1) addCrisis(objective.crises[index]);

@@ -10,6 +10,25 @@ function formatObjectiveUnit(value) {
   return number.toFixed(1);
 }
 
+const objectiveViewModels = new WeakSet();
+
+export function createHudObjectiveViewModel(objective) {
+  if (!objective || typeof objective !== 'object') return null;
+  if (objectiveViewModels.has(objective)) return objective;
+  const progress = Number(objective.progress);
+  const target = Number(objective.target);
+  const viewModel = Object.freeze({
+    label: String(objective.label ?? objective.type ?? '当前任务'),
+    type: String(objective.type ?? 'unknown'),
+    status: String(objective.status ?? 'active'),
+    progress: Number.isFinite(progress) ? progress : 0,
+    target: Number.isFinite(target) ? target : 0,
+    progressRatio: clamp01(objective.progressRatio),
+  });
+  objectiveViewModels.add(viewModel);
+  return viewModel;
+}
+
 export function createHudRenderer(options = {}) {
   const root = options.root ?? globalThis.document ?? null;
   const dashPips = options.dashPips ?? Array.from(root?.querySelectorAll?.('#dash-pips i') ?? []);
@@ -45,7 +64,10 @@ export function createHudRenderer(options = {}) {
 
   function render(snapshot = {}) {
     if (disposed) return false;
-    const merged = { ...(lastSnapshot ?? {}), ...snapshot };
+    const objective = Object.hasOwn(snapshot, 'objective')
+      ? createHudObjectiveViewModel(snapshot.objective)
+      : lastSnapshot?.objective ?? null;
+    const merged = { ...(lastSnapshot ?? {}), ...snapshot, objective };
     const hasPhaseUpdate = ['perfectPhaseWindow', 'phaseTimer', 'autoFireRateBuffTimer']
       .some((key) => Object.hasOwn(snapshot, key));
     if (hasPhaseUpdate) {

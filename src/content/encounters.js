@@ -10,6 +10,7 @@ export const OBJECTIVE_TYPES = Object.freeze([
 ]);
 
 const ARENA = Object.freeze({ halfWidth: 10.5, halfHeight: 7.2 });
+export const OBJECTIVE_BOUNDARY_ORBIT = Object.freeze({ radiusX: 9.2, radiusY: 5.5 });
 
 function template(definition) {
   return Object.freeze({
@@ -51,7 +52,7 @@ export const ENCOUNTER_TEMPLATES = Object.freeze([
   }),
   template({
     id: 'core-harvest', type: 'core-harvest', label: '收割远距核心', timeout: 78, coreCount: 5,
-    collectRadius: 1.15, threat: 37,
+    collectRadius: 1.15, activationDelay: 2, threat: 37,
     spawnHooks: [{ kind: 'pickup', count: 5, role: 'harvest-core' }], cleanup: ['pickup', 'enemy', 'enemyProjectile'],
   }),
   template({

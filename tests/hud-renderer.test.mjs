@@ -74,3 +74,22 @@ test('objective-only HUD renders preserve player state and throttle live announc
   assert.ok(objectiveStatus.textWrites <= 1);
   assert.deepEqual(renderer.getDebugSnapshot().lastSnapshot.dashCharges, [1, 0.5]);
 });
+
+test('HUD stores and exposes only a detached immutable objective view model', () => {
+  const missionObjective = new FakeElement();
+  const renderer = createHudRenderer({ missionObjective });
+  const authoritative = {
+    label: '破坏潮汐锚点', type: 'anchors', status: 'active', progress: 1,
+    target: 3, progressRatio: 1 / 3, anchors: [{ x: 4, y: 2 }],
+  };
+  renderer.render({ objective: authoritative });
+  const objective = renderer.getDebugSnapshot().lastSnapshot.objective;
+  assert.notEqual(objective, authoritative);
+  assert.equal(Object.isFrozen(objective), true);
+  assert.deepEqual(Object.keys(objective).sort(), ['label', 'progress', 'progressRatio', 'status', 'target', 'type']);
+  assert.equal('anchors' in objective, false);
+  authoritative.progress = 2;
+  authoritative.anchors[0].x = 999;
+  assert.equal(objective.progress, 1);
+  assert.throws(() => { objective.progress = 99; }, TypeError);
+});

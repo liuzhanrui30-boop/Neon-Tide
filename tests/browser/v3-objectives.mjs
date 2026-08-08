@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { APP_URL, sleep, withPage } from './harness.mjs';
+import { OBJECTIVE_BOUNDARY_ORBIT } from '../../src/content/encounters.js';
 
 const TEST_URL = new URL('?objective-seed=1476', APP_URL).href;
-const EDGE_CENTER = Object.freeze({ x: 9.1, y: 0 });
-const EDGE_RADIUS = 0.9;
+const ORBIT_WAYPOINTS = 48;
 const KEY_DEFS = Object.freeze({
   a: ['a', 'KeyA'], d: ['d', 'KeyD'], w: ['w', 'KeyW'], s: ['s', 'KeyS'],
 });
@@ -53,13 +53,33 @@ function movementKeys(dx, dy, tolerance = 0.15) {
   return desired;
 }
 
+function sampleRoute(path, spacing = 0.45) {
+  const samples = [];
+  for (let index = 1; index < path.length; index += 1) {
+    const previous = path[index - 1];
+    const next = path[index];
+    const distance = Math.hypot(next.x - previous.x, next.y - previous.y);
+    const steps = Math.max(1, Math.ceil(distance / spacing));
+    for (let step = 0; step <= steps; step += 1) {
+      const amount = step / steps;
+      samples.push({
+        x: previous.x + (next.x - previous.x) * amount,
+        y: previous.y + (next.y - previous.y) * amount,
+      });
+    }
+  }
+  return samples;
+}
+
 function objectiveBlockers(objective) {
   if (objective.type === 'anchors') {
     return objective.anchors.filter(({ completed }) => !completed)
       .map(({ x, y, radius }) => ({ x, y, radius: radius + 0.65 }));
   }
   if (objective.type === 'moving-zone') {
-    return [{ x: objective.safeZone.x, y: objective.safeZone.y, radius: objective.safeZone.radius + 0.65 }];
+    return sampleRoute(objective.path).map(({ x, y }) => ({
+      x, y, radius: objective.safeZone.radius + 0.65,
+    }));
   }
   if (objective.type === 'core-harvest') {
     return objective.cores.filter(({ collected }) => !collected)
@@ -100,7 +120,7 @@ function segmentLeavesClearance(start, end, blockers) {
 }
 
 function safeStagingPath(start, goal, blockers) {
-  assert.equal(segmentIsClear(goal, goal, blockers), true, 'fixed edge circle must remain outside authored targets');
+  assert.equal(segmentIsClear(goal, goal, blockers), true, 'arena-boundary orbit start must remain outside authored targets');
   if (segmentIsClear(start, goal, blockers)) return [goal];
   const step = 0.45;
   const minX = -9.9;
@@ -199,35 +219,74 @@ async function moveTo(page, target, held, {
   throw new Error(`timed out moving to ${JSON.stringify(target)}`);
 }
 
-async function proveEdgeCircleDoesNotProgress(page, expectedType) {
+async function proveBoundaryOrbitDoesNotProgress(page, expectedType) {
   const held = new Set();
   const samples = [];
   try {
     const initial = await readState(page);
-    const circleStart = { x: EDGE_CENTER.x + EDGE_RADIUS, y: EDGE_CENTER.y };
-    const stagingPath = safeStagingPath(initial.player, circleStart, objectiveBlockers(initial.objective));
+    const blockers = objectiveBlockers(initial.objective);
+    const orbitStart = { x: OBJECTIVE_BOUNDARY_ORBIT.radiusX, y: 0 };
+    const stagingPath = safeStagingPath(initial.player, orbitStart, blockers);
     for (const waypoint of stagingPath) {
       await moveTo(page, waypoint, held, { expectedType, requireZero: true, timeoutMs: 10_000 });
     }
-    const waypointCount = 24;
-    for (let index = 1; index <= waypointCount; index += 1) {
-      const angle = (index / waypointCount) * Math.PI * 2;
-      await moveTo(page, {
-        x: EDGE_CENTER.x + Math.cos(angle) * EDGE_RADIUS,
-        y: EDGE_CENTER.y + Math.sin(angle) * EDGE_RADIUS,
-      }, held, { expectedType, requireZero: true, samples, tolerance: 0.2 });
+    for (let index = 1; index <= ORBIT_WAYPOINTS; index += 1) {
+      const angle = (index / ORBIT_WAYPOINTS) * Math.PI * 2;
+      const waypoint = {
+        x: Math.cos(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusX,
+        y: Math.sin(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusY,
+      };
+      assert.equal(segmentIsClear(waypoint, waypoint, blockers), true,
+        `${expectedType} placement intersects the authored arena-boundary orbit`);
+      await moveTo(page, waypoint, held, {
+        expectedType, requireZero: true, samples, tolerance: 0.2, timeoutMs: 10_000,
+      });
     }
   } finally {
     await stopMovement(page, held);
   }
   await sleep(320);
   const after = await readState(page);
-  assert.equal(after.objective.progress, 0, `${expectedType} progressed on the fixed-radius edge circle`);
-  assert.ok(samples.length >= 20);
-  const radii = samples.map(({ x, y }) => Math.hypot(x - EDGE_CENTER.x, y - EDGE_CENTER.y));
-  assert.ok(Math.min(...radii) >= 0.4 && Math.max(...radii) <= 1.65,
-    `input route was not a bounded edge circle: ${JSON.stringify({ min: Math.min(...radii), max: Math.max(...radii) })}`);
-  return { samples: samples.length, minRadius: Math.min(...radii), maxRadius: Math.max(...radii) };
+  assert.equal(after.objective.progress, 0, `${expectedType} progressed on the origin-centered boundary orbit`);
+  assert.ok(samples.length >= ORBIT_WAYPOINTS);
+  const normalizedRadii = samples.map(({ x, y }) => Math.hypot(
+    x / OBJECTIVE_BOUNDARY_ORBIT.radiusX,
+    y / OBJECTIVE_BOUNDARY_ORBIT.radiusY,
+  ));
+  assert.ok(Math.min(...normalizedRadii) >= 0.72 && Math.max(...normalizedRadii) <= 1.25,
+    `input route left the arena-boundary ellipse: ${JSON.stringify({
+      min: Math.min(...normalizedRadii), max: Math.max(...normalizedRadii),
+    })}`);
+  const angles = samples.map(({ x, y }) => Math.atan2(
+    y / OBJECTIVE_BOUNDARY_ORBIT.radiusY,
+    x / OBJECTIVE_BOUNDARY_ORBIT.radiusX,
+  ));
+  let angularTravel = 0;
+  let reversals = 0;
+  for (let index = 1; index < angles.length; index += 1) {
+    let delta = angles[index] - angles[index - 1];
+    while (delta <= -Math.PI) delta += Math.PI * 2;
+    while (delta > Math.PI) delta -= Math.PI * 2;
+    angularTravel += delta;
+    if (delta < -0.06) reversals += 1;
+  }
+  assert.ok(angularTravel >= Math.PI * 1.75,
+    `boundary orbit did not circle the origin: ${JSON.stringify({ angularTravel, reversals })}`);
+  assert.ok(reversals <= Math.ceil(samples.length * 0.08),
+    `boundary orbit reversed direction: ${JSON.stringify({ angularTravel, reversals, samples: samples.length })}`);
+  const xs = samples.map(({ x }) => x);
+  const ys = samples.map(({ y }) => y);
+  assert.ok(Math.min(...xs) < -OBJECTIVE_BOUNDARY_ORBIT.radiusX * 0.82
+    && Math.max(...xs) > OBJECTIVE_BOUNDARY_ORBIT.radiusX * 0.82
+    && Math.min(...ys) < -OBJECTIVE_BOUNDARY_ORBIT.radiusY * 0.82
+    && Math.max(...ys) > OBJECTIVE_BOUNDARY_ORBIT.radiusY * 0.82,
+  'boundary orbit must traverse every arena edge around the origin');
+  return {
+    samples: samples.length,
+    minNormalizedRadius: Math.min(...normalizedRadii),
+    maxNormalizedRadius: Math.max(...normalizedRadii),
+    angularTravel,
+  };
 }
 
 function activeTarget(objective, player) {
@@ -302,6 +361,7 @@ async function completeNaturalEliteHunt(page) {
 
   const held = new Set();
   const observed = new Set();
+  let nextDashAt = Date.now();
   const deadline = Date.now() + 80_000;
   try {
     while (Date.now() < deadline) {
@@ -313,9 +373,17 @@ async function completeNaturalEliteHunt(page) {
       assert.equal(state.mode, 'playing', `elite hunt ended early: ${JSON.stringify(state)}`);
       assert.equal(state.objective.type, 'elite-hunt');
       const target = state.enemies.find((enemy) => expectedIds.includes(enemy.sourceId));
-      if (target) await setMovement(page, movementKeys(target.x - state.player.x, target.y - state.player.y, 0.45), held);
+      if (target) {
+        const dx = target.x - state.player.x;
+        const dy = target.y - state.player.y;
+        const distance = Math.hypot(dx, dy);
+        await setMovement(page, distance > 1.1 ? movementKeys(dx, dy, 0.45) : new Set(), held);
+        if (Date.now() >= nextDashAt && distance > 2.2) {
+          await page.pressKey(' ', 'Space');
+          nextDashAt = Date.now() + 1_100;
+        }
+      }
       else await stopMovement(page, held);
-      if (Math.floor((Date.now() / 800)) % 2 === 0) await page.pressKey(' ', 'Space');
       await sleep(50);
     }
   } finally {
@@ -329,7 +397,7 @@ async function completeNaturalEliteHunt(page) {
 }
 
 export const v3ObjectiveScenarios = [
-  ['v3 production objectives reject an edge circle and complete through natural real input', async () => {
+  ['v3 production objectives reject an origin-centered boundary orbit and complete through natural real input', async () => {
     await withPage('v3-natural-objective-flow', { appUrl: TEST_URL }, async (page) => {
       await page.startGame();
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().encounter.objective?.type === 'anchors'`);
@@ -354,12 +422,37 @@ export const v3ObjectiveScenarios = [
         frozen: true, sessionMutation: true, encounterMutation: true,
         before: authorityProbe.before, after: authorityProbe.before, liveGetter: false, authorityLeak: false,
       });
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().hud.lastSnapshot?.objective?.type === 'anchors'`);
+      const hudAuthorityProbe = await page.evaluate(`(()=>{
+        'use strict';
+        const api=globalThis.__NEON_TIDE_V3__;
+        const debug=api.getDebugSnapshot();
+        const hud=debug.hud.lastSnapshot.objective;
+        const encounter=debug.encounter.objective;
+        const before=encounter.progress;
+        let mutation=false;
+        try{hud.progress=999;}catch{mutation=true;}
+        const after=api.getDebugSnapshot().encounter.objective.progress;
+        return {
+          frozen:Object.isFrozen(hud),mutation,before,after,
+          shared:hud===encounter,
+          keys:Object.keys(hud).sort(),
+          nestedLeak:['anchors','path','cores','escort','eliteTargets'].some((key)=>key in hud),
+        };
+      })()`);
+      assert.deepEqual(hudAuthorityProbe, {
+        frozen: true, mutation: true,
+        before: hudAuthorityProbe.before, after: hudAuthorityProbe.before,
+        shared: false,
+        keys: ['label', 'progress', 'progressRatio', 'status', 'target', 'type'],
+        nestedLeak: false,
+      });
 
       const expected = ['anchors', 'moving-zone', 'core-harvest', 'escort'];
       const edgeResults = [];
       const routeResults = [];
       for (let index = 0; index < expected.length; index += 1) {
-        edgeResults.push(await proveEdgeCircleDoesNotProgress(page, expected[index]));
+        edgeResults.push(await proveBoundaryOrbitDoesNotProgress(page, expected[index]));
         routeResults.push(await completeRouteObjective(page, expected[index]));
         const beforeUpgrade = await readState(page);
         assert.equal(beforeUpgrade.room.objectiveManaged, true);
