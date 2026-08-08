@@ -227,6 +227,7 @@ async function v3PlayerScenario() {
   }, async (page) => {
     await page.tap('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
+    await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().player)`);
     const layout = await page.evaluate(`(()=>{
       const selectors=['#joystick','#laser-button','#dash-button'];
       const boxes=Object.fromEntries(selectors.map((selector)=>{

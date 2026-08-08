@@ -8,6 +8,8 @@ const ANALYSIS_INTERVAL = 0.1;
 const MIN_ROTATION_SECONDS = 3.5;
 const MAX_RADIUS_VARIANCE = 0.15;
 const STALLED_PROGRESS_DELTA = 0.01;
+const ANGLE_NOISE = 0.001;
+const MAX_NEUTRAL_SECONDS = 0.12;
 const COUNTER_KINDS = Object.freeze(['intercept', 'reverse-wall', 'objective-shift', 'center-pulse']);
 const COLORS = Object.freeze({
   preview: 0xffd166,
@@ -146,8 +148,9 @@ export function analyzeRoute(history, objectiveProgress = {}) {
   let minimumRadius = Infinity;
   let maximumRadius = 0;
   let radiusTotal = 0;
-  let positiveSeconds = 0;
-  let negativeSeconds = 0;
+  let direction = 0;
+  let consistentSeconds = 0;
+  let neutralSeconds = 0;
   let angularTravel = 0;
   let quadrantMask = 0;
   const oldestSlot = history._slot(0);
@@ -166,17 +169,30 @@ export function analyzeRoute(history, objectiveProgress = {}) {
     const previousSlot = history._slot(index - 1);
     const dt = Math.max(0, history.time[slot] - history.time[previousSlot]);
     const delta = normalizeAngle(history.angle[slot] - history.angle[previousSlot]);
-    if (Math.abs(delta) <= 0.001 || dt <= 0) continue;
+    if (dt <= 0) continue;
+    if (Math.abs(delta) <= ANGLE_NOISE) {
+      if (direction !== 0) {
+        neutralSeconds += dt;
+        if (neutralSeconds > MAX_NEUTRAL_SECONDS + EPSILON) {
+          direction = 0;
+          consistentSeconds = 0;
+          neutralSeconds = 0;
+        }
+      }
+      continue;
+    }
     angularTravel += Math.abs(delta);
-    if (delta > 0) positiveSeconds += dt;
-    else negativeSeconds += dt;
+    const nextDirection = delta > 0 ? 1 : -1;
+    if (nextDirection !== direction) {
+      direction = nextDirection;
+      consistentSeconds = dt;
+    } else {
+      consistentSeconds += neutralSeconds + dt;
+    }
+    neutralSeconds = 0;
   }
 
-  const direction = positiveSeconds > negativeSeconds + EPSILON ? 1
-    : negativeSeconds > positiveSeconds + EPSILON ? -1 : 0;
-  const rotatingSeconds = positiveSeconds + negativeSeconds;
-  const consistentSeconds = Math.max(positiveSeconds, negativeSeconds);
-  const consistency = rotatingSeconds > 0 ? consistentSeconds / rotatingSeconds : 0;
+  if (neutralSeconds <= MAX_NEUTRAL_SECONDS + EPSILON) consistentSeconds += neutralSeconds;
   const meanRadius = radiusTotal / history.length;
   const radiusVariance = meanRadius > EPSILON ? (maximumRadius - minimumRadius) / meanRadius : 1;
   const delta = Number.isFinite(Number(objectiveProgress?.delta))
@@ -186,7 +202,6 @@ export function analyzeRoute(history, objectiveProgress = {}) {
   const quadrantCoverage = countBits(quadrantMask);
   const qualifies = duration >= MIN_ROTATION_SECONDS - EPSILON
     && consistentSeconds >= MIN_ROTATION_SECONDS - EPSILON
-    && consistency >= 0.88
     && angularTravel >= Math.PI * 0.75
     && radiusVariance < MAX_RADIUS_VARIANCE
     && stalled;
@@ -293,7 +308,8 @@ function createObjectiveShift({ id, tier, direction, objective, variant }) {
     previewSeconds: template.telegraphSeconds, activeSeconds: template.activeSeconds,
     recoverySeconds: template.recoverySeconds, requiresRouteChange: true,
     targetSourceId: plan.targetSourceId, targetType: plan.targetType,
-    path: plan.path, geometry, committed: false, plan,
+    path: plan.path, destination: plan.destination, translation: plan.translation,
+    geometry, committed: false, plan,
   };
 }
 
@@ -303,7 +319,8 @@ function createCenterPulse({ id, tier, direction, objective, lowHull }) {
     id, kind: 'center-pulse', tier, direction, phase: 'preview', elapsed: 0,
     previewSeconds: template.previewSeconds, activeSeconds: template.activeSeconds,
     recoverySeconds: template.recoverySeconds, requiresRouteChange: true,
-    centerSafeRadius: template.centerSafeRadius * (lowHull ? 1.25 : 1), window: 'edge-warning', ringRadius: 1,
+    centerSafeRadius: template.centerSafeRadius * (lowHull ? 1.25 : 1), safeMargin: template.safeMargin,
+    window: 'edge-warning', ringRadius: 1,
     ringNodeCount: template.ringNodes,
     geometry: [
       ...Array.from({ length: template.ringNodes }, (_, index) => hazardNode(0, 0, 0.48, {
@@ -333,7 +350,10 @@ function updateCenterPulse(counter, objective) {
   const axes = arenaAxes(objective);
   const activeElapsed = clamp(counter.elapsed - counter.previewSeconds, 0, counter.activeSeconds);
   const amount = activeElapsed / counter.activeSeconds;
-  counter.ringRadius = 1 - amount * 0.68;
+  const hazardRadius = counter.geometry[0]?.radius ?? 0.48;
+  const minimumSafeRingRadius = (counter.centerSafeRadius + counter.safeMargin + hazardRadius)
+    / Math.min(axes.x, axes.y);
+  counter.ringRadius = Math.max(1 - amount * 0.68, minimumSafeRingRadius);
   counter.window = activeElapsed <= template.edgeDangerSeconds
     ? 'edge-danger'
     : activeElapsed <= template.edgeDangerSeconds * 2
@@ -486,7 +506,7 @@ export function createAntiOrbitDirector({
       emit(events, 'anti-orbit:objective-shifted', {
         counterId: counter.id,
         targetSourceId: counter.targetSourceId,
-        destination: counter.path.at(-1),
+        destination: counter.destination,
       });
     }
     setCounterGeometryState(counter);

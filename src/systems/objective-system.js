@@ -62,31 +62,75 @@ function shiftableTarget(objective) {
   return null;
 }
 
+const OBJECTIVE_SHIFT_MARGIN = 0.35;
+
+function objectiveShiftGeometry(objective, target) {
+  if (objective.type === 'moving-zone') {
+    return { points: objective.path, clearance: positive(objective.safeZone?.radius, 1), translatesRoute: true };
+  }
+  if (objective.type === 'escort') {
+    return { points: objective.escort.route, clearance: positive(objective.escort.supportRadius, 1), translatesRoute: true };
+  }
+  return { points: [target], clearance: positive(target.radius, 1), translatesRoute: false };
+}
+
+function translationBounds(points, arena, clearance) {
+  const minimumX = -finite(arena.halfWidth, 10.5) + clearance + OBJECTIVE_SHIFT_MARGIN;
+  const maximumX = finite(arena.halfWidth, 10.5) - clearance - OBJECTIVE_SHIFT_MARGIN;
+  const minimumY = -finite(arena.halfHeight, 7.2) + clearance + OBJECTIVE_SHIFT_MARGIN;
+  const maximumY = finite(arena.halfHeight, 7.2) - clearance - OBJECTIVE_SHIFT_MARGIN;
+  return points.reduce((bounds, entry) => ({
+    minimumDx: Math.max(bounds.minimumDx, minimumX - entry.x),
+    maximumDx: Math.min(bounds.maximumDx, maximumX - entry.x),
+    minimumDy: Math.max(bounds.minimumDy, minimumY - entry.y),
+    maximumDy: Math.min(bounds.maximumDy, maximumY - entry.y),
+  }), { minimumDx: -Infinity, maximumDx: Infinity, minimumDy: -Infinity, maximumDy: Infinity });
+}
+
+function chooseTranslation(coordinate, minimum, maximum, preferredSign, minimumDistance) {
+  if (minimum > maximum) return 0;
+  const opposite = Math.max(minimum, Math.min(maximum, -coordinate * 2));
+  if (Math.abs(opposite) >= minimumDistance) return opposite;
+  const preferred = preferredSign > 0 ? maximum : minimum;
+  const alternate = preferredSign > 0 ? minimum : maximum;
+  if (Math.abs(preferred) >= minimumDistance || Math.abs(preferred) >= Math.abs(alternate)) return preferred;
+  return alternate;
+}
+
 export function createObjectiveShiftPlan(objective, { pathNodes = 7, variant = 0 } = {}) {
   const target = shiftableTarget(objective);
   if (!target || !Number.isSafeInteger(target.sourceId)) return null;
   const arena = objective.arena ?? { halfWidth: 10.5, halfHeight: 7.2 };
-  const marginX = Math.max(2.8, finite(target.radius ?? target.supportRadius, 1) + 0.8);
-  const marginY = Math.max(2.5, finite(target.radius ?? target.supportRadius, 1) + 0.8);
   const sign = (Math.trunc(finite(variant, 0)) & 1) === 0 ? 1 : -1;
-  let destinationX = Math.max(-arena.halfWidth + marginX, Math.min(arena.halfWidth - marginX, -target.x));
-  let destinationY = Math.max(-arena.halfHeight + marginY, Math.min(arena.halfHeight - marginY, -target.y));
-  if (Math.abs(destinationX - target.x) < 3.5) destinationX = sign * (arena.halfWidth - marginX);
-  if (Math.abs(destinationY - target.y) < 2.5) destinationY = -sign * (arena.halfHeight - marginY);
+  const geometry = objectiveShiftGeometry(objective, target);
+  const bounds = translationBounds(geometry.points, arena, geometry.clearance);
+  const translation = point(
+    chooseTranslation(target.x, bounds.minimumDx, bounds.maximumDx, sign, 2.5),
+    chooseTranslation(target.y, bounds.minimumDy, bounds.maximumDy, -sign, 1.8),
+  );
+  const destination = point(target.x + translation.x, target.y + translation.y);
   const count = Math.max(3, Math.min(12, Math.trunc(positive(pathNodes, 7))));
-  const path = Array.from({ length: count }, (_, index) => {
-    const amount = index / (count - 1);
-    const curve = Math.sin(amount * Math.PI) * 0.65 * sign;
-    return point(
-      target.x + (destinationX - target.x) * amount + curve * (destinationY - target.y) * 0.12,
-      target.y + (destinationY - target.y) * amount - curve * (destinationX - target.x) * 0.12,
-    );
-  });
-  path[0] = point(target.x, target.y);
-  path[path.length - 1] = point(destinationX, destinationY);
+  const path = geometry.translatesRoute
+    ? geometry.points.map((entry) => point(entry.x + translation.x, entry.y + translation.y))
+    : Array.from({ length: count }, (_, index) => {
+      const amount = index / (count - 1);
+      const curve = Math.sin(amount * Math.PI) * 0.65 * sign;
+      return point(
+        target.x + translation.x * amount + curve * translation.y * 0.12,
+        target.y + translation.y * amount - curve * translation.x * 0.12,
+      );
+    });
+  if (!geometry.translatesRoute) {
+    path[0] = point(target.x, target.y);
+    path[path.length - 1] = destination;
+  }
   return {
     targetSourceId: target.sourceId,
     targetType: objective.type,
+    translation,
+    destination,
+    safetyMargin: OBJECTIVE_SHIFT_MARGIN,
+    translatesRoute: geometry.translatesRoute,
     path,
   };
 }
@@ -97,9 +141,9 @@ export function commitObjectiveShift(objective, plan) {
   }
   const target = shiftableTarget(objective);
   if (!target || target.sourceId !== plan.targetSourceId) return false;
-  const destination = plan.path.at(-1);
-  const dx = destination.x - target.x;
-  const dy = destination.y - target.y;
+  const destination = plan.destination ?? plan.path.at(-1);
+  const dx = finite(plan.translation?.x, destination.x - target.x);
+  const dy = finite(plan.translation?.y, destination.y - target.y);
   if (objective.type === 'moving-zone') {
     for (const entry of objective.path) {
       entry.x = point(entry.x + dx, 0).x;
@@ -111,8 +155,8 @@ export function commitObjectiveShift(objective, plan) {
       entry.y = point(0, entry.y + dy).y;
     }
   }
-  target.x = destination.x;
-  target.y = destination.y;
+  target.x = point(target.x + dx, 0).x;
+  target.y = point(0, target.y + dy).y;
   return true;
 }
 

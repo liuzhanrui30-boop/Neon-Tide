@@ -6,7 +6,11 @@ import {
   createRouteHistory,
 } from '../src/systems/anti-orbit-director.js';
 import { ANTI_ORBIT_COUNTER_TEMPLATES, getEncounterTemplate } from '../src/content/encounters.js';
-import { createObjective } from '../src/systems/objective-system.js';
+import {
+  commitObjectiveShift,
+  createObjective,
+  createObjectiveShiftPlan,
+} from '../src/systems/objective-system.js';
 import { createEncounterDirector } from '../src/systems/encounter-director.js';
 import { createObjectiveWorldBridge } from '../src/systems/objective-world-bridge.js';
 import { createEntityWorld } from '../src/game/entity-world.js';
@@ -58,6 +62,71 @@ function stepDirector(director, objective, route, seconds, events = null) {
   }
 }
 
+function simulateOrbitRobot(seed, { responsive }) {
+  const objective = createObjective(getEncounterTemplate('anchor-break'), seed);
+  const director = createAntiOrbitDirector({ seed });
+  const events = sink();
+  const samples = [];
+  let responseAt = null;
+  let counterKind = null;
+  let readablePreview = false;
+  let shiftedTarget = null;
+  let shiftedTargetBefore = null;
+  let shifted = false;
+  let hull = 5;
+  let routeTax = 0;
+  let hurtCooldown = 0;
+  let observedEvents = 0;
+  for (let index = 0; index < Math.ceil(12 / STEP); index += 1) {
+    const time = index * STEP;
+    const responseAmount = responsive && responseAt !== null ? Math.min(1, (time - responseAt) / 0.6) : 0;
+    const radius = 1 - responseAmount * 0.48;
+    const angle = time * 1.3;
+    const player = {
+      x: Math.cos(angle) * 9.2 * radius,
+      y: Math.sin(angle) * 5.5 * radius,
+      normalizedAngle: angle,
+      normalizedRadius: radius,
+      hp: hull,
+      maxHp: 5,
+    };
+    director.update({ player, objective }, STEP, events);
+    samples.push({ time, radius, angle });
+    const newEvents = events.events.slice(observedEvents);
+    observedEvents = events.events.length;
+    const previewEvent = newEvents.find(({ type }) => type === 'anti-orbit:preview');
+    if (previewEvent && responseAt === null) {
+      const preview = previewEvent.payload.counter;
+      readablePreview = preview.previewSeconds >= 0.65
+        && preview.geometry.length >= 3
+        && preview.geometry.every(({ collidable }) => !collidable);
+      responseAt = time;
+      counterKind = preview.kind;
+      if (preview.kind === 'objective-shift') {
+        shiftedTarget = objective.anchors.find(({ sourceId }) => sourceId === preview.targetSourceId);
+        shiftedTargetBefore = shiftedTarget && { x: shiftedTarget.x, y: shiftedTarget.y };
+      }
+    }
+    if (shiftedTarget && shiftedTargetBefore) {
+      shifted ||= shiftedTarget.x !== shiftedTargetBefore.x || shiftedTarget.y !== shiftedTargetBefore.y;
+    }
+    const counter = director.getSnapshot().activeCounter;
+    hurtCooldown = Math.max(0, hurtCooldown - STEP);
+    if (counter?.phase === 'active' && hurtCooldown <= 0) {
+      const collision = counter.geometry.some((node) => node.collidable
+        && Math.hypot(player.x - node.x, player.y - node.y) <= 0.4 + node.radius);
+      if (collision) {
+        hull = Math.max(0, hull - 0.35);
+        routeTax += 0.35;
+        hurtCooldown = 0.5;
+      }
+    }
+  }
+  const departed = responsive && readablePreview && responseAt !== null
+    && samples.some(({ time, radius }) => time >= responseAt && time <= responseAt + 1.2 && radius <= 0.72);
+  return { counterKind, departed, hull, readablePreview, responseAt, routeTax, shifted };
+}
+
 test('constant-radius same-direction motion raises orbit pressure but varied routes do not', () => {
   const circle = circleHistory({ seconds: 4.5, radius: 8, direction: 1 });
   const varied = variedHistory();
@@ -83,6 +152,34 @@ test('classifier requires 3.5 seconds consistent rotation, under 15 percent radi
   assert.ok(analyzeRoute(radial, { delta: 0 }).radiusVariance >= 0.15);
   assert.equal(analyzeRoute(radial, { delta: 0 }).orbitPressure, 0);
   assert.equal(analyzeRoute(circleHistory(), { delta: 0.05 }).orbitPressure, 0);
+});
+
+test('brief meaningful reversals break uninterrupted direction consistency while bounded angle noise does not', () => {
+  const reversing = createRouteHistory();
+  let angle = 0;
+  for (let index = 0; index <= Math.ceil(4.8 / STEP); index += 1) {
+    const time = index * STEP;
+    const reversingFrames = index % 30 >= 27;
+    angle += (reversingFrames ? -1 : 1) * 1.35 * STEP;
+    reversing.push({ angle, radius: 1, time, progress: 0 });
+  }
+  assert.equal(analyzeRoute(reversing, { delta: 0 }).orbitPressure, 0);
+
+  const noisy = createRouteHistory();
+  angle = 0;
+  for (let index = 0; index <= Math.ceil(4.2 / STEP); index += 1) {
+    const time = index * STEP;
+    angle += index % 12 === 0 ? 0.0004 : 1.35 * STEP;
+    noisy.push({ angle, radius: 1, time, progress: 0 });
+  }
+  assert.ok(analyzeRoute(noisy, { delta: 0 }).orbitPressure >= 1);
+});
+
+test('stalled progress alone never pressures a varied route', () => {
+  const varied = variedHistory({ seconds: 8, progressDelta: 0 });
+  const analysis = analyzeRoute(varied, { delta: 0 });
+  assert.equal(analysis.stalled, true);
+  assert.equal(analysis.orbitPressure, 0);
 });
 
 test('route history is fixed-capacity, overwrite-bounded, and supports normalized arena samples', () => {
@@ -175,26 +272,71 @@ test('objective shift renders a path before moving authoritative objective geome
   assert.deepEqual({ x: target.x, y: target.y }, preview.path.at(-1));
 });
 
-test('100 seeded robot encounters pressure fixed edge orbit in at least 90 seeds with at most one varied-route false counter', (t) => {
+test('10,000 seeded objective shifts keep every translated route and target inside the arena and preview the committed geometry', () => {
+  const cases = [
+    ['anchor-break', (objective) => objective.anchors.filter(({ completed }) => !completed), (entry) => entry.radius],
+    ['moving-sanctum', (objective) => objective.path, (entry, objective) => objective.safeZone.radius],
+    ['escort-skiff', (objective) => objective.escort.route, (entry, objective) => objective.escort.supportRadius],
+    ['core-harvest', (objective) => objective.cores.filter(({ collected }) => !collected), (entry) => entry.radius],
+    ['dual-crisis', (objective) => objective.crises.filter(({ completed }) => !completed), (entry) => entry.radius],
+  ];
+  const safetyMargin = 0.35;
+  for (let seed = 0; seed < 10_000; seed += 1) {
+    for (const [templateId, geometryFor, clearanceFor] of cases) {
+      const objective = createObjective(getEncounterTemplate(templateId), seed);
+      const beforeGeometry = geometryFor(objective);
+      const before = beforeGeometry.map(({ x, y, sourceId }) => ({ x, y, sourceId }));
+      const plan = createObjectiveShiftPlan(objective, { pathNodes: 7, variant: seed });
+      assert.ok(plan, `${templateId} seed ${seed} must produce a shift`);
+      assert.ok(Number.isFinite(plan.translation?.x) && Number.isFinite(plan.translation?.y));
+      const translatesWholeRoute = templateId === 'moving-sanctum' || templateId === 'escort-skiff';
+      const expected = before.map(({ x, y, sourceId }) => ({
+        x: Math.round((x + (translatesWholeRoute || sourceId === plan.targetSourceId ? plan.translation.x : 0)) * 1e6) / 1e6,
+        y: Math.round((y + (translatesWholeRoute || sourceId === plan.targetSourceId ? plan.translation.y : 0)) * 1e6) / 1e6,
+      }));
+      if (translatesWholeRoute) {
+        assert.deepEqual(plan.path, expected, `${templateId} seed ${seed} preview must be the future route`);
+      } else {
+        const targetIndex = before.findIndex(({ sourceId }) => sourceId === plan.targetSourceId);
+        assert.deepEqual(plan.path.at(-1), expected[targetIndex], `${templateId} seed ${seed} preview must end at the future target`);
+      }
+      assert.equal(commitObjectiveShift(objective, plan), true);
+      const committed = geometryFor(objective).map(({ x, y }) => ({ x, y }));
+      assert.deepEqual(committed, expected, `${templateId} seed ${seed} preview and activation must agree`);
+      geometryFor(objective).forEach((entry) => {
+        const clearance = clearanceFor(entry, objective) + safetyMargin;
+        assert.ok(Math.abs(entry.x) <= objective.arena.halfWidth - clearance + 1e-6,
+          `${templateId} seed ${seed} x=${entry.x} exceeds safe arena extent`);
+        assert.ok(Math.abs(entry.y) <= objective.arena.halfHeight - clearance + 1e-6,
+          `${templateId} seed ${seed} y=${entry.y} exceeds safe arena extent`);
+      });
+    }
+  }
+});
+
+test('100 seeded robot encounters produce measurable route departure or damage in at least 90 seeds with at most one productive-route false counter', (t) => {
   let pressured = 0;
   let falseCounters = 0;
+  let shiftedSeeds = 0;
+  let shiftedAndDeparted = 0;
+  let stubbornTaxed = 0;
   for (let seed = 0; seed < 100; seed += 1) {
-    const fixed = createAntiOrbitDirector({ seed });
-    const fixedObjective = createObjective(getEncounterTemplate('anchor-break'), seed);
-    stepDirector(fixed, fixedObjective, (time) => {
-      const angle = time * 1.3;
-      return {
-        x: Math.cos(angle) * 9.2,
-        y: Math.sin(angle) * 5.5,
-        normalizedAngle: angle,
-        normalizedRadius: 1,
-      };
-    }, 12);
-    const fixedSnapshot = fixed.getSnapshot();
-    if (fixedSnapshot.countersStarted > 0 && fixedSnapshot.routeChangesRequired > 0) pressured += 1;
+    const stubborn = simulateOrbitRobot(seed, { responsive: false });
+    const responsive = simulateOrbitRobot(seed, { responsive: true });
+    if (stubborn.routeTax > 0 || stubborn.hull <= 0) stubbornTaxed += 1;
+    const responsiveOutcome = responsive.counterKind === 'objective-shift'
+      ? responsive.shifted && responsive.departed
+      : responsive.departed;
+    const measurable = stubborn.routeTax > 0 || stubborn.hull <= 0 || responsiveOutcome;
+    if (measurable) pressured += 1;
+    if (responsive.counterKind === 'objective-shift') {
+      shiftedSeeds += 1;
+      if (responsive.shifted && responsive.departed) shiftedAndDeparted += 1;
+    }
 
     const varied = createAntiOrbitDirector({ seed });
     const variedObjective = createObjective(getEncounterTemplate('anchor-break'), seed);
+    const variedEvents = sink();
     stepDirector(varied, variedObjective, (time, index) => {
       const radius = 0.35 + 0.55 * (0.5 + 0.5 * Math.sin(time * 2.8));
       const angle = Math.sin(time * 1.7) * 2.1;
@@ -205,12 +347,48 @@ test('100 seeded robot encounters pressure fixed edge orbit in at least 90 seeds
         normalizedAngle: angle,
         normalizedRadius: radius,
       };
-    }, 12);
-    falseCounters += varied.getSnapshot().countersStarted;
+    }, 12, variedEvents);
+    falseCounters += variedEvents.events.filter(({ type }) => type === 'anti-orbit:preview').length;
   }
   assert.ok(pressured >= 90, `fixed orbit pressured in ${pressured}/100 seeds`);
   assert.ok(falseCounters <= 1, `varied route received ${falseCounters}/100 false counters`);
-  t.diagnostic(`fixed orbit pressured ${pressured}/100; varied false counters ${falseCounters}/100`);
+  assert.ok(shiftedSeeds > 0, 'the seeded matrix must exercise the non-damaging objective shift');
+  assert.equal(shiftedAndDeparted, shiftedSeeds, 'objective shifts only count after authoritative motion and route departure');
+  t.diagnostic(`measurable counter outcome ${pressured}/100; stubborn route tax ${stubbornTaxed}/100; objective shifts ${shiftedAndDeparted}/${shiftedSeeds}; varied false counters ${falseCounters}/100`);
+});
+
+test('center pulse keeps the full advertised safe circle clear of collision geometry for every active tick and hull mode', () => {
+  for (const quality of ['high', 'low']) {
+    for (const hp of [5, 1]) {
+      const director = createAntiOrbitDirector({ seed: 404, preferredKind: 'center-pulse' });
+      const objective = createObjective(getEncounterTemplate('anchor-break'), 404);
+      const route = (time) => {
+        const angle = time * 1.35;
+        return {
+          x: Math.cos(angle) * 9.2,
+          y: Math.sin(angle) * 5.5,
+          normalizedAngle: angle,
+          normalizedRadius: 1,
+          hp,
+          maxHp: 5,
+          quality,
+        };
+      };
+      stepDirector(director, objective, route, 3.65);
+      for (let tick = 0; tick < Math.ceil(3.2 / STEP); tick += 1) {
+        stepDirector(director, objective, route, STEP);
+        const counter = director.getSnapshot().activeCounter;
+        if (!counter || counter.phase !== 'active') continue;
+        const marker = counter.geometry.find(({ role }) => role === 'counter-center-safe');
+        assert.ok(marker && !marker.collidable);
+        for (const hazard of counter.geometry.filter(({ collidable }) => collidable)) {
+          const clearance = Math.hypot(hazard.x - marker.x, hazard.y - marker.y) - hazard.radius;
+          assert.ok(clearance >= marker.radius + counter.safeMargin - 1e-6,
+            `${quality} quality hp=${hp} tick=${tick} hazard clearance ${clearance} overlaps advertised ${marker.radius}`);
+        }
+      }
+    }
+  }
 });
 
 test('encounter lifecycle naturally owns anti-orbit analysis, active counter, cooldown, and room cleanup', () => {
