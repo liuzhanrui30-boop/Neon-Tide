@@ -8,6 +8,9 @@ import { createRunSave } from '../persistence/run-save.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
 import { createInputSystem } from '../systems/input-system.js';
 import { createHudRenderer } from '../render/hud-renderer.js';
+import { createWeaponSystem } from '../systems/weapon-system.js';
+import { createProjectileSystem } from '../systems/projectile-system.js';
+import { createCollisionSystem } from '../systems/collision-system.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
@@ -34,6 +37,9 @@ export function bootstrapNeonTide(options = {}) {
   });
   const inputSystem = createInputSystem();
   const hudRenderer = createHudRenderer();
+  const weaponSystem = createWeaponSystem();
+  const projectileSystem = createProjectileSystem();
+  const collisionSystem = createCollisionSystem();
   let projectedPlayer = null;
   const playerProjection = Object.freeze({
     publish(snapshot) {
@@ -71,6 +77,9 @@ export function bootstrapNeonTide(options = {}) {
           || (detail?.runMode && ['menu', 'victory', 'defeat'].includes(previous.mode)));
       if (startsNewAttempt) {
         world.reset();
+        weaponSystem.reset();
+        projectileSystem.reset();
+        collisionSystem.reset();
         entityRenderer.reset();
       }
       if (detail?.reset) {
@@ -78,6 +87,9 @@ export function bootstrapNeonTide(options = {}) {
         runtime?.reset(current);
         playerProjection.reset();
         world.reset();
+        weaponSystem.reset();
+        projectileSystem.reset();
+        collisionSystem.reset();
         entityRenderer.reset();
         return;
       }
@@ -115,6 +127,13 @@ export function bootstrapNeonTide(options = {}) {
     maxCatchUpSteps: MAX_CATCH_UP_STEPS,
     onStep(dt) {
       runtime?.simulate(dt);
+      if (session.snapshot().mode !== 'playing') return;
+      const playerId = runtime?.syncCombatWorld(world);
+      if (!Number.isSafeInteger(playerId)) return;
+      weaponSystem.update(world, playerId, dt, events);
+      projectileSystem.update(world, dt, events);
+      const summary = collisionSystem.resolve(world, session, dt, events);
+      runtime?.applyCombatSummary(world, summary);
     },
     onRender(alpha) {
       entityRenderer.sync(world, alpha);
@@ -122,7 +141,15 @@ export function bootstrapNeonTide(options = {}) {
     },
   });
 
-  runtime = createLegacyRuntime({ session, loop, events, inputSystem, playerProjection, hudRenderer });
+  runtime = createLegacyRuntime({
+    session,
+    loop,
+    events,
+    inputSystem,
+    playerProjection,
+    hudRenderer,
+    entityRenderer,
+  });
   runtime.start();
   loop.reset(performance.now());
 
@@ -139,6 +166,9 @@ export function bootstrapNeonTide(options = {}) {
       events: events.getStats(),
       world: world.getStats(),
       renderer: entityRenderer.getStats(),
+      weapons: weaponSystem.getStats(),
+      projectiles: projectileSystem.getStats(),
+      collisions: collisionSystem.getStats(),
       legacy: runtime.getDebugSnapshot(),
       player: playerProjection.getSnapshot(),
       input: Object.freeze({
@@ -175,6 +205,9 @@ export function bootstrapNeonTide(options = {}) {
     entityRenderer,
     inputSystem,
     hudRenderer,
+    weaponSystem,
+    projectileSystem,
+    collisionSystem,
     dispose,
     getDebugSnapshot,
   });

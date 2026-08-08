@@ -18,6 +18,8 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
   bossPart: 32,
 });
 
+export const ENTITY_FLAG_HIDDEN = 1;
+
 const MAX_KIND_CAPACITY = 1_000_000;
 const CALLBACK_SCRATCH_DEPTH = 8;
 const ACCESS_SCRATCH_DEPTH = 8;
@@ -72,6 +74,11 @@ const FLOAT_RULES = Object.freeze({
   directionY: [-1, 1, 0],
   acceleration: [-VELOCITY_LIMIT, VELOCITY_LIMIT, 0],
   maxSpeed: [0, VELOCITY_LIMIT, 0],
+  turnRate: [0, VELOCITY_LIMIT, 0],
+  orbitAngle: [-POSITION_LIMIT, POSITION_LIMIT, 0],
+  orbitRadius: [0, SCALE_LIMIT, 0],
+  impactRadius: [0, SCALE_LIMIT, 0],
+  hitCooldown: [0, GENERAL_LIMIT, 0],
   energy: [0, GENERAL_LIMIT, 0],
   value: [-GENERAL_LIMIT, GENERAL_LIMIT, 0],
   amount: [-GENERAL_LIMIT, GENERAL_LIMIT, 0],
@@ -80,9 +87,12 @@ const FLOAT_RULES = Object.freeze({
   parentId: [0, Number.MAX_SAFE_INTEGER, 0],
 });
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
-const UINT_FIELDS = Object.freeze(['color', 'flags', 'team', 'phase', 'variantIndex']);
+const UINT_FIELDS = Object.freeze([
+  'color', 'flags', 'team', 'phase', 'variantIndex', 'splitCount', 'chainCount', 'pierceCount', 'sequence',
+]);
 const BOOLEAN_FIELDS = Object.freeze([
   'executingTelegraph', 'objective', 'invulnerable', 'collidable', 'homing', 'weakPoint',
+  'piercing', 'splitOnImpact', 'completed',
 ]);
 const STRING_FIELDS = Object.freeze([
   'role', 'state', 'type', 'variant', 'weaponId', 'objectiveType', 'partId', 'attackKind', 'ownerKind',

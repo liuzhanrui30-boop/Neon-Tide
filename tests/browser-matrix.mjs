@@ -10,8 +10,14 @@ import {
 import { v22RegressionScenarios } from './browser/v22-regressions.mjs';
 import { v3FoundationScenarios } from './browser/v3-foundation.mjs';
 import { v3PlayerScenarios } from './browser/v3-player.mjs';
+import { v3WeaponScenarios } from './browser/v3-weapons.mjs';
 
-const browserScenarios = [...v3FoundationScenarios, ...v3PlayerScenarios, ...v22RegressionScenarios];
+const browserScenarios = [
+  ...v3FoundationScenarios,
+  ...v3PlayerScenarios,
+  ...v3WeaponScenarios,
+  ...v22RegressionScenarios,
+];
 const selectedScenarios = BROWSER_MATRIX_SCENARIO
   ? browserScenarios.filter(([name]) => name.includes(BROWSER_MATRIX_SCENARIO))
   : browserScenarios;

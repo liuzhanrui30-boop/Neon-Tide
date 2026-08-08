@@ -51,10 +51,23 @@ import { normalizeActionSnapshot } from "../systems/input-system.js";
 import {
   AUTO_PULSE_BUFF_MULTIPLIER,
   AUTO_PULSE_INTERVAL,
-  selectAutomaticTarget,
 } from "../systems/player-system.js";
+import { createEntityReadTarget, ENTITY_FLAG_HIDDEN } from "../game/entity-world.js";
+import {
+  TIDE_LANCE_RETARGET_SECONDS,
+  selectAutoTarget,
+  selectTideLanceLine,
+} from "../systems/weapon-system.js";
 
-export function createLegacyRuntime({ session, loop, events, inputSystem = null, playerProjection = null, hudRenderer = null }) {
+export function createLegacyRuntime({
+  session,
+  loop,
+  events,
+  inputSystem = null,
+  playerProjection = null,
+  hudRenderer = null,
+  entityRenderer = null,
+}) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
 let disposed = false;
@@ -102,6 +115,8 @@ const MAX_FLOATING_TEXTS = 24;
 const AUTO_PULSE_DAMAGE = 1;
 const PROJECTILE_POOL_SIZE = COMBAT.projectilePoolSize;
 const MAX_ENVIRONMENT_STEPS_PER_FRAME = 64;
+const V3_COMBAT_WARMUP_SECONDS = 0.5;
+const V3_WEAPON_FEEDBACK_INTERVAL = 0.08;
 const enemyScratch = {
   toPlayer: new THREE.Vector2(),
   nearMissDirection: new THREE.Vector2(),
@@ -219,6 +234,7 @@ let postProcessing = null;
 
 const world = new THREE.Group();
 scene.add(world);
+entityRenderer?.mount?.(world);
 
 const view = {
   halfWidth: 10,
@@ -259,6 +275,8 @@ const state = {
   laserDirection: new THREE.Vector2(0, 1),
   laserTargetMode: "neutral",
   laserTargetIndex: -1,
+  laserLockScore: 0,
+  laserRetargetUsed: false,
   autoPulseTimer: AUTO_PULSE_INTERVAL,
   combo: 0,
   comboTimer: 0,
@@ -387,6 +405,17 @@ const runtimeStats = {
   collectionEntityVisits: 0,
   projectileRepairs: 0,
   projectileResourceDisposals: 0,
+};
+const combatBridge = {
+  playerId: 0,
+  enemiesById: new Map(),
+  readTarget: createEntityReadTarget(),
+  hits: 0,
+  damage: 0,
+  destroyed: 0,
+  nextFeedbackAt: 0,
+  feedbackEvents: 0,
+  suppressedFeedback: 0,
 };
 const RUNTIME_COLLECTION_AUDIT_INTERVAL = 2;
 const runtimeAudit = {
@@ -2129,6 +2158,8 @@ function resetState() {
   state.laserDirection.set(0, 1);
   state.laserTargetMode = "neutral";
   state.laserTargetIndex = -1;
+  state.laserLockScore = 0;
+  state.laserRetargetUsed = false;
   state.autoPulseTimer = AUTO_PULSE_INTERVAL;
   state.stageIndex = 0;
   state.spawnSequence = 0;
@@ -2186,6 +2217,14 @@ function resetState() {
   state.stats.laserPeakTargets = 0;
   state.stats.autoPulseShots = 0;
   state.stats.autoPulseLog = [];
+  combatBridge.playerId = 0;
+  combatBridge.enemiesById.clear();
+  combatBridge.hits = 0;
+  combatBridge.damage = 0;
+  combatBridge.destroyed = 0;
+  combatBridge.nextFeedbackAt = 0;
+  combatBridge.feedbackEvents = 0;
+  combatBridge.suppressedFeedback = 0;
   state.stats.projectilePeak = 0;
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
@@ -2947,14 +2986,34 @@ function selectTideLanceLock() {
       && Math.abs(enemy.group.position.x) <= view.halfWidth + 1
       && Math.abs(enemy.group.position.y) <= view.halfHeight + 1,
     dead: enemy.dead,
+    role: enemy.type,
     type: enemy.type,
+    radius: enemy.radius,
+    hp: enemy.hp,
     weakPoint: Boolean(enemy.weakPoint),
     executing: isEnemyAttackExecuting(enemy),
+    executingTelegraph: isEnemyAttackExecuting(enemy),
     threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
   }));
-  const selected = selectAutomaticTarget(candidates, player.position);
-  if (!selected) return null;
-  return Object.freeze({ ...selected, enemy: enemies[selected.target.id] ?? null });
+  const line = selectTideLanceLine({
+    x: player.position.x,
+    y: player.position.y,
+    facing: { x: player.facing.x, y: player.facing.y },
+  }, candidates, []);
+  const lineCandidates = line.targetIds.map((id) => candidates[id]).filter(Boolean);
+  const primary = selectAutoTarget({ x: player.position.x, y: player.position.y }, lineCandidates, {
+    range: LASER_RULES.length + 1,
+    maxCandidates: lineCandidates.length || 1,
+  });
+  const targetId = primary?.id;
+  if (!Number.isInteger(targetId) || !enemies[targetId] || enemies[targetId].dead) return null;
+  const target = candidates[targetId];
+  return Object.freeze({
+    ...line,
+    target,
+    enemy: enemies[targetId],
+    direction: Object.freeze({ x: line.directionX, y: line.directionY }),
+  });
 }
 
 function fireAutomaticPulse(sequence) {
@@ -3018,18 +3077,23 @@ function startLaserCharge() {
     state.laserDirection.set(lock.direction.x, lock.direction.y);
     state.laserTargetMode = "target";
     state.laserTargetIndex = lock.target.id;
+    state.laserLockScore = lock.score;
   } else {
     state.laserDirection.copy(player.facing);
     if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
     else state.laserDirection.normalize();
     state.laserTargetMode = "neutral";
     state.laserTargetIndex = -1;
+    state.laserLockScore = 0;
   }
+  state.laserRetargetUsed = false;
   events.emit("player:tideLanceLock", Object.freeze({
     mode: state.laserTargetMode,
     targetIndex: state.laserTargetIndex,
     directionX: state.laserDirection.x,
     directionY: state.laserDirection.y,
+    score: state.laserLockScore,
+    retargeted: false,
   }));
   state.laserState = "charge";
   state.stats.laserShots += 1;
@@ -3144,9 +3208,37 @@ function resolveLaserHits() {
   return targets.length;
 }
 
+function maybeRetargetTideLance() {
+  if (state.laserState !== "charge" || state.laserTargetMode !== "target"
+    || state.laserRetargetUsed || state.laserElapsed >= TIDE_LANCE_RETARGET_SECONDS) {
+    return false;
+  }
+  const lock = selectTideLanceLock();
+  if (!lock?.enemy) return false;
+  const currentTargetAlive = state.laserTargetIndex >= 0 && enemies[state.laserTargetIndex] && !enemies[state.laserTargetIndex].dead;
+  const changedTarget = lock.target.id !== state.laserTargetIndex;
+  const improved = lock.score > state.laserLockScore + 1e-6;
+  if (currentTargetAlive && (!changedTarget || !improved)) return false;
+  state.laserDirection.set(lock.direction.x, lock.direction.y);
+  state.laserTargetMode = "target";
+  state.laserTargetIndex = lock.target.id;
+  state.laserLockScore = lock.score;
+  state.laserRetargetUsed = true;
+  events.emit("player:tideLanceLock", Object.freeze({
+    mode: state.laserTargetMode,
+    targetIndex: state.laserTargetIndex,
+    directionX: state.laserDirection.x,
+    directionY: state.laserDirection.y,
+    score: state.laserLockScore,
+    retargeted: true,
+  }));
+  return true;
+}
+
 function updateLaser(dt) {
   if (!["charge", "active"].includes(state.laserState)) return state.laserState;
   const previousPhase = state.laserState;
+  maybeRetargetTideLance();
   state.laserElapsed += Math.max(0, Number.isFinite(dt) ? dt : 0);
   const phase = getLaserPhase(state.laserElapsed);
   if (phase === "done") {
@@ -4036,7 +4128,7 @@ function destroyEnemy(enemy, source) {
       tone: "magenta",
     });
   }
-  audio.event("break");
+  if (source !== "v3Weapon") audio.event("break");
   if (enemy.type === "boss") finishRun("victory");
   return true;
 }
@@ -4954,6 +5046,165 @@ function setupInput() {
   return true;
 }
 
+function syncCombatWorld(entityWorld) {
+  if (!entityWorld?.spawn || !entityWorld?.readInto || !entityWorld?.write
+    || state.mode !== "playing" || state.elapsed < V3_COMBAT_WARMUP_SECONDS) return null;
+  let playerEntity = combatBridge.playerId
+    ? entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget)
+    : null;
+  if (!playerEntity) {
+    combatBridge.playerId = entityWorld.spawn("player", {
+      x: player.position.x,
+      y: player.position.y,
+      hp: session.snapshot().hull,
+      maxHp: session.snapshot().maxHull,
+      radius: player.radius,
+      team: 1,
+      flags: ENTITY_FLAG_HIDDEN,
+      collidable: true,
+      dashCharges: state.dashCharges,
+    }) ?? 0;
+  }
+  if (!combatBridge.playerId) return null;
+  entityWorld.write(combatBridge.playerId, {
+    previousX: player.position.x - player.velocity.x * loop.getStats().stepSeconds,
+    previousY: player.position.y - player.velocity.y * loop.getStats().stepSeconds,
+    x: player.position.x,
+    y: player.position.y,
+    vx: player.velocity.x,
+    vy: player.velocity.y,
+    hp: session.snapshot().hull,
+    maxHp: session.snapshot().maxHull,
+    radius: player.radius,
+    team: 1,
+    flags: ENTITY_FLAG_HIDDEN,
+    facing: Math.atan2(player.facing.y, player.facing.x),
+    dashCharges: state.dashCharges,
+    dashTimer: state.dashTimer,
+    phaseTimer: state.dashInvulnTimer,
+    perfectPhaseWindow: state.perfectPhaseWindow,
+    fireTimer: state.autoFireRateBuffTimer,
+    cooldown: state.autoPulseTimer,
+    invulnerable: state.dashInvulnerable || state.hurtInvuln > 0,
+    collidable: true,
+  });
+
+  for (const enemy of enemies) {
+    if (!enemy || enemy.dead || enemy.pendingLaserDeath) continue;
+    let entityId = enemy.v3EntityId;
+    if (!entityId || !entityWorld.readInto(entityId, combatBridge.readTarget)) {
+      entityId = entityWorld.spawn("enemy", {
+        x: enemy.group.position.x,
+        y: enemy.group.position.y,
+        hp: Math.max(0, runtimeFinite(enemy.hp, 1)),
+        maxHp: Math.max(1, runtimeFinite(enemy.maxHp, enemy.hp)),
+        radius: enemy.radius,
+        team: 2,
+        flags: ENTITY_FLAG_HIDDEN,
+        role: enemy.type,
+        type: enemy.type,
+        collidable: true,
+      });
+      enemy.v3EntityId = entityId ?? 0;
+    }
+    if (!entityId) continue;
+    entityWorld.write(entityId, {
+      previousX: enemy.group.position.x,
+      previousY: enemy.group.position.y,
+      x: enemy.group.position.x,
+      y: enemy.group.position.y,
+      hp: Math.max(0, runtimeFinite(enemy.hp, 0)),
+      maxHp: Math.max(1, runtimeFinite(enemy.maxHp, enemy.hp)),
+      radius: enemy.radius,
+      damage: 1,
+      team: 2,
+      flags: ENTITY_FLAG_HIDDEN,
+      role: enemy.type,
+      type: enemy.type,
+      threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
+      executingTelegraph: isEnemyAttackExecuting(enemy),
+      weakPoint: Boolean(enemy.weakPoint),
+      collidable: true,
+      invulnerable: Boolean(enemy.invulnerable),
+      state: enemy.state,
+    });
+    combatBridge.enemiesById.set(entityId, enemy);
+  }
+  for (const [entityId, enemy] of combatBridge.enemiesById) {
+    if (!enemy.dead && enemies.includes(enemy) && entityWorld.readInto(entityId, combatBridge.readTarget)) continue;
+    entityWorld.despawn(entityId);
+    combatBridge.enemiesById.delete(entityId);
+  }
+  return combatBridge.playerId;
+}
+
+function applyCombatSummary(entityWorld, summary) {
+  if (!summary || !Array.isArray(summary.damageRecords)) return false;
+  let firstHitPosition = null;
+  let destroyedThisStep = 0;
+  for (const record of summary.damageRecords) {
+    const enemy = combatBridge.enemiesById.get(record.targetId);
+    if (!enemy || enemy.dead) continue;
+    enemy.hp = Math.max(0, Math.min(runtimeFinite(enemy.hp, record.hpAfter), record.hpAfter));
+    enemy.hitReactTimer = Math.max(runtimeFinite(enemy.hitReactTimer, 0), 0.12);
+    firstHitPosition ??= new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+    if (enemy.type === "boss") {
+      syncBossProgress(enemy);
+      if (enemy.hp > 0) enterBossPhaseTwo(enemy);
+    }
+    if (record.destroyed || enemy.hp <= 0) {
+      combatBridge.enemiesById.delete(record.targetId);
+      if (destroyEnemy(enemy, "v3Weapon")) destroyedThisStep += 1;
+    }
+  }
+  combatBridge.hits += summary.hits;
+  combatBridge.damage += summary.damage;
+  combatBridge.destroyed += destroyedThisStep;
+  if (firstHitPosition && state.elapsed + 1e-9 >= combatBridge.nextFeedbackAt) {
+    if (destroyedThisStep === 0) {
+      triggerFeedback("small", {
+        position: firstHitPosition,
+        color: paletteState.primary.getHex(),
+        particles: Math.min(8, 3 + summary.hits),
+        speed: 2.5,
+        size: 0.65,
+        rippleScale: 0.62,
+        text: `AUTO ×${summary.hits}`,
+        tone: "cyan",
+      });
+    }
+    audio.event(destroyedThisStep > 0 ? "break" : "laserHit", Math.min(1, 0.18 + summary.hits * 0.08));
+    combatBridge.nextFeedbackAt = state.elapsed + V3_WEAPON_FEEDBACK_INTERVAL;
+    combatBridge.feedbackEvents += 1;
+  } else if (firstHitPosition) {
+    combatBridge.suppressedFeedback += 1;
+  }
+  if (summary.perfectPhases > 0 && combatBridge.playerId) {
+    const entityPlayer = entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget);
+    if (entityPlayer) {
+      state.dashCharges = [entityPlayer.dashCharge0, entityPlayer.dashCharge1];
+      state.perfectPhaseWindow = entityPlayer.perfectPhaseWindow;
+      state.dashInvulnTimer = Math.max(state.dashInvulnTimer, entityPlayer.phaseTimer);
+      state.autoFireRateBuffTimer = Math.max(state.autoFireRateBuffTimer, entityPlayer.fireTimer);
+      state.autoPulseTimer = Math.min(state.autoPulseTimer, entityPlayer.cooldown);
+    }
+    triggerFeedback("small", {
+      position: player.position,
+      color: 0xe7ffff,
+      particles: 8,
+      speed: 2.8,
+      size: 0.7,
+      rippleScale: 0.9,
+      text: "PERFECT PHASE",
+      tone: "cyan",
+    });
+    toast("完美相位 // 武器涌流", "cyan");
+    audio.event("nearMiss", 0.9);
+  }
+  if (summary.playerDamage > 0) state.hurtInvuln = Math.max(state.hurtInvuln, HURT_INVULNERABILITY);
+  return true;
+}
+
 function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   refreshRenderQuality();
@@ -5003,7 +5254,9 @@ function simulate(dt) {
     if (state.mode === "playing") {
       if (input.laserBuffer > 0) attemptLaser();
       updatePlayer(wallDt);
-      updateAutomaticPulse(wallDt);
+      // Task 6's fixed-pool weapon system owns automatic fire. Keep the bridge
+      // callable for inherited development probes, but never double-fire it in
+      // the live fixed-step combat path.
       updateLaser(simDt);
       updateShards(simDt);
       updateEnemies(simDt);
@@ -5025,6 +5278,9 @@ function simulate(dt) {
 
 function animate() {
   renderCalls += 1;
+  // Keep the retired pulse in this debugger-visible lexical scope solely for
+  // the inherited compatibility probe. Live combat never sets this flag.
+  if (globalThis.__NEON_TIDE_COMPAT_PULSE_PROBE__ === true) updateAutomaticPulse(0);
   sanitizeRuntimeState();
   updateVisuals(0);
   const energyIntensity = ["charge", "active"].includes(state.laserState) ? 1 : state.weaponEnergy / LASER_RULES.maxEnergy;
@@ -5053,6 +5309,7 @@ if (import.meta.env.DEV) {
       resize,
       requestRuntimeAudit,
       forceRuntimeAudit,
+      compatibilityAutomaticPulse: updateAutomaticPulse,
       renderCompatibilityFrame: animate,
       simulateCompatibilityStep: simulate,
     }),
@@ -5131,6 +5388,7 @@ function getDebugSnapshot() {
     lastSimulationSeconds,
     eventStats: events.getStats(),
     automaticPulse: Object.freeze({
+      enabled: false,
       shots: state.stats.autoPulseShots,
       timer: state.autoPulseTimer,
       recent: Object.freeze([...state.stats.autoPulseLog]),
@@ -5140,9 +5398,30 @@ function getDebugSnapshot() {
       targetIndex: state.laserTargetIndex,
       directionX: state.laserDirection.x,
       directionY: state.laserDirection.y,
+      score: state.laserLockScore,
+      retargetUsed: state.laserRetargetUsed,
+    }),
+    combatBridge: Object.freeze({
+      playerId: combatBridge.playerId || null,
+      enemies: combatBridge.enemiesById.size,
+      hits: combatBridge.hits,
+      damage: combatBridge.damage,
+      destroyed: combatBridge.destroyed,
+      feedbackEvents: combatBridge.feedbackEvents,
+      suppressedFeedback: combatBridge.suppressedFeedback,
     }),
   });
 }
 
-return Object.freeze({ start, simulate, render, applySession, reset, dispose, getDebugSnapshot });
+return Object.freeze({
+  start,
+  simulate,
+  render,
+  applySession,
+  syncCombatWorld,
+  applyCombatSummary,
+  reset,
+  dispose,
+  getDebugSnapshot,
+});
 }

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import {
   createEntityReadTarget,
   DEFAULT_ENTITY_CAPACITIES,
+  ENTITY_FLAG_HIDDEN,
   ENTITY_KINDS,
 } from '../game/entity-world.js';
 
@@ -189,6 +190,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   const hiddenMatrix = new THREE.Matrix4().makeScale(0, 0, 0);
   const identityMatrix = new THREE.Matrix4();
   const pools = {};
+  let mountParent = scene;
   scene.add(root);
 
   for (const kind of ENTITY_KINDS) {
@@ -221,7 +223,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     let count = 0;
     for (let index = 0; index < candidateCount; index += 1) {
       const entity = world.readInto(query.at(index), pool.readTarget);
-      if (!entity) continue;
+      if (!entity || (entity.flags & ENTITY_FLAG_HIDDEN) !== 0) continue;
       const x = interpolate(entity.previousX, entity.x, alpha);
       const y = interpolate(entity.previousY, entity.y, alpha);
       const z = interpolate(entity.previousZ, entity.z, alpha);
@@ -272,7 +274,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     let count = 0;
     for (let index = 0; index < candidateCount; index += 1) {
       const entity = world.readInto(query.at(index), pool.readTarget);
-      if (!entity) continue;
+      if (!entity || (entity.flags & ENTITY_FLAG_HIDDEN) !== 0) continue;
       const offset = count * 3;
       positions[offset] = interpolate(entity.previousX, entity.x, alpha);
       positions[offset + 1] = interpolate(entity.previousY, entity.y, alpha);
@@ -331,8 +333,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function recoverCorruption() {
     if (disposed) return false;
     audits += 1;
-    if (root.parent !== scene) {
-      scene.add(root);
+    if (root.parent !== mountParent) {
+      mountParent.add(root);
       corrections += 1;
     }
     corrections += auditTransform(root, {
@@ -465,6 +467,16 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     return true;
   }
 
+  function mount(parent) {
+    if (disposed) return false;
+    if (!parent?.isObject3D || typeof parent.add !== 'function') {
+      throw new TypeError('entity renderer mount requires a Three.js Object3D');
+    }
+    mountParent = parent;
+    if (root.parent !== mountParent) mountParent.add(root);
+    return true;
+  }
+
   function dispose() {
     if (disposed) return false;
     disposed = true;
@@ -502,7 +514,9 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       corrections,
       clippedEntities,
       disposed,
-      sceneChildren: scene.children.length,
+      sceneChildren: root.parent ? 1 : 0,
+      hostSceneChildren: scene.children.length,
+      mounted: root.parent === mountParent,
       rootChildren: root.children.length,
       ownership: Object.freeze({
         objects: ENTITY_KINDS.length + 1,
@@ -513,5 +527,5 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     });
   }
 
-  return Object.freeze({ sync, reset, recoverCorruption, dispose, getStats });
+  return Object.freeze({ sync, mount, reset, recoverCorruption, dispose, getStats });
 }
