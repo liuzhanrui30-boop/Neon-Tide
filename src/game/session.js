@@ -297,7 +297,10 @@ export function createGameSession(options = {}) {
       killTarget: 1_000_000,
       timeout: 1_000_000,
     };
-    const encounter = encounterDirector.startRoom(compatibilityTemplate);
+    const encounterChapterIndex = Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0
+      ? room.chapterIndex
+      : state.chapterIndex;
+    const encounter = encounterDirector.startRoom(compatibilityTemplate, { chapterIndex: encounterChapterIndex });
     state.room = {
       ...cloneValue(room),
       templateId: authoredTemplate?.id ?? compatibilityTemplate.id,

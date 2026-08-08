@@ -13,6 +13,7 @@ import { v3PlayerScenarios } from './browser/v3-player.mjs';
 import { v3WeaponScenarios } from './browser/v3-weapons.mjs';
 import { v3ObjectiveScenarios } from './browser/v3-objectives.mjs';
 import { v3AntiOrbitScenarios } from './browser/v3-anti-orbit.mjs';
+import { v3EnemyScenarios } from './browser/v3-enemies.mjs';
 
 const browserScenarios = [
   ...v3FoundationScenarios,
@@ -20,6 +21,7 @@ const browserScenarios = [
   ...v3WeaponScenarios,
   ...v3ObjectiveScenarios,
   ...v3AntiOrbitScenarios,
+  ...v3EnemyScenarios,
   ...v22RegressionScenarios,
 ];
 const selectedScenarios = BROWSER_MATRIX_SCENARIO

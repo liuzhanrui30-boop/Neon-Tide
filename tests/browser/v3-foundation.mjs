@@ -16,9 +16,11 @@ async function v3FoundationLoopScenario() {
     assert.equal(initial.world.capacity, initial.renderer.capacity);
     assert.equal(initial.renderer.active, 0);
     assert.equal(initial.renderer.sceneChildren, 1);
-    assert.equal(initial.renderer.rootChildren, 7);
-    assert.equal(initial.renderer.ownership.geometries, 7);
-    assert.equal(initial.renderer.ownership.materials, 7);
+    const renderPoolCount = Object.keys(initial.renderer.pools).length;
+    assert.equal(initial.renderer.rootChildren, renderPoolCount);
+    assert.equal(initial.renderer.ownership.geometries, renderPoolCount);
+    assert.equal(initial.renderer.ownership.materials,
+      renderPoolCount - 1 + initial.renderer.pools.warning.capacity);
 
     const restoredLifecycle = await page.evaluate(`(()=>{
       const api=globalThis.__NEON_TIDE_V3__;
@@ -186,7 +188,7 @@ async function v3FoundationLoopScenario() {
     assert.equal(reset.world.resets > 0, true);
     assert.equal(reset.renderer.active, 0);
     assert.equal(reset.renderer.sceneChildren, 1);
-    assert.equal(reset.renderer.rootChildren, 7);
+    assert.equal(reset.renderer.rootChildren, renderPoolCount);
 
     const abyssRetry = await page.evaluate(`(()=>{
       const api=globalThis.__NEON_TIDE_V3__;

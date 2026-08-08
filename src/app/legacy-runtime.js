@@ -5281,6 +5281,10 @@ function syncCombatWorld(entityWorld) {
     fireTimer: state.autoFireRateBuffTimer,
     cooldown: state.autoPulseTimer,
     invulnerable: state.dashInvulnerable || state.hurtInvuln > 0,
+    attackKind: state.laserState === 'active' ? 'tide-lance' : state.dashTimer > 0 ? 'dash' : null,
+    sequence: state.laserState === 'active' ? state.laserSequence : state.dashSequence,
+    directionX: state.laserState === 'active' ? state.laserDirection.x : player.facing.x,
+    directionY: state.laserState === 'active' ? state.laserDirection.y : player.facing.y,
     collidable: true,
   });
 
@@ -5469,6 +5473,7 @@ function applyCombatSummary(entityWorld, summary) {
 function consumePresentationEvent(event) {
   if (!event || typeof event.type !== "string") return false;
   if (event.type === "objective:spawn") {
+    if (session.isObjectiveManaged()) return true;
     const payload = event.payload ?? {};
     if (payload.role === "elite-target" && Array.isArray(payload.targets)) {
       for (const target of payload.targets) {

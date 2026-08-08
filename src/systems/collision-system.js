@@ -100,6 +100,7 @@ export function createCollisionSystem({
   const playerRead = createEntityReadTarget();
   const pickupRead = createEntityReadTarget();
   const objectiveRead = createEntityReadTarget();
+  const hazardRead = createEntityReadTarget();
   const chainRead = createEntityReadTarget();
   const spawnData = {
     x: 0,
@@ -232,7 +233,8 @@ export function createCollisionSystem({
           const target = world.readInto(targets.at(targetIndex), targetRead);
           if (!target || !targetCanTakeFriendlyHit(projectile, target) || !sweptCircleHit(projectile, target)) continue;
           const armoredBossPart = target.kind === 'bossPart' && (target.armored || !target.weakPoint);
-          if (!armoredBossPart) {
+          const armoredEnemy = target.kind === 'enemy' && target.armored && !target.weakPoint;
+          if (!armoredBossPart && !armoredEnemy) {
             const multiplier = target.kind === 'bossPart' && target.weakPoint ? 1.5 : 1;
             queueDamage(state, projectile, target, projectile.damage * multiplier, target.weakPoint);
           }
@@ -322,6 +324,21 @@ export function createCollisionSystem({
       }
       break;
     }
+    const hazards = world.query('enemyHazard');
+    for (let index = 0; index < hazards.length; index += 1) {
+      const hazard = world.readInto(hazards.at(index), hazardRead);
+      if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
+      if (!overlapsWithRadius(player, hazard, hazard.contactRadius > 0 ? hazard.contactRadius : hazard.radius)) continue;
+      if (perfectAvailable) {
+        applyPerfectPhase(world, player, events);
+        perfectAvailable = false;
+        phaseProtected = true;
+        state.perfectPhases += 1;
+      } else if (!phaseProtected) {
+        state.playerDamage += Math.max(0, hazard.damage || 1);
+      }
+      break;
+    }
   }
 
   function collectEnemyObjectiveHits(world, state) {
@@ -391,8 +408,12 @@ export function createCollisionSystem({
       if (!target || target.hp <= 0) continue;
       const amount = Math.min(target.hp, damageAmounts[index]);
       const hpAfter = Math.max(0, target.hp - amount);
-      world.write(target.id, { hp: hpAfter, state: hpAfter <= 0 ? 'destroyed' : target.state });
-      if (hpAfter <= 0) {
+      const executionProtected = hpAfter <= 0 && target.kind === 'enemy' && target.executingTelegraph;
+      world.write(target.id, {
+        hp: hpAfter,
+        state: hpAfter <= 0 ? (executionProtected ? target.state : 'destroyed') : target.state,
+      });
+      if (hpAfter <= 0 && !executionProtected) {
         state.targetDespawnCount = addUnique(targetDespawnIds, state.targetDespawnCount, target.id);
         destroyed += 1;
       }
@@ -401,7 +422,7 @@ export function createCollisionSystem({
         byWeapon[weaponId] = (byWeapon[weaponId] ?? 0) + 1;
         friendlyHits += 1;
         friendlyDamage += amount;
-        if (hpAfter <= 0) friendlyDestroyed += 1;
+        if (hpAfter <= 0 && !executionProtected) friendlyDestroyed += 1;
       }
       appliedDamage += amount;
       records.push(Object.freeze({
@@ -413,7 +434,8 @@ export function createCollisionSystem({
         amount,
         hpBefore: target.hp,
         hpAfter,
-        destroyed: hpAfter <= 0,
+        destroyed: hpAfter <= 0 && !executionProtected,
+        executionProtected,
         weakPoint: damageWeakPoints[index] === 1,
       }));
     }

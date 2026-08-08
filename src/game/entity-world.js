@@ -3,6 +3,8 @@ export const ENTITY_KINDS = Object.freeze([
   'enemy',
   'friendlyProjectile',
   'enemyProjectile',
+  'warning',
+  'enemyHazard',
   'pickup',
   'objective',
   'bossPart',
@@ -13,6 +15,8 @@ export const DEFAULT_ENTITY_CAPACITIES = Object.freeze({
   enemy: 56,
   friendlyProjectile: 96,
   enemyProjectile: 96,
+  warning: 96,
+  enemyHazard: 96,
   pickup: 32,
   objective: 24,
   bossPart: 32,
@@ -22,6 +26,8 @@ export const COARSE_ENTITY_CAPACITIES = Object.freeze({
   ...DEFAULT_ENTITY_CAPACITIES,
   friendlyProjectile: 72,
   enemyProjectile: 72,
+  warning: 72,
+  enemyHazard: 72,
 });
 
 export function selectEntityCapacities({ coarsePointer = false } = {}) {
@@ -101,6 +107,7 @@ const FLOAT_RULES = Object.freeze({
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([
   'color', 'flags', 'team', 'phase', 'variantIndex', 'splitCount', 'chainCount', 'pierceCount', 'sequence',
+  'counterToken', 'dashToken', 'lanceToken', 'warningGroup',
 ]);
 const BOOLEAN_FIELDS = Object.freeze([
   'executingTelegraph', 'objective', 'invulnerable', 'collidable', 'homing', 'weakPoint',
@@ -139,6 +146,8 @@ const DEFAULT_COLORS = Object.freeze({
   enemy: 0xff4fba,
   friendlyProjectile: 0x64f5ff,
   enemyProjectile: 0xff506f,
+  warning: 0xff9f43,
+  enemyHazard: 0xff506f,
   pickup: 0xffd166,
   objective: 0x36e0ff,
   bossPart: 0xff9f43,

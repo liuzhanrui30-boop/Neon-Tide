@@ -13,6 +13,7 @@ import { createWeaponSystem } from '../systems/weapon-system.js';
 import { createProjectileSystem } from '../systems/projectile-system.js';
 import { createCollisionSystem } from '../systems/collision-system.js';
 import { createObjectiveWorldBridge } from '../systems/objective-world-bridge.js';
+import { createEnemySystem } from '../systems/enemy-system.js';
 
 const STEP_SECONDS = 1 / 60;
 const MAX_CATCH_UP_STEPS = 6;
@@ -59,6 +60,15 @@ export function bootstrapNeonTide(options = {}) {
   const weaponSystem = createWeaponSystem();
   const projectileSystem = createProjectileSystem();
   const collisionSystem = createCollisionSystem();
+  let session = null;
+  const enemySystem = createEnemySystem({
+    projectileCap: entityCapacities.enemyProjectile,
+    warningCap: () => {
+      const abyss = session?.snapshot().runMode === 'abyss';
+      const coarse = coarsePointer || entityQuality.tier === 'mobile';
+      return abyss ? (coarse ? 3 : 4) : (coarse ? 2 : 3);
+    },
+  });
   const objectiveBridge = createObjectiveWorldBridge({ world });
   const objectiveAuthority = {};
   let objectiveInputSequence = 0;
@@ -95,7 +105,7 @@ export function bootstrapNeonTide(options = {}) {
     },
   });
 
-  const session = createGameSession({
+  session = createGameSession({
     development: import.meta.env.DEV,
     events,
     runSave,
@@ -112,6 +122,7 @@ export function bootstrapNeonTide(options = {}) {
         weaponSystem.reset();
         projectileSystem.reset();
         collisionSystem.reset();
+        enemySystem.reset();
         objectiveBridge.reset();
         entityRenderer.reset();
         presentationEvents.reset();
@@ -124,6 +135,7 @@ export function bootstrapNeonTide(options = {}) {
         weaponSystem.reset();
         projectileSystem.reset();
         collisionSystem.reset();
+        enemySystem.reset();
         objectiveBridge.reset();
         entityRenderer.reset();
         presentationEvents.reset();
@@ -189,7 +201,13 @@ export function bootstrapNeonTide(options = {}) {
         if (session.getMode() !== 'playing') return;
         const playerId = runtime?.syncCombatWorld(world);
         if (!Number.isSafeInteger(playerId)) return;
-        if (session.isObjectiveManaged()) objectiveAuthority.visit(syncObjectiveWorld);
+        let enemySummary = Object.freeze({ destroyedRecords: Object.freeze([]), active: world.query('enemy').length });
+        if (session.isObjectiveManaged()) {
+          objectiveAuthority.visit((objective) => {
+            syncObjectiveWorld(objective);
+            enemySummary = enemySystem.update(world, world.get(playerId), objective, dt, events);
+          });
+        }
         weaponSystem.update(world, playerId, dt, events);
         projectileSystem.update(world, dt, events);
         const summary = collisionSystem.resolve(world, session, dt, events);
@@ -207,6 +225,10 @@ export function bootstrapNeonTide(options = {}) {
               }];
               return [];
             });
+          for (const record of enemySummary.destroyedRecords ?? []) objectiveInput.push({
+            type: 'enemy:destroyed', sequence: ++objectiveInputSequence,
+            payload: { id: record.id, sourceId: record.sourceId, targetSourceId: record.sourceId, role: record.role },
+          });
           if (summary.pickups > 0) objectiveInput.push({
             type: 'pickupCollected',
             sequence: ++objectiveInputSequence,
@@ -263,6 +285,7 @@ export function bootstrapNeonTide(options = {}) {
       weapons: weaponSystem.getStats(),
       projectiles: projectileSystem.getStats(),
       collisions: collisionSystem.getStats(),
+      enemies: enemySystem.getStats(world),
       encounter: session.getEncounterSnapshot(),
       objectiveBridge: objectiveBridge.getStats(),
       legacy: runtime.getDebugSnapshot(),
@@ -285,6 +308,7 @@ export function bootstrapNeonTide(options = {}) {
     runtime.dispose();
     inputSystem.dispose();
     hudRenderer.dispose();
+    enemySystem.cleanup(world);
     objectiveBridge.clear();
     entityRenderer.dispose();
     world.dispose();
@@ -305,6 +329,7 @@ export function bootstrapNeonTide(options = {}) {
     weaponSystem,
     projectileSystem,
     collisionSystem,
+    enemySystem,
     objectiveBridge,
     presentationEvents,
     dispose,

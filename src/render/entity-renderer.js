@@ -7,11 +7,14 @@ import {
 } from '../game/entity-world.js';
 
 const PROJECTILE_KINDS = new Set(['friendlyProjectile', 'enemyProjectile']);
+const INDEPENDENT_WARNING_KIND = 'warning';
 const DEFAULT_COLORS = Object.freeze({
   player: 0xe7ffff,
   enemy: 0xff4fba,
   friendlyProjectile: 0x64f5ff,
   enemyProjectile: 0xff506f,
+  warning: 0xff9f43,
+  enemyHazard: 0xff506f,
   pickup: 0xffd166,
   objective: 0x36e0ff,
   bossPart: 0xff9f43,
@@ -21,6 +24,8 @@ const BASE_SIZES = Object.freeze({
   enemy: 0.72,
   friendlyProjectile: 0.16,
   enemyProjectile: 0.19,
+  warning: 1,
+  enemyHazard: 0.72,
   pickup: 0.42,
   objective: 1,
   bossPart: 1,
@@ -76,6 +81,8 @@ function createGeometry(kind, capacity) {
     geometry.setDrawRange(0, 0);
     return geometry;
   }
+  if (kind === 'warning') return new THREE.PlaneGeometry(1, 1);
+  if (kind === 'enemyHazard') return new THREE.CircleGeometry(1, 12);
   if (kind === 'player') return new THREE.CircleGeometry(1, 3);
   if (kind === 'enemy') return new THREE.CircleGeometry(1, 4);
   if (kind === 'pickup') return new THREE.RingGeometry(0.5, 1, 8);
@@ -110,6 +117,41 @@ function createMaterial(kind, quality) {
 }
 
 function createRenderPool({ kind, capacity, quality, root, geometries, materials, hiddenMatrix }) {
+  if (kind === INDEPENDENT_WARNING_KIND) {
+    const geometry = createGeometry(kind, capacity);
+    geometry.userData.entityRendererOwned = true;
+    geometries.add(geometry);
+    const object = new THREE.Group();
+    object.name = `entity-${kind}`;
+    object.userData.entityKind = kind;
+    object.frustumCulled = false;
+    object.renderOrder = 30;
+    const warningMeshes = [];
+    const warningMaterials = [];
+    for (let slot = 0; slot < capacity; slot += 1) {
+      const material = createMaterial(kind, quality);
+      material.userData.entityRendererOwned = true;
+      material.opacity = 0;
+      materials.add(material);
+      warningMaterials.push(material);
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.visible = false;
+      mesh.frustumCulled = false;
+      mesh.renderOrder = 30;
+      object.add(mesh);
+      warningMeshes.push(mesh);
+    }
+    object.geometry = geometry;
+    object.material = warningMaterials[0] ?? createMaterial(kind, quality);
+    root.add(object);
+    return {
+      kind, capacity, geometry, material: warningMaterials[0] ?? null, object,
+      warningMeshes, warningMaterials, visibleCount: 0,
+      instanceMatrix: null, instanceMatrixArray: null, instanceColor: null, instanceColorArray: null,
+      positionAttribute: null, positionArray: null, colorAttribute: null, colorArray: null,
+      readTarget: createEntityReadTarget(),
+    };
+  }
   const geometry = createGeometry(kind, capacity);
   const material = createMaterial(kind, quality);
   geometry.userData.entityRendererOwned = true;
@@ -212,6 +254,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   let audits = 0;
   let corrections = 0;
   let clippedEntities = 0;
+  let worldWarningCount = 0;
 
   function syncInstanced(pool, query, world, alpha) {
     const { object, capacity } = pool;
@@ -290,6 +333,39 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     return count;
   }
 
+  function syncWarnings(pool, query, world, alpha) {
+    const candidateCount = Math.min(query.length, pool.capacity);
+    let count = 0;
+    for (let index = 0; index < candidateCount; index += 1) {
+      const entity = world.readInto(query.at(index), pool.readTarget);
+      if (!entity || (entity.flags & ENTITY_FLAG_HIDDEN) !== 0 || entity.opacity <= 0) continue;
+      const mesh = pool.warningMeshes[count];
+      const material = pool.warningMaterials[count];
+      mesh.position.set(
+        interpolate(entity.previousX, entity.x, alpha),
+        interpolate(entity.previousY, entity.y, alpha),
+        interpolate(entity.previousZ, entity.z, alpha),
+      );
+      mesh.rotation.set(0, 0, clampFinite(entity.rotation, -RENDER_ROTATION_LIMIT, RENDER_ROTATION_LIMIT, 0));
+      const scale = clampFinite(entity.scale, 0, RENDER_SCALE_LIMIT, 1);
+      mesh.scale.set(
+        clampFinite(entity.scaleX, 0, RENDER_SCALE_LIMIT, 1) * scale,
+        clampFinite(entity.scaleY, 0, RENDER_SCALE_LIMIT, 1) * scale,
+        1,
+      );
+      material.color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS.warning);
+      material.opacity = clampFinite(entity.opacity, 0, 1, 0.72);
+      mesh.visible = true;
+      count += 1;
+    }
+    for (let index = count; index < pool.visibleCount; index += 1) {
+      pool.warningMeshes[index].visible = false;
+      pool.warningMaterials[index].opacity = 0;
+    }
+    pool.visibleCount = count;
+    return count;
+  }
+
   function sync(world, interpolationAlpha = 0) {
     if (disposed) return false;
     if (!world || typeof world.query !== 'function' || typeof world.readInto !== 'function') {
@@ -300,12 +376,15 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     for (const kind of ENTITY_KINDS) {
       const pool = pools[kind];
       const query = world.query(kind);
-      const rendered = PROJECTILE_KINDS.has(kind)
-        ? syncPoints(pool, query, world, alpha)
-        : syncInstanced(pool, query, world, alpha);
+      const rendered = kind === INDEPENDENT_WARNING_KIND
+        ? syncWarnings(pool, query, world, alpha)
+        : PROJECTILE_KINDS.has(kind)
+          ? syncPoints(pool, query, world, alpha)
+          : syncInstanced(pool, query, world, alpha);
       nextActive += rendered;
       if (query.length > pool.capacity) clippedEntities += query.length - pool.capacity;
     }
+    worldWarningCount = world.query('warning').length;
     active = nextActive;
     syncs += 1;
     return true;
@@ -364,7 +443,22 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         scale: { x: 1, y: 1, z: 1 },
       });
 
-      if (PROJECTILE_KINDS.has(kind)) {
+      if (kind === INDEPENDENT_WARNING_KIND) {
+        for (let slot = 0; slot < capacity; slot += 1) {
+          const mesh = pool.warningMeshes[slot];
+          const ownedMaterial = pool.warningMaterials[slot];
+          if (mesh.parent !== object) { object.add(mesh); corrections += 1; }
+          if (mesh.geometry !== geometry) { mesh.geometry = geometry; corrections += 1; }
+          if (mesh.material !== ownedMaterial) { mesh.material = ownedMaterial; corrections += 1; }
+          corrections += auditTransform(mesh, {
+            position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 },
+          });
+          if (!Number.isFinite(ownedMaterial.opacity)) { ownedMaterial.opacity = 0; corrections += 1; }
+        }
+        if (!Number.isInteger(pool.visibleCount) || pool.visibleCount < 0 || pool.visibleCount > capacity) {
+          pool.visibleCount = 0; corrections += 1;
+        }
+      } else if (PROJECTILE_KINDS.has(kind)) {
         if (geometry.attributes.position !== pool.positionAttribute) {
           geometry.setAttribute('position', pool.positionAttribute);
           corrections += 1;
@@ -447,7 +541,13 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     recoverCorruption();
     for (const kind of ENTITY_KINDS) {
       const pool = pools[kind];
-      if (PROJECTILE_KINDS.has(kind)) {
+      if (kind === INDEPENDENT_WARNING_KIND) {
+        for (let slot = 0; slot < pool.capacity; slot += 1) {
+          pool.warningMeshes[slot].visible = false;
+          pool.warningMaterials[slot].opacity = 0;
+        }
+        pool.visibleCount = 0;
+      } else if (PROJECTILE_KINDS.has(kind)) {
         pool.positionArray.fill(0);
         pool.colorArray.fill(0);
         pool.geometry.setDrawRange(0, 0);
@@ -497,11 +597,13 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     const poolStats = {};
     for (const kind of ENTITY_KINDS) {
       const pool = pools[kind];
-      const count = PROJECTILE_KINDS.has(kind) ? pool.geometry.drawRange.count : pool.object.count;
+      const count = kind === INDEPENDENT_WARNING_KIND
+        ? pool.visibleCount
+        : PROJECTILE_KINDS.has(kind) ? pool.geometry.drawRange.count : pool.object.count;
       poolStats[kind] = Object.freeze({
         capacity: pool.capacity,
         count: Number.isFinite(count) ? count : 0,
-        primitive: PROJECTILE_KINDS.has(kind) ? 'points' : 'instances',
+        primitive: kind === INDEPENDENT_WARNING_KIND ? 'independent-meshes' : PROJECTILE_KINDS.has(kind) ? 'points' : 'instances',
       });
     }
     return Object.freeze({
@@ -518,8 +620,12 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       hostSceneChildren: scene.children.length,
       mounted: root.parent === mountParent,
       rootChildren: root.children.length,
+      warningVisibility: Object.freeze({
+        visible: pools.warning?.visibleCount ?? 0,
+        hiddenActive: Math.max(0, (pools.warning ? worldWarningCount : 0) - (pools.warning?.visibleCount ?? 0)),
+      }),
       ownership: Object.freeze({
-        objects: ENTITY_KINDS.length + 1,
+        objects: ENTITY_KINDS.length + 1 + (pools.warning?.capacity ?? 0),
         geometries: geometries.size,
         materials: materials.size,
       }),
