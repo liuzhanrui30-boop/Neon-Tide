@@ -720,7 +720,9 @@ export function updateObjective(objective, world, player, dt, events = null) {
 
 export function getObjectiveSnapshot(objective) {
   if (!objective) return null;
-  objective._snapshotCount = Math.max(0, Math.trunc(objective._snapshotCount ?? 0)) + 1;
+  if (Object.isExtensible(objective)) {
+    objective._snapshotCount = Math.max(0, Math.trunc(objective._snapshotCount ?? 0)) + 1;
+  }
   const snapshot = {};
   for (const [key, value] of Object.entries(objective)) {
     if (key.startsWith('_')) continue;

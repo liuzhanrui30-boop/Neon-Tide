@@ -1,10 +1,126 @@
 import assert from 'node:assert/strict';
 import { APP_URL, withPage } from './harness.mjs';
 
-const ABYSS_URL = new URL('?campaign-test=1&boss-test=1&objective-seed=7301', APP_URL).href;
+const ABYSS_URL = new URL('?campaign-test=1&objective-seed=7301', APP_URL).href;
+const KEY = Object.freeze({
+  up: ['w', 'KeyW'],
+  down: ['s', 'KeyS'],
+  left: ['a', 'KeyA'],
+  right: ['d', 'KeyD'],
+});
 
 async function snapshot(page) {
   return page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+}
+
+async function playerState(page) {
+  return page.evaluate(`(()=>{
+    const app=globalThis.__NEON_TIDE_V3__;
+    const id=app.world.query('player').at(0);
+    const player=id?app.world.get(id):null;
+    return {x:player?.x??0,y:player?.y??0,mode:app.session.getMode()};
+  })()`);
+}
+
+async function holdAxisUntil(page, axis, target, start, tolerance) {
+  const direction = target > start ? 1 : -1;
+  const name = axis === 'x'
+    ? (direction > 0 ? 'right' : 'left')
+    : (direction > 0 ? 'up' : 'down');
+  const [key, code] = KEY[name];
+  await page.dispatchKey('rawKeyDown', key, code);
+  try {
+    return await page.evaluate(`(async()=>{
+      const app=globalThis.__NEON_TIDE_V3__;
+      const axis=${JSON.stringify(axis)};
+      const target=${Number(target)};
+      const start=${Number(start)};
+      const tolerance=${Number(tolerance)};
+      const direction=target>start?1:-1;
+      const deadline=performance.now()+5200;
+      return new Promise((resolve,reject)=>{
+        const poll=()=>{
+          const id=app.world.query('player').at(0);
+          const player=id?app.world.get(id):null;
+          const mode=app.session.getMode();
+          if(!player||mode!=='playing'){
+            reject(new Error('movement interrupted in '+mode));
+            return;
+          }
+          const coordinate=axis==='x'?player.x:player.y;
+          const reached=Math.abs(target-coordinate)<=tolerance
+            || (direction>0?coordinate>=target:coordinate<=target);
+          if(reached){
+            resolve({x:player.x,y:player.y,mode,frames:app.getDebugSnapshot().encounter.elapsed});
+            return;
+          }
+          if(performance.now()>=deadline){
+            reject(new Error('keyboard axis hold timed out at '+coordinate+' toward '+target));
+            return;
+          }
+          requestAnimationFrame(poll);
+        };
+        requestAnimationFrame(poll);
+      });
+    })()`);
+  } finally {
+    await page.dispatchKey('keyUp', key, code);
+  }
+}
+
+async function driveTo(page, targetX, targetY, { tolerance = 0.42 } = {}) {
+  let player = await playerState(page);
+  if (player.mode !== 'playing') throw new Error(`movement interrupted in ${player.mode}`);
+
+  if (Math.abs(targetX - player.x) > tolerance) {
+    player = await holdAxisUntil(page, 'x', targetX, player.x, tolerance);
+  }
+  if (Math.abs(targetY - player.y) > tolerance) {
+    player = await holdAxisUntil(page, 'y', targetY, player.y, tolerance);
+  }
+
+  if (Math.hypot(targetX - player.x, targetY - player.y) <= tolerance * 2.8) return player;
+  throw new Error(`keyboard route failed to reach ${targetX},${targetY}: ${JSON.stringify(player)}`);
+}
+
+async function primeTideLance(page) {
+  const readiness = await page.gameEvaluate(`
+    $state.weaponEnergy=100;
+    input.laserBuffer=0;
+    return {availability:getLaserAvailability(),laserState:$state.laserState,mode:$state.mode,
+      dashTimer:$state.dashTimer,dashInvulnTimer:$state.dashInvulnTimer,
+      elapsed:$state.elapsed,stageIndex:$state.stageIndex,stageEnd:STAGES[$state.stageIndex]?.end};
+  `);
+  assert.equal(readiness.availability.canStart, true, `Tide Lance readiness: ${JSON.stringify(readiness)}`);
+}
+
+async function fireTideLance(page) {
+  const before = (await snapshot(page)).weapons.lanceShots;
+  await page.dispatchKey('rawKeyDown', 'e', 'KeyE');
+  try {
+    await page.evaluate(`(async()=>{
+      const app=globalThis.__NEON_TIDE_V3__;
+      const before=${Number(before)};
+      const deadline=performance.now()+2600;
+      return new Promise((resolve,reject)=>{
+        const poll=()=>{
+          const snapshot=app.getDebugSnapshot();
+          if(snapshot.weapons.lanceShots>before){resolve(snapshot.weapons.lanceShots);return;}
+          if(performance.now()>=deadline){
+            reject(new Error('real Tide Lance input was not accepted: '+JSON.stringify({
+              mode:snapshot.session.mode,phase:snapshot.encounter.bossBehavior?.phase,
+              lanceShots:snapshot.weapons.lanceShots,before,
+            })));
+            return;
+          }
+          requestAnimationFrame(poll);
+        };
+        requestAnimationFrame(poll);
+      });
+    })()`);
+  } finally {
+    await page.dispatchKey('keyUp', 'e', 'KeyE');
+  }
 }
 
 async function completeOrdinaryNode(page) {
@@ -12,6 +128,7 @@ async function completeOrdinaryNode(page) {
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()!=='playing'`);
   const mode = await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.getMode()`);
   if (mode === 'upgrade') {
+    await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden&&Boolean(document.querySelector('#upgrade-options .upgrade-option'))`);
     await page.trustedClick('#upgrade-options .upgrade-option');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='playing'`);
   } else if (mode === 'chapterComplete') {
@@ -25,54 +142,84 @@ async function reachMaw(page) {
   for (let index = 0; index < 3; index += 1) await completeOrdinaryNode(page);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.room?.boss?.id==='abyss-maw'`);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior?.parts?.body?.entityId>0`);
+  await page.gameEvaluate(`
+    clearWorldEntities();
+    $state.enemySpawnTimer=Infinity;
+    $state.formationTimer=Infinity;
+    $state.shardSpawnTimer=Infinity;
+    $state.hurtInvuln=Math.max($state.hurtInvuln,120);
+    return true;
+  `);
+}
+
+async function performFixedOuterOrbit(page) {
+  const perimeter = [[8.2, 4.8], [-8.2, 4.8], [-8.2, -4.8], [8.2, -4.8], [8.2, 0]];
+  for (const [x, y] of perimeter) await driveTo(page, x, y, { tolerance: 0.48 });
+  await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.orbitCounterTriggers>0`, 8000);
+  return snapshot(page);
+}
+
+async function performNaturalRouteBreaks(page) {
+  const route = [
+    [-7.4, 0], [7.4, 0], [-7.4, 0], [7.4, 0], [0, 0],
+    [0, 5.2], [0, -5.2], [0, 5.2], [0, -5.2], [0, 5.2], [0, -5.2], [0, 0],
+    [-7.4, 0], [7.4, 0], [-7.4, 0], [7.4, 0],
+  ];
+  for (const [x, y] of route) await driveTo(page, x, y, { tolerance: 0.38 });
+  await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='weakPoints'`, 8000);
+  const shiftedCenter = (await snapshot(page)).encounter.bossBehavior.arenaCenter;
+  await primeTideLance(page);
+  await driveTo(page, shiftedCenter.x, shiftedCenter.y, { tolerance: 0.3 });
+  await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.parts.organs.every((organ)=>organ.weakPoint&&!organ.invulnerable)`, 4000);
+  return snapshot(page);
 }
 
 export const v3AbyssScenarios = [
-  ['v3 Abyss Maw rejects fixed orbit, accepts varied route and cleans natural collision victory', async () => {
-    await withPage('v3-abyss-maw-natural', { appUrl: ABYSS_URL }, async (page) => {
+  ['v3 Abyss Maw rejects a real keyboard orbit, accepts a real keyboard varied route, and dies to real weapons', async () => {
+    await withPage('v3-abyss-maw-natural', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
       await reachMaw(page);
-      assert.equal(await page.evaluate(`typeof globalThis.__NEON_TIDE_V3__.bossTest.runCircle`), 'function');
-      const fixed = await page.evaluate(`globalThis.__NEON_TIDE_V3__.bossTest.runCircle(240)`);
-      assert.equal(fixed.phase, 'hunt');
-      assert.equal(fixed.destroyedOrgans, 0);
-      assert.ok(fixed.orbitCounterTriggers > 0);
+      assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
+
+      const fixed = await performFixedOuterOrbit(page);
+      assert.equal(fixed.encounter.bossBehavior.phase, 'hunt');
+      assert.equal(fixed.encounter.bossBehavior.routeBreaks, 0);
+      assert.equal(fixed.encounter.bossBehavior.destroyedOrgans, 0);
+      assert.ok(fixed.encounter.bossBehavior.orbitCounterTriggers > 0);
+      assert.ok(fixed.encounter.bossBehavior.attackCounts.active > 0, 'orbit warning became real damage');
 
       const readable = await page.evaluate(`(()=>{
         const app=globalThis.__NEON_TIDE_V3__;
         const snap=app.getDebugSnapshot();
         return {
           bossParts:snap.world.pools.bossPart.count,
-          warnings:snap.world.pools.warning.count,
-          hazards:snap.world.pools.enemyHazard.count,
           rendered:snap.renderer.active,
           objectiveType:document.querySelector('#mission-panel')?.dataset.objectiveType,
           hudText:document.querySelector('#mission-objective')?.textContent,
         };
       })()`);
       assert.ok(readable.bossParts >= 4);
-      assert.ok(readable.warnings + readable.hazards > 0);
       assert.ok(readable.rendered > 0);
       assert.equal(readable.objectiveType, 'boss');
       assert.match(readable.hudText, /深渊巨口/);
 
-      const varied = await page.evaluate(`globalThis.__NEON_TIDE_V3__.bossTest.runVaried(90)`);
-      assert.equal(varied.phase, 'weakPoints');
-      assert.equal(varied.suctionOutcome.succeeded, true);
-      assert.equal(varied.parts.organs.length, 3);
-      assert.ok(varied.parts.organs.every((organ)=>organ.weakPoint&&!organ.invulnerable));
-      assert.ok(varied.attacksSeen.includes('suction-current'));
-      assert.ok(varied.attacksSeen.includes('tentacle-fan'));
+      const varied = await performNaturalRouteBreaks(page);
+      assert.equal(varied.encounter.bossBehavior.phase, 'weakPoints');
+      assert.equal(varied.encounter.bossBehavior.suctionOutcome.succeeded, true);
+      assert.ok(varied.encounter.bossBehavior.parts.organs.every((organ) => organ.weakPoint && !organ.invulnerable));
+      assert.ok(varied.encounter.bossBehavior.attacksSeen.includes('suction-current'));
+      assert.ok(varied.encounter.bossBehavior.attacksSeen.includes('tentacle-fan'));
 
-      const organStrike = await page.evaluate(`globalThis.__NEON_TIDE_V3__.bossTest.strikeOrgans()`);
-      assert.ok(organStrike.summary.damageRecords.filter((record)=>record.targetKind==='bossPart').length >= 3);
-      assert.equal(organStrike.encounter.bossBehavior.phase, 'enraged');
-      assert.equal(organStrike.encounter.bossBehavior.destroyedOrgans, 3);
-      assert.notDeepEqual(organStrike.encounter.bossBehavior.arenaCenter, { x: 0, y: 0 });
+      const center = varied.encounter.bossBehavior.arenaCenter;
+      await driveTo(page, center.x, center.y, { tolerance: 0.3 });
+      await fireTideLance(page);
+      await page.waitForPage(`(globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.damageByWeapon['tide-lance']??0)>0`, 6000);
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='enraged'`, 30000);
+      const enraged = await snapshot(page);
+      assert.equal(enraged.encounter.bossBehavior.destroyedOrgans, 3);
+      assert.ok(enraged.encounter.bossBehavior.damageByWeapon['pulse-cannon'] > 0);
+      await driveTo(page, enraged.encounter.bossBehavior.arenaCenter.x, enraged.encounter.bossBehavior.arenaCenter.y);
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`, 30000);
 
-      const coreStrike = await page.evaluate(`globalThis.__NEON_TIDE_V3__.bossTest.strikeCore()`);
-      assert.ok(coreStrike.summary.damageRecords.some((record)=>record.targetKind==='bossPart'&&record.destroyed));
-      await page.evaluate(`globalThis.__NEON_TIDE_V3__.bossTest.settle()`);
-      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`);
       const victory = await snapshot(page);
       assert.equal(victory.session.route.roomIndex, 4);
       assert.equal(victory.session.stats.roomsCompleted, 4);
@@ -83,7 +230,7 @@ export const v3AbyssScenarios = [
     });
   }],
   ['v3 Standard death at Abyss Maw reconstructs chapter entry without midpoint checkpoint', async () => {
-    await withPage('v3-abyss-maw-standard-retry', { appUrl: ABYSS_URL }, async (page) => {
+    await withPage('v3-abyss-maw-standard-retry', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
       await reachMaw(page);
       assert.equal(await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.damageHull(globalThis.__NEON_TIDE_V3__.session.getHull())`), true);
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='briefing'`);

@@ -19,7 +19,7 @@ export const ABYSS_MAW = deepFreeze({
     hunt: {
       stability: 100,
       gate: { kind: 'stability', threshold: 0 },
-      routeBreakDamage: 9,
+      routeBreakDamage: 12.5,
       tideLanceDamage: 30,
       minimumRouteBreaks: 8,
     },

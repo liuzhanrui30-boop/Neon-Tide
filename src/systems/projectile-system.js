@@ -133,6 +133,7 @@ export function createProjectileSystem({
         const id = query.at(index);
         const projectile = world.readInto(id, projectileRead);
         if (!projectile) continue;
+        if (projectile.ownerKind === 'boss') continue;
         const lifetime = projectile.lifetime;
         const expired = lifetime > 0 && projectile.age + dt >= lifetime - EPSILON;
         const escaped = projectile.type !== 'arc-drone'
@@ -141,7 +142,9 @@ export function createProjectileSystem({
           despawnCount = scheduleDespawn(id, despawnCount);
           continue;
         }
-        const changed = projectile.type === 'arc-drone'
+        const changed = projectile.type === 'tide-lance'
+          ? world.write(id, { age: projectile.age + dt })
+          : projectile.type === 'arc-drone'
           ? updateDrone(world, id, projectile, dt)
           : updateProjectile(world, id, projectile, dt);
         if (changed) movedThisStep += 1;
@@ -171,4 +174,3 @@ export function createProjectileSystem({
 
   return Object.freeze({ update, reset, getStats });
 }
-

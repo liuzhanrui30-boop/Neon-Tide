@@ -186,3 +186,30 @@ test('weapon fire event counter advances only when the bounded queue accepts it'
   system.update(world, playerId, 1 / 60, { emit() { return false; } });
   assert.equal(system.getStats().fireEvents, 0);
 });
+
+test('a Tide Lance input rising edge spawns one real swept projectile through EntityWorld', () => {
+  const world = createEntityWorld({ capacities: { player: 1, bossPart: 2, friendlyProjectile: 8 } });
+  const playerId = world.spawn('player', {
+    x: 0, y: 0, team: 1, collidable: true,
+    attackKind: 'tide-lance', sequence: 11, directionX: 0, directionY: 1,
+  });
+  world.spawn('bossPart', {
+    x: 5, y: 0, hp: 10, maxHp: 10, radius: 0.5,
+    team: 2, collidable: true, weakPoint: true, role: 'boss',
+  });
+  const system = createWeaponSystem();
+  system.update(world, playerId, 1 / 60, { emit() { return true; } }, {
+    starterWeapon: 'pulse-cannon', lanceLength: 7.2, lanceHalfWidth: 0.275,
+    lanceTargetCap: 8, lanceDamageMultiplier: 1,
+  });
+  const lance = [...world.query('friendlyProjectile')]
+    .map((id) => world.get(id))
+    .find(({ type }) => type === 'tide-lance');
+  assert.ok(lance);
+  assert.equal(lance.weaponId, 'tide-lance');
+  assert.equal(lance.previousX, 0);
+  assert.equal(lance.previousY, 0);
+  assert.ok(lance.x > 5.9 && Math.abs(lance.y) < 1e-9, 'auto aim chooses the exposed Boss weak point');
+  assert.equal(lance.hitBudgetRemaining, 8);
+  world.dispose();
+});

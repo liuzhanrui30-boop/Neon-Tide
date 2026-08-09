@@ -456,6 +456,11 @@ export function createEncounterDirector({
       configurable: true,
       value() {
         if (phase !== 'active' || !objective) return false;
+        if (bossSystem) {
+          const completed = bossSystem.completeForDeterministicTest();
+          objective = bossSystem.getObjective();
+          return completed;
+        }
         return completeObjectiveForDeterministicTest(objective);
       },
     });
@@ -520,10 +525,21 @@ export function createEncounterDirector({
     const startsAbyssBoss = context?.campaign?.chapterId === 'abyss'
       && context?.timing?.kind === 'boss'
       && context?.boss?.id === ABYSS_MAW.id;
+    if (context.boss) {
+      const candidate = clone(context.boss);
+      if (!Number.isFinite(candidate.recoveryMultiplier)
+        || candidate.recoveryMultiplier <= 0 || candidate.recoveryMultiplier > 1.5
+        || !Number.isInteger(candidate.variantCount) || candidate.variantCount < 1 || candidate.variantCount > 8
+        || !Number.isFinite(candidate.telegraphFloorSeconds) || candidate.telegraphFloorSeconds < 0.55) {
+        throw new TypeError('Boss behavior contract is outside fair runtime bounds');
+      }
+      bossContract = Object.freeze(candidate);
+    } else bossContract = null;
     bossSystem = startsAbyssBoss ? createBossSystem({ seed: selectedRoomSeed, mode }) : null;
     objective = bossSystem
       ? bossSystem.start(ABYSS_MAW, {
         targetDurationSeconds: (authoredTargetDurationSeconds ?? 100) * durationScale,
+        behaviorContract: bossContract,
       })
       : createObjective(template, selectedRoomSeed);
     bossWorld = null;
@@ -556,16 +572,6 @@ export function createEncounterDirector({
       estimatedObjectiveSeconds: estimateCampaignObjectiveSeconds(template),
       completesOnObjective: true,
     });
-    if (context.boss) {
-      const candidate = clone(context.boss);
-      if (!Number.isFinite(candidate.recoveryMultiplier)
-        || candidate.recoveryMultiplier <= 0 || candidate.recoveryMultiplier > 1.5
-        || !Number.isInteger(candidate.variantCount) || candidate.variantCount < 1 || candidate.variantCount > 8
-        || !Number.isFinite(candidate.telegraphFloorSeconds) || candidate.telegraphFloorSeconds < 0.55) {
-        throw new TypeError('Boss behavior contract is outside fair runtime bounds');
-      }
-      bossContract = Object.freeze(candidate);
-    } else bossContract = null;
     bossCurrentVariantIndex = null;
     bossAttacksSelected = 0;
     bossVariantsSeen.clear();
@@ -634,7 +640,8 @@ export function createEncounterDirector({
   function applyAbyssChapterBeats(context, events) {
     if (!abyssRoomDefinition || !context.world) return;
     const beats = abyssRoomDefinition.beats;
-    while (chapterBeatIndex < beats.length && beats[chapterBeatIndex].at <= roomElapsed + 1e-9) {
+    while (chapterBeatIndex < beats.length
+      && beats[chapterBeatIndex].at * durationScale <= roomElapsed + 1e-9) {
       const beat = beats[chapterBeatIndex++];
       if (beat.kind === 'enemy-introduction') spawnAbyssIntroduction(context.world, beat, events);
       else if (beat.kind === 'route-change') commitAbyssRouteChange(context.world, beat, events);
@@ -780,6 +787,7 @@ export function createEncounterDirector({
           damageRecords: context.damageRecords ?? [],
           applyPlayerForce: context.applyPlayerForce,
         }, dt, events);
+        objective = bossSystem.getObjective();
       } else updateObjective(objective, context.world ?? null, context.player ?? null, dt, events);
       if (objective.status === 'active') {
         if (!bossSystem) {

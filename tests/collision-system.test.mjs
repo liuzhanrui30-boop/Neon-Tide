@@ -1,7 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEntityWorld } from '../src/game/entity-world.js';
-import { createCollisionSystem, resolveCollisions, sweptCircleHit } from '../src/systems/collision-system.js';
+import {
+  circleOrientedBoxHit,
+  createCollisionSystem,
+  resolveCollisions,
+  sweptCircleHit,
+} from '../src/systems/collision-system.js';
 import { createEnemySystem } from '../src/systems/enemy-system.js';
 
 function createEvents() {
@@ -216,6 +221,32 @@ test('swept projectile collision catches tunneling and stays finite for zero-len
   assert.equal(sweptCircleHit({ previousX: -1e150, previousY: 0, x: 1e150, y: 0, radius: 1 }, {
     x: 0, y: 0, radius: 1,
   }), true);
+});
+
+test('oriented Boss rectangles use the telegraphed footprint instead of an unrelated circle', () => {
+  const box = {
+    x: 0, y: 0, rotation: Math.PI / 4, scaleX: 8, scaleY: 0.6, variant: 'oriented-box',
+  };
+  const localToWorld = (along, across) => ({
+    x: along * Math.cos(box.rotation) - across * Math.sin(box.rotation),
+    y: along * Math.sin(box.rotation) + across * Math.cos(box.rotation),
+    radius: 0.2,
+  });
+  assert.equal(circleOrientedBoxHit(localToWorld(3.5, 0.2), box), true);
+  assert.equal(circleOrientedBoxHit(localToWorld(0, 0.8), box), false);
+
+  const world = createEntityWorld({ capacities: { player: 1, enemyHazard: 1 } });
+  world.spawn('player', {
+    ...localToWorld(3.5, 0.2), hp: 3, maxHp: 3, team: 1, collidable: true,
+  });
+  world.spawn('enemyHazard', {
+    ...box, radius: 0.3, team: 2, damage: 0.7,
+    collidable: true, contactDamaging: true,
+  });
+  const hits = [];
+  resolveCollisions(world, { damageHull(amount) { hits.push(amount); return true; } }, 1 / 60, createEvents());
+  assert.deepEqual(hits, [0.7]);
+  world.dispose();
 });
 
 test('friendly and enemy projectiles use their full fixed-step sweep without duplicate hits', () => {

@@ -22,6 +22,35 @@ function overlapsWithRadius(left, right, rightRadius) {
   return (left.x - right.x) ** 2 + (left.y - right.y) ** 2 <= radius ** 2 + EPSILON;
 }
 
+export function circleOrientedBoxHit(circle, box) {
+  const circleX = Number(circle?.x);
+  const circleY = Number(circle?.y);
+  const boxX = Number(box?.x);
+  const boxY = Number(box?.y);
+  const rotation = finite(box?.rotation);
+  const halfWidth = Math.max(0, finite(box?.scaleX, 1) * 0.5);
+  const halfHeight = Math.max(0, finite(box?.scaleY, 1) * 0.5);
+  const radius = Math.max(0, finite(circle?.radius, 0.5));
+  if (![circleX, circleY, boxX, boxY, rotation, halfWidth, halfHeight, radius].every(Number.isFinite)) {
+    return false;
+  }
+  const dx = circleX - boxX;
+  const dy = circleY - boxY;
+  const cosine = Math.cos(rotation);
+  const sine = Math.sin(rotation);
+  const localX = dx * cosine + dy * sine;
+  const localY = -dx * sine + dy * cosine;
+  const nearestX = clamp(localX, -halfWidth, halfWidth);
+  const nearestY = clamp(localY, -halfHeight, halfHeight);
+  return (localX - nearestX) ** 2 + (localY - nearestY) ** 2 <= radius ** 2 + EPSILON;
+}
+
+function playerOverlapsHazard(player, hazard) {
+  return hazard.variant === 'oriented-box'
+    ? circleOrientedBoxHit(player, hazard)
+    : overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard));
+}
+
 export function sweptCircleHit(projectile, target) {
   const startX = Number(projectile?.previousX);
   const startY = Number(projectile?.previousY);
@@ -333,7 +362,8 @@ export function createCollisionSystem({
       }
       if (candidateCount === 0) continue;
       const configuredBudget = Math.trunc(finite(projectile.hitBudgetRemaining));
-      let remaining = Math.max(1, Math.min(5, configuredBudget > 0
+      const maximumHitBudget = projectile.type === 'tide-lance' ? 16 : 5;
+      let remaining = Math.max(1, Math.min(maximumHitBudget, configuredBudget > 0
         ? configuredBudget
         : 1 + Math.max(0, Math.trunc(finite(projectile.pierceCount)))));
       const hitTargets = [
@@ -449,7 +479,7 @@ export function createCollisionSystem({
     for (let index = 0; index < objectives.length; index += 1) {
       const hazard = world.readInto(objectives.at(index), objectiveRead);
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
-      if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
+      if (!playerOverlapsHazard(player, hazard)) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;
@@ -464,7 +494,7 @@ export function createCollisionSystem({
     for (let index = 0; index < hazards.length; index += 1) {
       const hazard = world.readInto(hazards.at(index), hazardRead);
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2 || hazard.hitCooldown > 0) continue;
-      if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
+      if (!playerOverlapsHazard(player, hazard)) continue;
       if (perfectAvailable) {
         applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;

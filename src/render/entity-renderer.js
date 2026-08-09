@@ -247,6 +247,51 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       hiddenMatrix,
     });
   }
+  const hazardBoxGeometry = new THREE.PlaneGeometry(1, 1);
+  const hazardBoxMaterial = createMaterial('enemyHazard', quality);
+  hazardBoxGeometry.userData.entityRendererOwned = true;
+  hazardBoxMaterial.userData.entityRendererOwned = true;
+  geometries.add(hazardBoxGeometry);
+  materials.add(hazardBoxMaterial);
+  const hazardBoxObject = new THREE.InstancedMesh(
+    hazardBoxGeometry,
+    hazardBoxMaterial,
+    resolvedCapacities.enemyHazard,
+  );
+  hazardBoxObject.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  hazardBoxObject.instanceColor = new THREE.InstancedBufferAttribute(
+    new Float32Array(resolvedCapacities.enemyHazard * 3),
+    3,
+  );
+  hazardBoxObject.instanceColor.setUsage(THREE.DynamicDrawUsage);
+  for (let slot = 0; slot < resolvedCapacities.enemyHazard; slot += 1) {
+    hazardBoxObject.setMatrixAt(slot, hiddenMatrix);
+  }
+  hazardBoxObject.count = 0;
+  hazardBoxObject.name = 'entity-enemyHazard-oriented-box';
+  hazardBoxObject.userData.entityKind = 'enemyHazard';
+  hazardBoxObject.userData.entityShape = 'oriented-box';
+  hazardBoxObject.frustumCulled = false;
+  hazardBoxObject.renderOrder = 10;
+  root.add(hazardBoxObject);
+  const hazardBoxPool = Object.freeze({
+    kind: 'enemyHazard',
+    shape: 'oriented-box',
+    capacity: resolvedCapacities.enemyHazard,
+    geometry: hazardBoxGeometry,
+    material: hazardBoxMaterial,
+    object: hazardBoxObject,
+    instanceMatrix: hazardBoxObject.instanceMatrix,
+    instanceMatrixArray: hazardBoxObject.instanceMatrix.array,
+    instanceColor: hazardBoxObject.instanceColor,
+    instanceColorArray: hazardBoxObject.instanceColor.array,
+    positionAttribute: null,
+    positionArray: null,
+    colorAttribute: null,
+    colorArray: null,
+    readTarget: createEntityReadTarget(),
+  });
+  const renderPools = [...ENTITY_KINDS.map((kind) => pools[kind]), hazardBoxPool];
 
   let disposed = false;
   let active = 0;
@@ -312,7 +357,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     }
   }
 
-  function syncInstanced(pool, query, world, alpha) {
+  function syncInstanced(pool, query, world, alpha, shapeFilter = null) {
     const { object, capacity } = pool;
     const candidateCount = Math.min(query.length, capacity);
     if (candidateCount === 0) {
@@ -323,6 +368,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     for (let index = 0; index < candidateCount; index += 1) {
       const entity = world.readInto(query.at(index), pool.readTarget);
       if (!entity || (entity.flags & ENTITY_FLAG_HIDDEN) !== 0) continue;
+      if (shapeFilter === 'oriented-box' && entity.variant !== 'oriented-box') continue;
+      if (shapeFilter === 'circle' && entity.variant === 'oriented-box') continue;
       const x = interpolate(entity.previousX, entity.x, alpha);
       const y = interpolate(entity.previousY, entity.y, alpha);
       const z = interpolate(entity.previousZ, entity.z, alpha);
@@ -339,7 +386,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         previousRotation,
       );
       const rotation = previousRotation * (1 - alpha) + currentRotation * alpha;
-      const hazardFootprint = pool.kind === 'enemyHazard'
+      const orientedBox = pool.kind === 'enemyHazard' && pool.shape === 'oriented-box';
+      const hazardFootprint = pool.kind === 'enemyHazard' && !orientedBox
         ? getAuthoritativeContactRadius(entity)
         : 0;
       const scale = pool.kind === 'enemyHazard'
@@ -348,8 +396,12 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       const baseSize = BASE_SIZES[pool.kind];
       scratch.position.set(x, y, z);
       scratch.rotation.set(0, 0, rotation);
-      const authoritativeScaleX = pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleX;
-      const authoritativeScaleY = pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleY;
+      const authoritativeScaleX = orientedBox
+        ? entity.scaleX
+        : pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleX;
+      const authoritativeScaleY = orientedBox
+        ? entity.scaleY
+        : pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleY;
       const renderedScaleX = clampFinite(authoritativeScaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       const renderedScaleY = clampFinite(authoritativeScaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       scratch.scale.set(
@@ -362,7 +414,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS[pool.kind]);
       setColorComponents(object.instanceColor.array, count * 3, color);
       if (pool.kind === 'enemy' && entity.role) observedEnemyRoles.add(entity.role);
-      if (pool.kind === 'enemyHazard') {
+      if (pool.kind === 'enemyHazard' && !orientedBox) {
         if (entity.type === 'lancer-beam-node') recordLancerNode(entity, renderedScaleX);
         if (entity.role === 'warden-gap') wardenGapRenderedRadius = Math.max(wardenGapRenderedRadius, renderedScaleX);
         else if (entity.role === 'warden-wall') wardenWallRenderedRadius = Math.max(wardenWallRenderedRadius, renderedScaleX);
@@ -477,8 +529,11 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         ? syncWarnings(pool, query, world, alpha)
         : PROJECTILE_KINDS.has(kind)
           ? syncPoints(pool, query, world, alpha)
-          : syncInstanced(pool, query, world, alpha);
+          : syncInstanced(pool, query, world, alpha, kind === 'enemyHazard' ? 'circle' : null);
       nextActive += rendered;
+      if (kind === 'enemyHazard') {
+        nextActive += syncInstanced(hazardBoxPool, query, world, alpha, 'oriented-box');
+      }
       if (query.length > pool.capacity) clippedEntities += query.length - pool.capacity;
     }
     worldWarningCount = world.query('warning').length;
@@ -521,8 +576,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       scale: { x: 1, y: 1, z: 1 },
     });
 
-    for (const kind of ENTITY_KINDS) {
-      const pool = pools[kind];
+    for (const pool of renderPools) {
+      const kind = pool.kind;
       const { object, geometry, material, capacity } = pool;
       if (object.parent !== root) {
         root.add(object);
@@ -625,7 +680,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       }
     }
 
-    const ownedObjects = new Set(ENTITY_KINDS.map((kind) => pools[kind].object));
+    const ownedObjects = new Set(renderPools.map((pool) => pool.object));
     for (let index = root.children.length - 1; index >= 0; index -= 1) {
       if (!ownedObjects.has(root.children[index])) {
         root.remove(root.children[index]);
@@ -638,8 +693,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function reset() {
     if (disposed) return false;
     recoverCorruption();
-    for (const kind of ENTITY_KINDS) {
-      const pool = pools[kind];
+    for (const pool of renderPools) {
+      const kind = pool.kind;
       if (kind === INDEPENDENT_WARNING_KIND) {
         for (let slot = 0; slot < pool.capacity; slot += 1) {
           pool.warningMeshes[slot].visible = false;
@@ -691,8 +746,8 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   function dispose() {
     if (disposed) return false;
     disposed = true;
-    for (const kind of ENTITY_KINDS) {
-      const object = pools[kind].object;
+    for (const pool of renderPools) {
+      const object = pool.object;
       object.removeFromParent();
       object.dispose?.();
     }
@@ -710,7 +765,9 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       const pool = pools[kind];
       const count = kind === INDEPENDENT_WARNING_KIND
         ? pool.visibleCount
-        : PROJECTILE_KINDS.has(kind) ? pool.geometry.drawRange.count : pool.object.count;
+        : PROJECTILE_KINDS.has(kind) ? pool.geometry.drawRange.count
+          : kind === 'enemyHazard' ? pool.object.count + hazardBoxPool.object.count
+            : pool.object.count;
       poolStats[kind] = Object.freeze({
         capacity: pool.capacity,
         count: Number.isFinite(count) ? count : 0,
@@ -748,7 +805,7 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         maxHiddenActiveWarnings,
       }),
       ownership: Object.freeze({
-        objects: ENTITY_KINDS.length + 1 + (pools.warning?.capacity ?? 0),
+        objects: renderPools.length + 1 + (pools.warning?.capacity ?? 0),
         geometries: geometries.size,
         materials: materials.size,
       }),

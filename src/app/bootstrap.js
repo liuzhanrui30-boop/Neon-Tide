@@ -60,7 +60,6 @@ export function bootstrapNeonTide(options = {}) {
   const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
   const compatibilityTestMode = import.meta.env.DEV && searchParams.has('compatibility-test');
   const campaignTestMode = import.meta.env.DEV && searchParams.has('campaign-test');
-  const bossTestMode = import.meta.env.DEV && searchParams.has('boss-test');
   const campaignRouting = import.meta.env.PROD || campaignTestMode;
   const initialRouteKind = compatibilityTestMode
     ? 'compatibility'
@@ -359,109 +358,6 @@ export function bootstrapNeonTide(options = {}) {
     });
   }
 
-  function createBossTestAuthority() {
-    if (!bossTestMode) return null;
-    const localEvents = { input: [], emit: events.emit };
-    function playerId() {
-      const id = world.query('player').at(0);
-      if (!Number.isSafeInteger(id)) throw new Error('Boss test requires a live player');
-      return id;
-    }
-    function manualStep(x, y, dt = 0.25) {
-      const id = playerId();
-      const player = world.get(id);
-      world.write(id, { previousX: player.x, previousY: player.y, x, y });
-      return session.updateRoom({
-        world,
-        player: world.get(id),
-        damageRecords: [],
-        presentationPending: 0,
-      }, dt, localEvents);
-    }
-    function runRoute(kind, steps = 120) {
-      loop.pause(performance.now());
-      try {
-        const points = [[8, 0], [0, 0], [-7, 3], [1, -1], [7, -3], [0, 0]];
-        const count = Math.max(1, Math.min(600, Math.trunc(Number(steps) || 1)));
-        for (let index = 0; index < count && session.getMode() === 'playing'; index += 1) {
-          if (kind === 'circle') {
-            const angle = index * 0.08;
-            manualStep(Math.cos(angle) * 9, Math.sin(angle) * 5.4, 0.1);
-          } else {
-            const [x, y] = points[index % points.length];
-            manualStep(x, y, 0.25);
-          }
-          if (kind === 'circle'
-            && (session.getEncounterSnapshot().bossBehavior?.orbitCounterTriggers ?? 0) > 0) break;
-        }
-        return session.getEncounterSnapshot().bossBehavior;
-      } finally {
-        loop.resume(performance.now());
-      }
-    }
-    function collideWithTargets(targetIds) {
-      const id = playerId();
-      loop.pause(performance.now());
-      try {
-        const activeTargets = targetIds.map((targetId) => world.get(targetId)).filter(Boolean);
-        for (const target of activeTargets) world.spawn('friendlyProjectile', {
-          x: target.x,
-          y: target.y,
-          previousX: target.x - 0.1,
-          previousY: target.y,
-          vx: 1,
-          vy: 0,
-          damage: target.maxHp + 1,
-          lifetime: 1,
-          radius: 0.2,
-          targetId: target.id,
-          ownerId: id,
-          ownerKind: 'player',
-          team: 1,
-          weaponId: 'pulse-cannon',
-          type: 'boss-test-round',
-          hitBudgetRemaining: 1,
-          weakPointMultiplier: 1,
-          collidable: true,
-          color: 0x64f5ff,
-        });
-        const summary = collisionSystem.resolve(world, session, STEP_SECONDS, events, session.getBuildStats());
-        session.updateRoom({
-          world,
-          player: world.get(id),
-          damageRecords: summary.damageRecords,
-          presentationPending: 0,
-        }, STEP_SECONDS, localEvents);
-        return Object.freeze({ summary, encounter: session.getEncounterSnapshot() });
-      } finally {
-        loop.resume(performance.now());
-      }
-    }
-    return Object.freeze({
-      runCircle(steps = 240) { return runRoute('circle', steps); },
-      runVaried(steps = 90) { return runRoute('varied', steps); },
-      strikeOrgans() {
-        const boss = session.getEncounterSnapshot().bossBehavior;
-        manualStep(boss.arenaCenter.x, boss.arenaCenter.y, STEP_SECONDS);
-        return collideWithTargets(boss.parts.organs.filter(({ destroyed }) => !destroyed).map(({ entityId }) => entityId));
-      },
-      strikeCore() {
-        const boss = session.getEncounterSnapshot().bossBehavior;
-        return collideWithTargets([boss.parts.body.entityId]);
-      },
-      settle() {
-        const id = playerId();
-        loop.pause(performance.now());
-        try {
-          session.updateRoom({ world, player: world.get(id), damageRecords: [], presentationPending: 0 }, STEP_SECONDS, localEvents);
-          return session.snapshot();
-        } finally {
-          loop.resume(performance.now());
-        }
-      },
-    });
-  }
-
   function dispose() {
     if (disposed) return false;
     disposed = true;
@@ -479,7 +375,6 @@ export function bootstrapNeonTide(options = {}) {
     return true;
   }
 
-  const bossTestAuthority = createBossTestAuthority();
   const app = Object.freeze({
     session,
     loop,
@@ -498,7 +393,6 @@ export function bootstrapNeonTide(options = {}) {
     objectiveBridge,
     presentationEvents,
     ...(campaignTestAuthority?.completeCurrentNode ? { campaignTest: campaignTestAuthority } : {}),
-    ...(bossTestAuthority ? { bossTest: bossTestAuthority } : {}),
     dispose,
     getDebugSnapshot,
     getReleaseProbe,

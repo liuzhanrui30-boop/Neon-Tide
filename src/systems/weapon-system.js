@@ -316,6 +316,8 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
   let lastTargetId = null;
   let wasBuffed = false;
   let lastBuildStats = null;
+  let lastLanceSequence = 0;
+  let lanceShots = 0;
 
   function collectCandidates(world, playerTeam) {
     let count = 0;
@@ -507,6 +509,55 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     return true;
   }
 
+  function spawnTideLance(world, player, candidateCount, buildStats, events) {
+    if (player.attackKind !== 'tide-lance' || player.sequence === lastLanceSequence) return 0;
+    lastLanceSequence = player.sequence;
+    const spec = deriveTideLanceSpec(buildStats ?? {});
+    const line = selectTideLanceLine(
+      player,
+      candidates.slice(0, candidateCount),
+      [],
+      spec,
+    );
+    const id = world.spawn('friendlyProjectile', {
+      x: player.x + line.directionX * spec.length,
+      y: player.y + line.directionY * spec.length,
+      previousX: player.x,
+      previousY: player.y,
+      vx: 0,
+      vy: 0,
+      damage: 3.2 * spec.damageMultiplier,
+      lifetime: 0.05,
+      radius: spec.halfWidth,
+      ownerId: player.id,
+      ownerKind: 'player',
+      team: player.team || 1,
+      weaponId: 'tide-lance',
+      type: 'tide-lance',
+      piercing: true,
+      pierceCount: Math.max(0, spec.hitCap - 1),
+      hitBudgetRemaining: spec.hitCap,
+      weakPointMultiplier: spec.weakPointMultiplier,
+      objectiveDamageMultiplier: spec.objectiveMultiplier,
+      collidable: true,
+      color: 0xe7ffff,
+      sequence: ++sequence,
+    });
+    if (id == null) {
+      rejectedShots += 1;
+      return 0;
+    }
+    lanceShots += 1;
+    shotsFired += 1;
+    events?.emit?.('weaponFire', Object.freeze({
+      total: 1,
+      targetId: line.targetIds[0] ?? null,
+      buffed: false,
+      counts: Object.freeze({ 'tide-lance': 1 }),
+    }));
+    return 1;
+  }
+
   function update(world, playerId, dt, events = null, buildStats = null) {
     if (!world?.query || !world?.readInto || !world?.spawn) throw new TypeError('EntityWorld is required');
     if (!Number.isFinite(dt) || dt <= 0) throw new TypeError('weapon dt must be positive and finite');
@@ -520,6 +571,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     else clearDrones(world);
     lastBuildStats = buildStats ?? null;
     const candidateCount = collectCandidates(world, player.team);
+    const lanceFired = spawnTideLance(world, player, candidateCount, buildStats, events);
     const target = candidateCount > 0
       ? selectAutoTarget(player, candidates, {
         maxCandidates: candidateCapacity,
@@ -584,7 +636,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       if (accepted) fireEvents += 1;
     }
     updates += 1;
-    return Object.freeze({ fired: total, targetId: target?.id ?? null, buffed });
+    return Object.freeze({ fired: total + lanceFired, targetId: target?.id ?? null, buffed });
   }
 
   function reset() {
@@ -595,6 +647,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     lastTargetId = null;
     wasBuffed = false;
     lastBuildStats = null;
+    lastLanceSequence = 0;
     return true;
   }
 
@@ -605,6 +658,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       rejectedShots,
       fireEvents,
       lastTargetId,
+      lanceShots,
       cooldowns: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, timers[index]]))),
       droneIds: Object.freeze([...droneIds]),
       shotsByWeapon: Object.freeze(Object.fromEntries(WEAPON_IDS.map((id, index) => [id, weaponShotCounts[index]]))),

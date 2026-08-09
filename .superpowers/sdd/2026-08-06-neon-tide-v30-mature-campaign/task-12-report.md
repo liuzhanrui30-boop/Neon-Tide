@@ -1,10 +1,11 @@
 # Task 12 report — Abyss chapter and Abyss Maw vertical slice
 
 ## Status
-DONE — the first complete campaign chapter now has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure, real pooled attacks, collision-based weak-point destruction, deterministic cleanup, Standard retry behavior, and browser acceptance.
+DONE FOR REVIEW — the first complete campaign chapter has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure, real pooled attacks, collision-based weak-point destruction, deterministic cleanup, and Standard retry behavior. The full deterministic suite and production build pass; the final browser rerun is explicitly pending because the isolated local Chrome CDP transport timed out.
 
 ## Commit
-- `feat: add Abyss chapter and Maw boss` (this task's single commit)
+- `f7fe820 feat: add Abyss chapter and Maw boss`
+- `fix: harden Abyss Maw runtime contracts` (review-fix commit)
 
 ## Delivered
 
@@ -49,7 +50,15 @@ DONE — the first complete campaign chapter now has authored room pacing, a fou
 - Standard death in chapter zero, where no legal persistent chapter-entry checkpoint exists yet, reconstructs the exact chapter-entry state: selected starter retained, no chapter-earned offer/upgrades, route index zero, clean stats, and no fake midpoint save.
 - Existing later Standard checkpoints still restore normally; Abyss full-restart semantics are unchanged.
 - Old encounter directors are cleaned before session restore/start/reset so Boss-owned entities and presentation layers cannot survive a retry.
-- Added a development-only `?boss-test` browser authority for deterministic movement and collision acceptance. Production exposes no `bossTest` capability.
+- Removed the former `?boss-test` debug authority entirely. Browser coverage now drives the ship with real keyboard events, uses the real movement/physics path, and fires the real Tide Lance input; production and development expose no `bossTest` capability.
+
+### Review hardening
+- Route breaks now require natural 60 Hz movement from an armed outer radius through the inner radius. Teleport-sized samples reset progress, and a legal fixed orbit still triggers active damaging counters without advancing the Boss.
+- Boss warnings, rendering, and collision share the same oriented-box dimensions and rotation for tentacle, bite, and suction-current geometry.
+- Tide Lance is a real swept `friendlyProjectile` with bounded EntityWorld damage and the same authoritative reach, width, and hit budget as selection; no browser-only kill bullets remain.
+- Boss-owned enemies, hazards, warnings, projectiles, and parts have explicit ownership sets and a single Boss writer. Generic enemy/projectile systems skip them, while cleanup and hot snapshots avoid pool-wide ownership scans.
+- Authored beat timing now scales with `durationScale`; failed Boss part spawns retry and fail closed; reported spawn/attack counts reflect successful allocations only.
+- Standard/Abyss recovery, variant, telegraph-floor, jelly, suction, and orbit-counter behavior is contract-driven. Public Boss objectives are deeply frozen detached snapshots.
 
 ### Inherited regression maintenance
 - Restored the menu's explicit “潮汐光矛 / 坚持 100 秒” briefing language.
@@ -62,34 +71,26 @@ DONE — the first complete campaign chapter now has authored room pacing, a fou
 - Refactor phase: kept `ObjectiveSystem` as a discriminator/consumer rather than a second Boss writer, gated Maw by campaign provenance, preserved compatibility routes, bounded all Boss entities, and made cleanup generation-safe and idempotent.
 
 ## Verification
-All commands used Node `22.14.0`.
+All final deterministic commands used Node `22.14.0`.
 
-- Final `npm run check` — PASS:
-  - `291/291` Node tests
+- `npm test` — PASS: `302/302`.
+- `npm run build` — PASS:
   - minified production build
-  - unminified production build and entry-size assertion
-- Focused gameplay/campaign/objective/collision suite — PASS: `146/146`.
-- Focused Task 12 suite — PASS: `11/11`.
-- New headful browser acceptance — PASS: `2/2`:
-  - fixed orbit rejected, visible counter emitted, varied route accepted, organs/core destroyed through real collision, natural campaign settlement, zero Boss-owned entities after cleanup
-  - Standard death at Maw reconstructs the clean Abyss chapter entry with no checkpoint
-- Browser regression coverage:
-  - shared isolated-Chrome run passed scenarios `1–28/39`
-  - after correcting three stale inherited assertions, scenarios `29–39` all passed in focused runs
-  - all 39 registered scenarios therefore have current-code passing coverage; no final monolithic rerun is claimed
-- Breakpoint cleanup failure-path self-test — PASS: `1/1`.
-- Production preview probe — PASS: `1/1`; stable split chunks load, campaign settlement stays private, and `campaignTest`/`bossTest` are absent.
+  - unminified production build
+  - entry-size assertion (`31,065` bytes, limit `500,000`)
+- `node --check tests/browser/v3-abyss.mjs` — PASS.
 - `git diff --check` — PASS.
-- Existing live game on `127.0.0.1:4173` and its Chrome/CDP session were not touched. Verification used temporary Vite `44132`, preview `44133`, and isolated Chrome CDP `9452`.
+- Browser acceptance used temporary Vite `4174` and isolated **headful** Chrome `146` on CDP `9337`. A real-keyboard run reached Maw and completed both the fixed-orbit and natural-route sections. After tightening the test to use long key holds with in-page RAF polling, the final full rerun was not completed because Chrome intermittently returned `Input.dispatchKeyEvent timed out`. No browser PASS is claimed for this review fix; an independent rerun is required.
+- Temporary `4174`/`9337` processes were stopped. Existing `127.0.0.1:4173` and CDP `9333` were not touched.
 
 ### Final production chunks
-- Main entry: `15.39 kB` minified / `5.76 kB` gzip.
-- Gameplay core: `200.19 kB` / `63.72 kB` gzip.
+- Main entry: `15.33 kB` minified / `5.74 kB` gzip.
+- Gameplay core: `206.03 kB` / `65.49 kB` gzip.
 - Legacy runtime: `174.90 kB` / `55.53 kB` gzip.
-- Render core: `19.24 kB` / `7.06 kB` gzip.
+- Render core: `20.47 kB` / `7.39 kB` gzip.
 - Three.js vendor: `525.56 kB` / `132.54 kB` gzip.
 - Deferred non-Abyss chapter chunks: `0.28–0.29 kB` / `0.22 kB` gzip.
-- Unminified main entry: `31,245` bytes, below the enforced `500,000`-byte ceiling.
+- Unminified main entry: `31,065` bytes, below the enforced `500,000`-byte ceiling.
 
 ## Remaining concern
 - Vite's existing size warning still applies only to the separately cached Three.js vendor chunk. The application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.

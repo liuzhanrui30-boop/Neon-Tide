@@ -104,3 +104,30 @@ test('the second real room keeps learned roles and introduces Mine at the author
   assert.ok(director.getSnapshot().chapterPacing.routeChangesCommitted >= 1);
   world.dispose();
 });
+
+test('durationScale compresses authored Abyss beat times together with the room contract', () => {
+  const campaign = createCampaign(3103, 'standard');
+  const node = campaign.route[0];
+  const director = createEncounterDirector({
+    seed: campaign.seed,
+    mode: campaign.mode,
+    pressure: campaign.pressure,
+    durationScale: 0.1,
+  });
+  director.startRoom(getEncounterTemplate(node.objectiveTemplate), {
+    chapterIndex: node.chapterIndex,
+    timing: { kind: node.kind, targetDurationSeconds: node.targetDurationSeconds },
+    campaign: { chapterId: node.chapterId, nodeId: node.id, roomIndex: node.roomIndex },
+  });
+  const world = createEntityWorld();
+  const playerId = world.spawn('player', {
+    x: 0, y: 0, hp: 3, maxHp: 3, radius: 0.4, team: 1, collidable: true,
+  });
+  const events = { emit() {}, input: [] };
+  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 0.19, events);
+  assert.equal(director.getSnapshot().threatState.rolesSeen.includes('hunter'), false);
+  director.update({ world, player: world.get(playerId), presentationPending: 1 }, 0.02, events);
+  assert.equal(director.getSnapshot().threatState.rolesSeen.includes('hunter'), true);
+  assert.equal(director.getSnapshot().chapterPacing.nextBeatIndex, 2);
+  world.dispose();
+});

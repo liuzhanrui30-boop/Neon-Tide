@@ -825,7 +825,7 @@ export function createEnemySystem({
     const hazards = world.query('enemyHazard');
     for (let index = hazards.length - 1; index >= 0; index -= 1) {
       const hazard = world.readInto(hazards.at(index), auxiliaryRead);
-      if (!hazard) continue;
+      if (!hazard || hazard.ownerKind === 'boss') continue;
       const age = hazard.age + dt;
       if (hazard.lifetime > 0 && age >= hazard.lifetime - EPSILON) {
         world.despawn(hazard.id);
@@ -864,7 +864,7 @@ export function createEnemySystem({
     const initialCount = query.length;
     for (let index = initialCount - 1; index >= 0; index -= 1) {
       const enemy = world.readInto(query.at(index), enemyRead);
-      if (!enemy) continue;
+      if (!enemy || enemy.ownerKind === 'boss') continue;
       if (enemy.hitCooldown > 0) world.write(enemy.id, { hitCooldown: Math.max(0, enemy.hitCooldown - dt) });
       if (enemy.hp <= 0 && !isPendingExecution(enemy)) {
         destroyEnemy(world, enemy, 'damage');
@@ -923,7 +923,11 @@ export function createEnemySystem({
     let removed = 0;
     for (const kind of ['enemy', 'warning', 'enemyHazard', ...(includeProjectiles ? ['enemyProjectile'] : [])]) {
       const query = world.query(kind);
-      for (let index = query.length - 1; index >= 0; index -= 1) if (world.despawn(query.at(index))) removed += 1;
+      for (let index = query.length - 1; index >= 0; index -= 1) {
+        const entity = world.readInto(query.at(index), auxiliaryRead);
+        if (entity?.ownerKind === 'boss') continue;
+        if (entity && world.despawn(entity.id)) removed += 1;
+      }
     }
     cleanupCount += 1;
     return removed;
@@ -944,7 +948,7 @@ export function createEnemySystem({
       const enemies = world.query('enemy');
       for (let index = 0; index < enemies.length; index += 1) {
         const enemy = world.readInto(enemies.at(index), enemyRead);
-        if (enemy?.role) roles[enemy.role] = (roles[enemy.role] ?? 0) + 1;
+        if (enemy?.ownerKind !== 'boss' && enemy?.role) roles[enemy.role] = (roles[enemy.role] ?? 0) + 1;
       }
       activeWarnings = world.query('warning').length;
       activeHazards = world.query('enemyHazard').length;

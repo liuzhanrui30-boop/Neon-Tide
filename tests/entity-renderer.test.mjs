@@ -118,6 +118,34 @@ test('warning and hazard transforms match authoritative footprint dimensions wit
   world.dispose();
 });
 
+test('oriented Boss hazards render with the exact warning rectangle transform', () => {
+  const { world, renderer, root } = createFixture({ warning: 1, enemyHazard: 1 });
+  const footprint = {
+    x: 2.5, y: -1.25, rotation: Math.PI / 5, scaleX: 7.6, scaleY: 0.72,
+  };
+  world.spawn('warning', { ...footprint, opacity: 0.8, collidable: false });
+  world.spawn('enemyHazard', {
+    ...footprint, radius: 0.36, variant: 'oriented-box', collidable: true,
+  });
+  renderer.sync(world, 1);
+  const warning = findKind(root, 'warning').children[0];
+  const hazard = root.children.find((child) => child.userData.entityKind === 'enemyHazard'
+    && child.userData.entityShape === 'oriented-box');
+  assert.ok(hazard?.isInstancedMesh);
+  const matrix = new THREE.Matrix4();
+  const position = new THREE.Vector3();
+  const rotation = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  hazard.getMatrixAt(0, matrix);
+  matrix.decompose(position, rotation, scale);
+  assert.deepEqual(position.toArray(), warning.position.toArray());
+  assert.ok(Math.abs(new THREE.Euler().setFromQuaternion(rotation).z - warning.rotation.z) < 1e-6);
+  assert.ok(Math.abs(scale.x - warning.scale.x) < 1e-6);
+  assert.ok(Math.abs(scale.y - warning.scale.y) < 1e-6);
+  renderer.dispose();
+  world.dispose();
+});
+
 test('Warden, Lancer, Mine, and Bulwark hazards render the same authoritative radius used by collision', () => {
   const cases = [
     { role: 'warden-wall', type: 'warden-wall-node', radius: 0.34, contactRadius: 0.34, scaleX: 8, scaleY: 7 },

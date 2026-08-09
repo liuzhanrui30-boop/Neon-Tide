@@ -63,3 +63,16 @@ test('expired and escaped projectiles are despawned only after traversal', () =>
   assert.equal(result.despawned, 2);
 });
 
+test('generic projectile motion leaves Boss-owned projectiles to the Boss single writer', () => {
+  const world = createEntityWorld({ capacities: { enemyProjectile: 1 } });
+  const id = world.spawn('enemyProjectile', {
+    x: 1, y: 2, previousX: 1, previousY: 2, vx: 8, vy: -3,
+    age: 0.4, lifetime: 3, ownerKind: 'boss', collidable: true,
+  });
+  createProjectileSystem().update(world, 1 / 60);
+  assert.deepEqual(
+    (({ x, y, previousX, previousY, age }) => ({ x, y, previousX, previousY, age }))(world.get(id)),
+    { x: 1, y: 2, previousX: 1, previousY: 2, age: 0.4 },
+  );
+  world.dispose();
+});
