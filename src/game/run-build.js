@@ -4,6 +4,7 @@ import {
   deriveBuildStats,
   deriveUpgradeOfferSeed,
   deserializeUpgradeBuild,
+  serializeUpgradeBuild,
 } from '../systems/upgrade-system.js';
 
 const BUILD_KEYS = new Set(['ownedUpgrades']);
@@ -45,10 +46,28 @@ export function normalizeRunBuild(value) {
   }
 }
 
-/** Persisted v1 checkpoints require the full exact progression schema. */
+/** Persisted v2 checkpoints require the full exact progression schema. */
 export function normalizePersistedRunBuild(value) {
   try {
     return deserializeUpgradeBuild(value);
+  } catch {
+    return null;
+  }
+}
+
+export function migrateLegacyRunBuild(value, roomsCompleted) {
+  if (!isRecord(value) || Object.keys(value).length !== BUILD_KEYS.size
+    || !Object.hasOwn(value, 'ownedUpgrades')) return null;
+  const normalized = normalizeRunBuild(value);
+  if (!normalized) return null;
+  const selectedStacks = normalized.ownedUpgrades.length;
+  if (!Number.isInteger(roomsCompleted) || roomsCompleted < selectedStacks) return null;
+  try {
+    return createUpgradeBuild({
+      ...serializeUpgradeBuild(normalized),
+      offerSequence: selectedStacks,
+      pendingOffer: null,
+    });
   } catch {
     return null;
   }

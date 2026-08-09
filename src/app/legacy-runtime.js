@@ -56,6 +56,10 @@ import {
 } from "../systems/weapon-system.js";
 import { UPGRADES as V3_UPGRADES } from "../content/upgrades.js";
 import {
+  COMPATIBILITY_BOSS_TEMPLATE_ID,
+  roomRequestForRunRoute,
+} from "../game/run-route.js";
+import {
   createUpgradeBuild,
   getUpgradeById,
 } from "../systems/upgrade-system.js";
@@ -2313,15 +2317,14 @@ function startGame() {
   const resumable = session.snapshot();
   if (resumable.mode === "briefing" && resumable.runMode) {
     resetState();
-    enterStage(resumable.chapterIndex, false);
+    enterStage(resumable.route?.realmIndex ?? resumable.chapterIndex, false);
     pendingTransitionPayload = { resumedCheckpoint: true };
     const resumed = resumable.build?.pendingOffer
       ? transitionTo("playing", { resumedCheckpoint: true })
-      : session.startRoom(compatibilityCampaign
-        ? { id: `v2.2-compatibility-chapter-${resumable.chapterIndex}`, compatibility: true, chapterIndex: resumable.chapterIndex }
-        : { campaign: true, chapterIndex: resumable.chapterIndex });
+      : session.startRoom(roomRequestForRunRoute(resumable.route));
     pendingTransitionPayload = null;
     if (resumed) {
+      if (resumable.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) beginBossStage();
       toast("章节信号已恢复", "cyan");
       audio.event("start");
     }
@@ -2460,19 +2463,8 @@ function transitionTo(nextMode, payload = {}) {
   }
   else if (nextMode === "playing" && session.getMode() === "upgrade") {
     const completed = session.snapshot();
-    const completedRooms = completed.stats.roomsStarted;
-    if (completed.room?.compatibility) {
-      changed = session.startRoom({
-        id: `v2.2-compatibility-chapter-${completed.chapterIndex}`,
-        compatibility: true,
-        chapterIndex: completed.chapterIndex,
-      });
-    } else if (completedRooms < 5) {
-      changed = session.startRoom({ campaign: true, chapterIndex: Math.min(3, completedRooms) });
-    } else {
-      changed = session.startRoom({ id: "v2.2-boss-compatibility", compatibility: true, chapterIndex: 3 });
-      if (changed) beginBossStage();
-    }
+    changed = session.startRoom(roomRequestForRunRoute(completed.route));
+    if (changed && completed.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) beginBossStage();
   } else if (nextMode === "upgrade") changed = session.completeRoom({ nextMode: "upgrade", stageIndex: payload.stageIndex });
   else if (nextMode === "gameover") changed = session.completeRoom({ outcome: "defeat", reason: state.terminalReason });
   else if (nextMode === "victory") changed = session.completeRoom({ outcome: "victory", reason: state.terminalReason });

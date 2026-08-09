@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createEventQueue } from '../src/game/events.js';
+import {
+  createCompatibilityRunRoute,
+  createNextStandardRunRoute,
+  roomRequestForRunRoute,
+} from '../src/game/run-route.js';
 import { createGameSession, GAME_SESSION_MODES } from '../src/game/session.js';
 import { createRunSave } from '../src/persistence/run-save.js';
 import {
@@ -70,7 +75,7 @@ test('session locks the public mode vocabulary and valid campaign transitions', 
   const snapshot = session.snapshot();
   assert.equal(snapshot.runMode, 'standard');
   assert.equal(snapshot.seed, 1234);
-  assert.equal(snapshot.chapterIndex, 1);
+  assert.equal(snapshot.chapterIndex, 2);
   assert.equal(snapshot.stats.roomsCompleted, 3);
   assert.equal(events.getStats().emitted > 0, true);
 });
@@ -177,6 +182,45 @@ test('selected checkpoint resumes the same next authored template, chapter, real
     threatBudget: uninterrupted.room.threatBudget,
   });
   assert.equal(resumed.room.templateId, 'moving-sanctum');
+});
+
+test('pending compatibility checkpoint resumes the exact route after selecting an upgrade', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const original = createGameSession({ development: true, runSave, now: () => 777 });
+  original.startRun('standard', 8181);
+  original.startRoom({ id: 'legacy-reef-stage', compatibility: true, chapterIndex: 2 });
+  original.completeRoom({ nextMode: 'upgrade' });
+  const pendingCheckpoint = runSave.load();
+  assert.deepEqual(pendingCheckpoint.route, createCompatibilityRunRoute({
+    roomIndex: 1, chapterIndex: 2, templateId: 'legacy-reef-stage',
+  }));
+
+  const choice = original.snapshot().build.pendingOffer.cards[0];
+  original.selectUpgrade(choice);
+  original.startRoom(roomRequestForRunRoute(original.snapshot().route));
+  const uninterrupted = original.snapshot();
+
+  const restored = createGameSession({ development: true });
+  assert.equal(restored.restoreCheckpoint(pendingCheckpoint), true);
+  assert.deepEqual(restored.snapshot().route, pendingCheckpoint.route);
+  assert.equal(restored.continuePendingOffer(), true);
+  assert.equal(restored.selectUpgrade(choice), true);
+  restored.startRoom(roomRequestForRunRoute(restored.snapshot().route));
+  const resumed = restored.snapshot();
+
+  assert.deepEqual(resumed.route, uninterrupted.route);
+  assert.deepEqual({
+    templateId: resumed.room.templateId,
+    chapterIndex: resumed.chapterIndex,
+    realmIndex: resumed.route.realmIndex,
+    threatBudget: resumed.room.threatBudget,
+  }, {
+    templateId: uninterrupted.room.templateId,
+    chapterIndex: uninterrupted.chapterIndex,
+    realmIndex: uninterrupted.route.realmIndex,
+    threatBudget: uninterrupted.room.threatBudget,
+  });
 });
 
 test('fixed-step objective updates publish bounded session changes rather than every tick', () => {
@@ -298,7 +342,8 @@ test('Standard saves only completed chapter entries and restores that snapshot o
   assert.equal(session.selectUpgrade('repair-swarm'), true);
   assert.equal(session.snapshot().mode, 'upgrade');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed, chapterIndex: 1,
+    version: 2, mode: 'standard', seed, chapterIndex: 1,
+    route: createNextStandardRunRoute(1, seed),
     build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['repair-swarm'], offerSequence: 1 })), hull: 4,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 50 }, savedAt: 1234,
   });
@@ -332,7 +377,8 @@ test('chapter checkpoint is persisted before transition observers can start the 
   assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 1 }), true);
   assert.equal(session.snapshot().mode, 'playing');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed: 12, chapterIndex: 1,
+    version: 2, mode: 'standard', seed: 12, chapterIndex: 1,
+    route: createNextStandardRunRoute(1, 12),
     build: serializeUpgradeBuild(createUpgradeBuild()), hull: 3,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 22,
   });
@@ -349,7 +395,8 @@ test('checkpoint restore and corrupt storage keep session snapshots valid', () =
   assert.equal(session.getPersistenceStatus().corruptions, 1);
 
   assert.equal(runSave.save({
-    version: 1, mode: 'standard', seed: 5, chapterIndex: 2,
+    version: 2, mode: 'standard', seed: 5, chapterIndex: 2,
+    route: createNextStandardRunRoute(2, 5),
     build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['ion-drive'], offerSequence: 1 })), hull: 3,
     stats: { roomsStarted: 2, roomsCompleted: 2, damageTaken: 0, score: 25 }, savedAt: 1,
   }), true);
@@ -368,6 +415,16 @@ test('session validates run modes, seeds, rooms and damage', () => {
   assert.throws(() => session.startRoom(null), /room object/);
   session.startRoom({ id: 'room' });
   assert.throws(() => session.damageHull(-1), /non-negative finite/);
+});
+
+test('huge compatibility chapters fail before mutating the session', () => {
+  const session = createGameSession({ development: true });
+  session.startRun('standard', 3);
+  assert.throws(
+    () => session.startRoom({ id: 'huge-route', compatibility: true, chapterIndex: 999999 }),
+    /outside the campaign/,
+  );
+  assert.equal(session.snapshot().mode, 'briefing');
 });
 
 test('session reports authoritative hull effects and reset effects through onChange', () => {
@@ -554,10 +611,11 @@ test('pending upgrade authority rejects forged, stale, maxed and incompatible ch
   const runSave = createRunSave(storage);
   const session = createGameSession({ development: true, runSave });
   const base = {
-    version: 1,
+    version: 2,
     mode: 'standard',
     seed: 11,
     chapterIndex: 1,
+    route: createNextStandardRunRoute(1, 11),
     hull: 3,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 },
     savedAt: 1,
@@ -640,7 +698,11 @@ test('room repair applies its derived per-stack amount exactly once on successfu
     upgradeStacks: { 'tide-reserve': 2 }, offerSequence: 2,
   }));
   assert.equal(runSave.save({
-    version: 1, mode: 'standard', seed: 91, chapterIndex: 2, build, hull: 3,
+    version: 2, mode: 'standard', seed: 91, chapterIndex: 2,
+    route: createCompatibilityRunRoute({
+      roomIndex: 2, chapterIndex: 2, templateId: 'v2.2-compatibility-chapter-2',
+    }),
+    build, hull: 3,
     stats: { roomsStarted: 2, roomsCompleted: 2, damageTaken: 0, score: 0 }, savedAt: 1,
   }), true);
   const session = createGameSession({ development: true, runSave });

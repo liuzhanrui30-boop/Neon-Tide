@@ -2,6 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRunSave } from '../src/persistence/run-save.js';
 import {
+  createCompatibilityRunRoute,
+  createNextStandardRunRoute,
+} from '../src/game/run-route.js';
+import {
   attachPendingOffer,
   createUpgradeBuild,
   serializeUpgradeBuild,
@@ -15,12 +19,24 @@ class MemoryStorage {
   removeItem(key) { this.#values.delete(key); }
 }
 
+class RejectingRewriteStorage extends MemoryStorage {
+  rejectWrites = false;
+
+  setItem(key, value) {
+    if (this.rejectWrites) throw new Error('replacement rejected');
+    super.setItem(key, value);
+  }
+}
+
 function checkpoint(overrides = {}) {
   return {
-    version: 1,
+    version: 2,
     mode: 'standard',
     seed: 42,
     chapterIndex: 3,
+    route: createCompatibilityRunRoute({
+      roomIndex: 7, chapterIndex: 3, templateId: 'v2.2-boss-compatibility',
+    }),
     build: serializeUpgradeBuild(createUpgradeBuild({
       ownedUpgrades: ['ion-drive'],
       offerSequence: 1,
@@ -41,7 +57,7 @@ test('checkpoint round-trips a cloned, versioned Standard chapter entry', () => 
 
   assert.deepEqual(save.load(), checkpoint());
   assert.deepEqual(save.getStatus(), {
-    key: 'neon-tide:v3:checkpoint', saves: 1, loads: 1, clears: 0,
+    key: 'neon-tide:v3:checkpoint', saves: 1, loads: 1, migrations: 0, clears: 0,
     corruptions: 0, failures: 0, lastError: null, available: true,
   });
 });
@@ -49,7 +65,7 @@ test('checkpoint round-trips a cloned, versioned Standard chapter entry', () => 
 test('checkpoint rejects Abyss saves and corrupt payloads safely', () => {
   const storage = new MemoryStorage();
   const save = createRunSave(storage);
-  assert.equal(save.save({ version: 1, mode: 'abyss' }), false);
+  assert.equal(save.save({ version: 2, mode: 'abyss' }), false);
   storage.setItem('neon-tide:v3:checkpoint', '{broken');
   assert.equal(save.load(), null);
   assert.equal(save.getStatus().corruptions, 1);
@@ -59,10 +75,10 @@ test('checkpoint rejects Abyss saves and corrupt payloads safely', () => {
 test('checkpoint rejects mismatched schemas and storage failures without throwing', () => {
   const storage = new MemoryStorage();
   const save = createRunSave(storage);
-  storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(checkpoint({ version: 2 })));
+  storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(checkpoint({ version: 99 })));
   assert.equal(save.load(), null);
   assert.equal(save.getStatus().corruptions, 1);
-  assert.equal(save.save(checkpoint({ maxHull: 4 })), false, 'v1 rejects unversioned top-level extensions');
+  assert.equal(save.save(checkpoint({ maxHull: 4 })), false, 'v2 rejects unversioned top-level extensions');
   for (const payload of [
     checkpoint({ build: { ownedUpgrades: ['unknown-upgrade'] } }),
     checkpoint({ build: { ownedUpgrades: ['ion-drive', 'ion-drive'] } }),
@@ -71,7 +87,8 @@ test('checkpoint rejects mismatched schemas and storage failures without throwin
     checkpoint({ stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: Number.NaN, score: 0 } }),
     checkpoint({ build: serializeUpgradeBuild(createUpgradeBuild({
       upgradeStacks: { 'ion-drive': 2 }, offerSequence: 0,
-    })), stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0 }),
+    })), stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0,
+    route: createNextStandardRunRoute(0, 42) }),
   ]) assert.equal(save.save(payload), false);
 
 
@@ -98,13 +115,23 @@ test('malicious full-build and progression matrices are rejected and cleared', (
     { ...exact, build: { ...exact.build, injected: true } },
     { ...exact, build: serializeUpgradeBuild(createUpgradeBuild({
       starterWeapon: 'pulse-cannon', offerSequence: 1,
-    })), stats: { ...exact.stats, roomsStarted: 1, roomsCompleted: 1 }, chapterIndex: 1 },
-    { ...exact, build: forgedTwoStacks, stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0 },
+    })), stats: { ...exact.stats, roomsStarted: 1, roomsCompleted: 1 }, chapterIndex: 1,
+    route: createNextStandardRunRoute(1, 42) },
+    { ...exact, build: forgedTwoStacks, stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0,
+      route: createNextStandardRunRoute(0, 42) },
     { ...exact, build: { ...exact.build, offerSequence: 3 } },
     { ...exact, seed: 1, build: serializeUpgradeBuild(attachPendingOffer(createUpgradeBuild(), 123)),
-      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, chapterIndex: 1 },
-    { ...exact, seed: 1, build: pending, stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0 },
+      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, chapterIndex: 1,
+      route: createNextStandardRunRoute(1, 1) },
+    { ...exact, seed: 1, build: pending, stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, chapterIndex: 0,
+      route: createNextStandardRunRoute(0, 1) },
     { ...exact, stats: { ...exact.stats, roomsCompleted: exact.stats.roomsStarted - 1 } },
+    { ...exact, stats: { ...exact.stats, roomsStarted: 999999999999, roomsCompleted: 999999999999 },
+      route: { ...exact.route, roomIndex: 999999999999 } },
+    { ...exact, chapterIndex: 999999 },
+    { ...exact, route: { ...exact.route, kind: 'authored' } },
+    { ...exact, route: { ...exact.route, chapterIndex: 2 } },
+    { ...exact, route: { ...exact.route, templateId: 'moving-sanctum' } },
   ];
   for (const payload of payloads) {
     const storage = new MemoryStorage();
@@ -113,5 +140,108 @@ test('malicious full-build and progression matrices are rejected and cleared', (
     assert.equal(save.load(), null);
     assert.equal(storage.getItem('neon-tide:v3:checkpoint'), null);
     assert.equal(save.getStatus().corruptions, 1);
+  }
+});
+
+test('valid legacy v1 Repair Swarm checkpoints migrate once and rewrite atomically to exact v2', () => {
+  const storage = new MemoryStorage();
+  const legacy = {
+    version: 1,
+    mode: 'standard',
+    seed: 77,
+    chapterIndex: 2,
+    build: { ownedUpgrades: ['repair-swarm'] },
+    hull: 4,
+    stats: { roomsStarted: 3, roomsCompleted: 2, damageTaken: 1, score: 500 },
+    savedAt: 99,
+  };
+  storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(legacy));
+  const save = createRunSave(storage);
+  const migrated = save.load();
+  assert.deepEqual(migrated, {
+    version: 2,
+    mode: 'standard',
+    seed: 77,
+    chapterIndex: 2,
+    route: createCompatibilityRunRoute({
+      roomIndex: 2, chapterIndex: 2, templateId: 'v2.2-compatibility-chapter-2',
+    }),
+    build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['repair-swarm'], offerSequence: 1 })),
+    hull: 4,
+    stats: { roomsStarted: 2, roomsCompleted: 2, damageTaken: 1, score: 500 },
+    savedAt: 99,
+  });
+  assert.deepEqual(JSON.parse(storage.getItem('neon-tide:v3:checkpoint')), migrated);
+  assert.deepEqual(save.load(), migrated);
+  assert.equal(save.getStatus().migrations, 1);
+  assert.equal(save.getStatus().loads, 2);
+});
+
+test('failed legacy replacement leaves the original v1 checkpoint intact for an idempotent retry', () => {
+  const storage = new RejectingRewriteStorage();
+  const legacy = {
+    version: 1, mode: 'standard', seed: 7, chapterIndex: 1,
+    build: { ownedUpgrades: ['repair-swarm'] }, hull: 4,
+    stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 10 }, savedAt: 8,
+  };
+  const raw = JSON.stringify(legacy);
+  storage.setItem('neon-tide:v3:checkpoint', raw);
+  storage.rejectWrites = true;
+  const save = createRunSave(storage);
+  assert.equal(save.load(), null);
+  assert.equal(storage.getItem('neon-tide:v3:checkpoint'), raw);
+  assert.deepEqual({
+    failures: save.getStatus().failures,
+    corruptions: save.getStatus().corruptions,
+    migrations: save.getStatus().migrations,
+  }, { failures: 1, corruptions: 0, migrations: 0 });
+
+  storage.rejectWrites = false;
+  const migrated = save.load();
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.build.upgradeStacks['repair-swarm'], 1);
+  assert.equal(save.getStatus().migrations, 1);
+});
+
+test('unknown and malformed legacy v1 checkpoints are cleared instead of migrated', () => {
+  for (const build of [
+    { ownedUpgrades: ['unknown-upgrade'] },
+    { ownedUpgrades: ['repair-swarm', 'repair-swarm'] },
+    { ownedUpgrades: 'repair-swarm' },
+  ]) {
+    const storage = new MemoryStorage();
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify({
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 1, build, hull: 4,
+      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1,
+    }));
+    const save = createRunSave(storage);
+    assert.equal(save.load(), null);
+    assert.equal(storage.getItem('neon-tide:v3:checkpoint'), null);
+    assert.equal(save.getStatus().corruptions, 1);
+    assert.equal(save.getStatus().migrations, 0);
+  }
+
+  for (const legacy of [
+    {
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 999999,
+      build: { ownedUpgrades: [] }, hull: 3,
+      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1,
+    },
+    {
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 1,
+      build: { ownedUpgrades: ['repair-swarm'] }, hull: 4,
+      stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, savedAt: 1,
+    },
+    {
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 1,
+      build: serializeUpgradeBuild(createUpgradeBuild()), hull: 3,
+      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1,
+    },
+  ]) {
+    const storage = new MemoryStorage();
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(legacy));
+    const save = createRunSave(storage);
+    assert.equal(save.load(), null);
+    assert.equal(storage.getItem('neon-tide:v3:checkpoint'), null);
   }
 });

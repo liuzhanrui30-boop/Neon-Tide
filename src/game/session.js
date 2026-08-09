@@ -9,6 +9,14 @@ import {
   getCampaignEncounter,
   getEncounterTemplate,
 } from '../content/encounters.js';
+import {
+  COMPATIBILITY_BOSS_TEMPLATE_ID,
+  MAX_CAMPAIGN_CHAPTER_INDEX,
+  createAuthoredRunRoute,
+  createCompatibilityRunRoute,
+  createNextStandardRunRoute,
+  normalizeRunRoute,
+} from './run-route.js';
 import { createEncounterDirector } from '../systems/encounter-director.js';
 import {
   applyUpgradeChoice,
@@ -31,6 +39,7 @@ export const GAME_SESSION_MODES = Object.freeze([
 
 const RUN_MODES = new Set(['standard', 'abyss']);
 const MODE_SET = new Set(GAME_SESSION_MODES);
+const MAX_SESSION_STAT = 1_000_000_000;
 const ALLOWED_TRANSITIONS = Object.freeze({
   menu: new Set(['briefing']),
   briefing: new Set(['playing', 'upgrade', 'menu']),
@@ -68,10 +77,12 @@ function createStats() {
 function isSessionStats(value) {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Number.isInteger(value.roomsStarted) && value.roomsStarted >= 0
+    && value.roomsStarted <= MAX_SESSION_STAT
     && Number.isInteger(value.roomsCompleted) && value.roomsCompleted >= 0
+    && value.roomsCompleted <= MAX_SESSION_STAT
     && value.roomsCompleted <= value.roomsStarted
-    && Number.isFinite(value.damageTaken) && value.damageTaken >= 0 && value.damageTaken <= 1_000_000_000
-    && Number.isFinite(value.score) && value.score >= 0 && value.score <= 1_000_000_000;
+    && Number.isFinite(value.damageTaken) && value.damageTaken >= 0 && value.damageTaken <= MAX_SESSION_STAT
+    && Number.isFinite(value.score) && value.score >= 0 && value.score <= MAX_SESSION_STAT;
 }
 
 export function createGameSession(options = {}) {
@@ -131,6 +142,7 @@ export function createGameSession(options = {}) {
     runMode: null,
     seed: null,
     chapterIndex: 0,
+    route: null,
     room: null,
     build: createUpgradeBuild(),
     hull: baseMaxHull,
@@ -157,6 +169,7 @@ export function createGameSession(options = {}) {
       runMode: state.runMode,
       seed: state.seed,
       chapterIndex: state.chapterIndex,
+      route: cloneFrozen(state.route),
       room: cloneFrozen(state.room),
       build: cloneFrozen(state.build),
       hull: state.hull,
@@ -197,14 +210,13 @@ export function createGameSession(options = {}) {
   function checkpointFromState() {
     const savedAt = now();
     if (!Number.isFinite(savedAt) || savedAt < 0) throw new TypeError('checkpoint clock must return a non-negative finite timestamp');
-    const nextChapterIndex = state.room?.compatibility
-      ? state.chapterIndex
-      : getCampaignChapterIndex(state.stats.roomsStarted);
+    if (!state.route) throw new TypeError('checkpoint route provenance is unavailable');
     return {
-      version: 1,
+      version: 2,
       mode: 'standard',
       seed: state.seed,
-      chapterIndex: nextChapterIndex,
+      chapterIndex: state.route.chapterIndex,
+      route: cloneValue(state.route),
       build: cloneValue(state.build),
       hull: state.hull,
       stats: cloneValue(state.stats),
@@ -226,7 +238,7 @@ export function createGameSession(options = {}) {
 
   function isCheckpoint(checkpoint) {
     return checkpoint
-      && checkpoint.version === 1
+      && checkpoint.version === 2
       && checkpoint.mode === 'standard'
       && Number.isFinite(checkpoint.seed)
       && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
@@ -235,6 +247,11 @@ export function createGameSession(options = {}) {
       && isSessionStats(checkpoint.stats)
       && checkpoint.stats.roomsStarted === checkpoint.stats.roomsCompleted
       && isRunBuildProgressionConsistent(checkpoint.build, checkpoint.stats, checkpoint.seed)
+      && normalizeRunRoute(checkpoint.route, {
+        seed: checkpoint.seed,
+        stats: checkpoint.stats,
+        chapterIndex: checkpoint.chapterIndex,
+      })
       && Number.isFinite(checkpoint.savedAt) && checkpoint.savedAt >= 0;
   }
 
@@ -258,6 +275,11 @@ export function createGameSession(options = {}) {
     state.runMode = 'standard';
     state.seed = checkpoint.seed;
     state.chapterIndex = checkpoint.chapterIndex;
+    state.route = normalizeRunRoute(checkpoint.route, {
+      seed: checkpoint.seed,
+      stats: checkpoint.stats,
+      chapterIndex: checkpoint.chapterIndex,
+    });
     state.room = null;
     assignBuild(normalizedBuild);
     state.maxHull = restoredMaxHull;
@@ -302,6 +324,7 @@ export function createGameSession(options = {}) {
     state.runMode = runMode;
     state.seed = seed;
     state.chapterIndex = 0;
+    state.route = createNextStandardRunRoute(0, seed);
     state.room = null;
     const starterWeapon = state.build?.starterWeapon ?? 'pulse-cannon';
     assignBuild({ starterWeapon });
@@ -338,12 +361,25 @@ export function createGameSession(options = {}) {
       killTarget: 1_000_000,
       timeout: 1_000_000,
     };
-    const encounterChapterIndex = room.campaign === true && !compatibility
-      ? getCampaignChapterIndex(state.stats.roomsStarted)
-      : Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0
+    const encounterChapterIndex = compatibility
+      ? Number.isInteger(room.chapterIndex)
         ? room.chapterIndex
-        : state.chapterIndex;
+        : state.chapterIndex
+      : getCampaignChapterIndex(state.stats.roomsStarted);
+    if (!Number.isInteger(encounterChapterIndex)
+      || encounterChapterIndex < 0
+      || encounterChapterIndex > MAX_CAMPAIGN_CHAPTER_INDEX) {
+      throw new TypeError('room chapter index is outside the campaign');
+    }
     const encounter = encounterDirector.startRoom(compatibilityTemplate, { chapterIndex: encounterChapterIndex });
+    const routeRoomIndex = state.stats.roomsStarted;
+    state.route = compatibility
+      ? createCompatibilityRunRoute({
+        roomIndex: routeRoomIndex,
+        chapterIndex: encounterChapterIndex,
+        templateId: String(room.id ?? `v2.2-compatibility-chapter-${encounterChapterIndex}`),
+      })
+      : createAuthoredRunRoute(routeRoomIndex, state.seed);
     state.room = {
       ...cloneValue(room),
       templateId: authoredTemplate?.id ?? compatibilityTemplate.id,
@@ -419,12 +455,18 @@ export function createGameSession(options = {}) {
     if (!['upgrade', 'chapterComplete', 'victory', 'defeat'].includes(nextMode)) {
       throw new TypeError('room completion nextMode must be upgrade, chapterComplete, victory, or defeat');
     }
+    if (Object.hasOwn(result, 'chapterIndex')
+      && (!Number.isInteger(result.chapterIndex)
+        || result.chapterIndex < 0
+        || result.chapterIndex > MAX_CAMPAIGN_CHAPTER_INDEX)) {
+      throw new TypeError('room completion chapter index is outside the campaign');
+    }
     if (nextMode !== 'defeat') state.stats.roomsCompleted += 1;
     if (nextMode !== 'defeat' && Number.isFinite(result.score)) state.stats.score += result.score;
     if (nextMode !== 'defeat' && cachedBuildStats.roomRepair > 0) {
       state.hull = Math.min(state.maxHull, state.hull + cachedBuildStats.roomRepair);
     }
-    if (Number.isInteger(result.chapterIndex) && result.chapterIndex >= 0) state.chapterIndex = result.chapterIndex;
+    const completedRoute = state.route;
     if (nextMode === 'victory' || nextMode === 'defeat') state.terminalReason = result.reason ?? nextMode;
     if (nextMode === 'defeat') state.hull = 0;
     if (nextMode === 'upgrade') {
@@ -434,6 +476,26 @@ export function createGameSession(options = {}) {
         offerSeed,
         result.rewardKind === 'boss' || result.bossCore ? 'boss' : 'normal',
       ));
+    }
+    if (nextMode === 'upgrade' || nextMode === 'chapterComplete') {
+      if (completedRoute?.kind === 'compatibility') {
+        const nextChapter = Number.isInteger(result.chapterIndex)
+          ? result.chapterIndex
+          : completedRoute.chapterIndex;
+        const templateId = nextChapter === completedRoute.chapterIndex
+          ? completedRoute.templateId
+          : nextChapter === 3 && completedRoute.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID
+            ? COMPATIBILITY_BOSS_TEMPLATE_ID
+            : `v2.2-compatibility-chapter-${nextChapter}`;
+        state.route = createCompatibilityRunRoute({
+          roomIndex: state.stats.roomsStarted,
+          chapterIndex: nextChapter,
+          templateId,
+        });
+      } else {
+        state.route = createNextStandardRunRoute(state.stats.roomsStarted, state.seed);
+      }
+      state.chapterIndex = state.route.chapterIndex;
     }
     let checkpoint = null;
     const changed = transition(
@@ -608,6 +670,7 @@ export function createGameSession(options = {}) {
       runMode: null,
       seed: null,
       chapterIndex: 0,
+      route: null,
       room: null,
       build: createUpgradeBuild(),
       hull: baseMaxHull,

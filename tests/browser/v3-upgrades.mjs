@@ -144,6 +144,7 @@ export const v3UpgradeScenarios = [
       const restoredPending = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session`);
       assert.equal(restoredPending.mode, 'briefing');
       assert.deepEqual(restoredPending.build, pendingBuild);
+      assert.deepEqual(restoredPending.route, skip.session.route);
       await page.trustedClick('#primary-button');
       const continued = await readOffer(page);
       assert.equal(continued.mode, 'upgrade');
@@ -152,7 +153,7 @@ export const v3UpgradeScenarios = [
       await selectUpgrade(page, 'overload-relay');
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().weapons.lastBuildStats?.chainTargets===3`);
       await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;return [...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id)).some((entry)=>entry?.type==='arc-chain'&&entry.chainCount===3&&Math.abs(entry.chainRadius-6.6)<1e-9);})()`, 10_000);
-      const selected = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const debug=api.getDebugSnapshot();const projectiles=[...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id));return {build:debug.session.build,stats:debug.weapons.lastBuildStats,projectiles,focusedCanvas:document.activeElement?.tagName==='CANVAS',events:debug.events,nextRoom:{templateId:debug.session.room?.templateId,chapterIndex:debug.session.chapterIndex,realmIndex:debug.legacy.stageIndex,realm:document.documentElement.dataset.realm,threatBudget:debug.session.room?.threatBudget}};})()`);
+      const selected = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const debug=api.getDebugSnapshot();const projectiles=[...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id));return {build:debug.session.build,stats:debug.weapons.lastBuildStats,projectiles,focusedCanvas:document.activeElement?.tagName==='CANVAS',events:debug.events,nextRoom:{route:debug.session.route,templateId:debug.session.room?.templateId,chapterIndex:debug.session.chapterIndex,realmIndex:debug.legacy.stageIndex,realm:document.documentElement.dataset.realm,threatBudget:debug.session.room?.threatBudget}};})()`);
       assert.equal(selected.build.upgradeStacks['overload-relay'], 1);
       assert.equal(selected.build.pendingOffer, null);
       assert.equal(selected.stats.starterWeapon, 'arc-drones');
@@ -166,6 +167,7 @@ export const v3UpgradeScenarios = [
       const restoredSelected = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session`);
       assert.equal(restoredSelected.mode, 'briefing');
       assert.deepEqual(restoredSelected.build, selectedBuild);
+      assert.deepEqual(restoredSelected.route, selected.nextRoom.route);
       assert.equal(restoredSelected.build.pendingOffer, null);
       await page.startGame();
       await page.waitForPage(`(()=>{const debug=globalThis.__NEON_TIDE_V3__?.getDebugSnapshot?.();return debug?.session?.mode==='playing'&&debug.session.room?.templateId&&Number.isFinite(debug.player?.position?.x)&&debug.weapons?.lastBuildStats;})()`);
@@ -174,6 +176,7 @@ export const v3UpgradeScenarios = [
       assert.equal(resumed.session.mode, 'playing');
       assert.equal(resumed.weapons.lastBuildStats?.starterWeapon ?? 'arc-drones', 'arc-drones');
       assert.deepEqual({
+        route: resumed.session.route,
         templateId: resumed.session.room.templateId,
         chapterIndex: resumed.session.chapterIndex,
         realmIndex: resumed.legacy.stageIndex,

@@ -4,6 +4,46 @@ import { APP_URL, PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_M
 const COMPATIBILITY_URL = new URL('?compatibility-test&objective-seed=1', APP_URL).href;
 const withLegacyPage = (name, options, callback) => withPage(name, { ...options, appUrl: COMPATIBILITY_URL }, callback);
 
+async function legacyRepairSwarmMigrationScenario() {
+  await withLegacyPage('legacy-repair-swarm-migration', {}, async (page) => {
+    await page.evaluate(`localStorage.setItem('neon-tide:v3:checkpoint', JSON.stringify({
+      version:1,
+      mode:'standard',
+      seed:707,
+      chapterIndex:2,
+      build:{ownedUpgrades:['repair-swarm']},
+      hull:4,
+      stats:{roomsStarted:3,roomsCompleted:2,damageTaken:1,score:321},
+      savedAt:9,
+    }))`);
+    await page.reload();
+    const restored = await page.evaluate(`(()=>{
+      const debug=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();
+      return {session:debug.session,persistence:debug.persistence,saved:JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'))};
+    })()`);
+    assert.equal(restored.session.mode, 'briefing');
+    assert.equal(restored.persistence.migrations, 1);
+    assert.equal(restored.saved.version, 2);
+    assert.equal(restored.saved.build.upgradeStacks['repair-swarm'], 1);
+    assert.deepEqual(restored.session.route, {
+      kind: 'compatibility', roomIndex: 2, chapterIndex: 2, realmIndex: 2,
+      templateId: 'v2.2-compatibility-chapter-2',
+    });
+    assert.deepEqual(restored.session.stats, {
+      roomsStarted: 2, roomsCompleted: 2, damageTaken: 1, score: 321,
+    });
+    assert.deepEqual({ hull: restored.session.hull, maxHull: restored.session.maxHull }, { hull: 4, maxHull: 4 });
+
+    await page.trustedClick('#primary-button');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
+    const continued = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.deepEqual(continued.session.route, restored.session.route);
+    assert.equal(continued.session.room.templateId, restored.session.route.templateId);
+    assert.equal(continued.session.chapterIndex, restored.session.route.chapterIndex);
+    assert.equal(continued.legacy.stageIndex, restored.session.route.realmIndex);
+  });
+}
+
 async function desktopCoreScenario() {
   await withLegacyPage('desktop-core', {}, async (page) => {
     const load = await page.evaluate(`(()=>{
@@ -396,7 +436,15 @@ async function desktopCoreScenario() {
     })()`);
     assert.equal(checkpointSaved.saved.chapterIndex, 2);
     assert.equal(checkpointSaved.saved.mode, 'standard');
-    assert.equal('maxHull' in checkpointSaved.saved, false, 'v1 checkpoint must have the exact schema');
+    assert.equal(checkpointSaved.saved.version, 2);
+    assert.equal('maxHull' in checkpointSaved.saved, false, 'v2 checkpoint must have the exact schema');
+    assert.deepEqual(checkpointSaved.saved.route, {
+      kind: 'compatibility',
+      roomIndex: checkpointSaved.saved.stats.roomsStarted,
+      chapterIndex: 2,
+      realmIndex: 2,
+      templateId: 'v2.2-compatibility-chapter-2',
+    });
     assert.ok(checkpointSaved.saved.build.ownedUpgrades.includes('repair-swarm'));
     assert.equal(checkpointSaved.saved.hull, 4);
     assert.equal(checkpointSaved.saved.stats.score, 735);
@@ -411,8 +459,8 @@ async function desktopCoreScenario() {
     await page.waitForPage(`document.readyState === 'complete' && Boolean(globalThis.__NEON_TIDE_V3__)`);
     const restored = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
     assert.deepEqual(
-      { mode:restored.session.mode, chapterIndex:restored.session.chapterIndex, hull:restored.session.hull, build:restored.session.build },
-      { mode:'briefing', chapterIndex:2, hull:checkpointSaved.saved.hull, build:checkpointSaved.saved.build },
+      { mode:restored.session.mode, chapterIndex:restored.session.chapterIndex, route:restored.session.route, hull:restored.session.hull, build:restored.session.build },
+      { mode:'briefing', chapterIndex:2, route:checkpointSaved.saved.route, hull:checkpointSaved.saved.hull, build:checkpointSaved.saved.build },
     );
     assert.ok(restored.persistence.loads >= 1, JSON.stringify(restored.persistence));
     await page.trustedClick('#primary-button');
@@ -426,7 +474,9 @@ async function desktopCoreScenario() {
     assert.equal(continued.session.build.pendingOffer, null);
     assert.equal(continued.session.build.upgradeStacks[restoredOffer.cards[0]],
       (checkpointSaved.saved.build.upgradeStacks[restoredOffer.cards[0]] ?? 0) + 1);
-    assert.ok(continued.session.chapterIndex >= checkpointSaved.saved.chapterIndex);
+    assert.equal(continued.session.chapterIndex, checkpointSaved.saved.chapterIndex);
+    assert.deepEqual(continued.session.route, checkpointSaved.saved.route);
+    assert.equal(continued.session.room.templateId, checkpointSaved.saved.route.templateId);
     assert.deepEqual(
       {
         mode: continued.session.mode,
@@ -451,7 +501,7 @@ async function desktopCoreScenario() {
         hull: 4,
         maxHull: 4,
         legacyMode: 'playing',
-        legacyStage: continued.session.chapterIndex,
+        legacyStage: checkpointSaved.saved.route.realmIndex,
         legacyHull: 4,
         legacyMaxHull: 4,
         legacyBuild: continued.session.build.ownedUpgrades,
@@ -3521,6 +3571,7 @@ async function finalRealmShiftProductionScenario() {
 }
 
 export const v22RegressionScenarios = [
+  ['legacy Repair Swarm checkpoint migration', legacyRepairSwarmMigrationScenario],
   ['briefing and laser UI', briefingAndLaserUiScenario],
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],

@@ -28,10 +28,11 @@ async function v3FoundationLoopScenario() {
       api.entityRenderer.sync(api.world,1);
       const before=api.getDebugSnapshot();
       const restored=api.session.restoreCheckpoint({
-        version:1,
+        version:2,
         mode:'standard',
         seed:4404,
         chapterIndex:2,
+        route:{kind:'authored',roomIndex:2,chapterIndex:2,realmIndex:2,templateId:'core-harvest'},
         build:{ownedUpgrades:[],starterWeapon:'pulse-cannon',upgradeStacks:{},offerSequence:0,pendingOffer:null},
         hull:3,
         stats:{roomsStarted:2,roomsCompleted:2,damageTaken:0,score:0},
