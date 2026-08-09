@@ -1,10 +1,20 @@
-import { maxHullForRunBuild, normalizeRunBuild } from './run-build.js';
-import { getCampaignEncounter, getEncounterTemplate } from '../content/encounters.js';
+import {
+  isRunBuildProgressionConsistent,
+  maxHullForRunBuild,
+  normalizePersistedRunBuild,
+  normalizeRunBuild,
+} from './run-build.js';
+import {
+  getCampaignChapterIndex,
+  getCampaignEncounter,
+  getEncounterTemplate,
+} from '../content/encounters.js';
 import { createEncounterDirector } from '../systems/encounter-director.js';
 import {
   applyUpgradeChoice,
   attachPendingOffer,
   createUpgradeBuild,
+  deriveUpgradeOfferSeed,
   deriveBuildStats,
 } from '../systems/upgrade-system.js';
 
@@ -141,10 +151,6 @@ export function createGameSession(options = {}) {
     return state.build;
   }
 
-  function upgradeOfferSeed(seed, roomsCompleted, offerSequence) {
-    return Math.trunc(seed * 1103515245 + roomsCompleted * 2654435761 + offerSequence * 2246822519);
-  }
-
   function snapshot() {
     return Object.freeze({
       mode: state.mode,
@@ -191,11 +197,14 @@ export function createGameSession(options = {}) {
   function checkpointFromState() {
     const savedAt = now();
     if (!Number.isFinite(savedAt) || savedAt < 0) throw new TypeError('checkpoint clock must return a non-negative finite timestamp');
+    const nextChapterIndex = state.room?.compatibility
+      ? state.chapterIndex
+      : getCampaignChapterIndex(state.stats.roomsStarted);
     return {
       version: 1,
       mode: 'standard',
       seed: state.seed,
-      chapterIndex: state.chapterIndex,
+      chapterIndex: nextChapterIndex,
       build: cloneValue(state.build),
       hull: state.hull,
       stats: cloneValue(state.stats),
@@ -221,18 +230,20 @@ export function createGameSession(options = {}) {
       && checkpoint.mode === 'standard'
       && Number.isFinite(checkpoint.seed)
       && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
-      && normalizeRunBuild(checkpoint.build)
+      && normalizePersistedRunBuild(checkpoint.build)
       && Number.isFinite(checkpoint.hull) && checkpoint.hull > 0
       && isSessionStats(checkpoint.stats)
+      && checkpoint.stats.roomsStarted === checkpoint.stats.roomsCompleted
+      && isRunBuildProgressionConsistent(checkpoint.build, checkpoint.stats, checkpoint.seed)
       && Number.isFinite(checkpoint.savedAt) && checkpoint.savedAt >= 0;
   }
 
   function restoreCheckpoint(checkpoint = runSave?.load()) {
     if (!isCheckpoint(checkpoint) || !['menu', 'defeat'].includes(state.mode)) return false;
-    const normalizedBuild = normalizeRunBuild(checkpoint.build);
+    const normalizedBuild = normalizePersistedRunBuild(checkpoint.build);
     if (normalizedBuild?.pendingOffer) {
       const previousSequence = normalizedBuild.offerSequence - 1;
-      const expectedSeed = upgradeOfferSeed(checkpoint.seed, checkpoint.stats.roomsCompleted, previousSequence);
+      const expectedSeed = deriveUpgradeOfferSeed(checkpoint.seed, checkpoint.stats.roomsCompleted, previousSequence);
       if (previousSequence < 0 || normalizedBuild.pendingOffer.seed !== expectedSeed) {
         runSave?.clear({ corruption: true });
         return false;
@@ -327,9 +338,11 @@ export function createGameSession(options = {}) {
       killTarget: 1_000_000,
       timeout: 1_000_000,
     };
-    const encounterChapterIndex = Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0
-      ? room.chapterIndex
-      : state.chapterIndex;
+    const encounterChapterIndex = room.campaign === true && !compatibility
+      ? getCampaignChapterIndex(state.stats.roomsStarted)
+      : Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0
+        ? room.chapterIndex
+        : state.chapterIndex;
     const encounter = encounterDirector.startRoom(compatibilityTemplate, { chapterIndex: encounterChapterIndex });
     state.room = {
       ...cloneValue(room),
@@ -342,7 +355,7 @@ export function createGameSession(options = {}) {
     };
     objectivePublishElapsed = 0;
     lastObjectivePublishKey = null;
-    if (Number.isInteger(room.chapterIndex) && room.chapterIndex >= 0) state.chapterIndex = room.chapterIndex;
+    state.chapterIndex = encounterChapterIndex;
     state.stats.roomsStarted += 1;
     const changed = transition('playing', { room: state.room });
     if (changed) events?.emit('room:started', { room: cloneValue(state.room), chapterIndex: state.chapterIndex });
@@ -415,7 +428,7 @@ export function createGameSession(options = {}) {
     if (nextMode === 'victory' || nextMode === 'defeat') state.terminalReason = result.reason ?? nextMode;
     if (nextMode === 'defeat') state.hull = 0;
     if (nextMode === 'upgrade') {
-      const offerSeed = upgradeOfferSeed(state.seed, state.stats.roomsCompleted, state.build.offerSequence);
+      const offerSeed = deriveUpgradeOfferSeed(state.seed, state.stats.roomsCompleted, state.build.offerSequence);
       assignBuild(attachPendingOffer(
         state.build,
         offerSeed,
@@ -486,28 +499,15 @@ export function createGameSession(options = {}) {
   function setBuild(build) {
     const normalizedBuild = normalizeRunBuild(build);
     if (!normalizedBuild) throw new TypeError('build must contain unique known upgrade IDs');
-    if (!['briefing', 'playing', 'paused', 'upgrade', 'chapterComplete'].includes(state.mode)) return invalid('playing');
-    if (normalizedBuild.starterWeapon !== state.build.starterWeapon) {
-      throw new TypeError('starter weapon must be selected before applying progression');
+    if (!['menu', 'briefing'].includes(state.mode)) return invalid(state.mode);
+    if (state.stats.roomsStarted !== 0 || state.stats.roomsCompleted !== 0
+      || state.build.pendingOffer || state.build.offerSequence !== 0 || state.build.ownedUpgrades.length !== 0) {
+      throw new Error('build configuration is locked after campaign progression begins');
     }
-    const buildMaxHull = maxHullFromBuild(normalizedBuild);
-    if (!Number.isFinite(buildMaxHull) || buildMaxHull < state.maxHull) {
-      throw new TypeError('build cannot reduce hull capacity');
+    if (normalizedBuild.pendingOffer || normalizedBuild.offerSequence !== 0 || normalizedBuild.ownedUpgrades.length !== 0) {
+      throw new TypeError('setBuild only configures a starter weapon before progression');
     }
-    const previous = snapshot();
-    assignBuild(normalizedBuild);
-    // Capacity is derived from the versioned build, never from an extra
-    // checkpoint field. A live run cannot silently lose a capacity upgrade.
-    state.maxHull = buildMaxHull;
-    state.revision += 1;
-    const changeRecord = Object.freeze({
-      previous,
-      current: snapshot(),
-      detail: Object.freeze({ buildChanged: true }),
-    });
-    events?.emit('session:changed', changeRecord);
-    onChange(changeRecord);
-    return true;
+    return setStarterWeapon(normalizedBuild.starterWeapon);
   }
 
   function selectUpgrade(id) {

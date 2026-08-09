@@ -8,6 +8,7 @@ import {
   attachPendingOffer,
   createUpgradeBuild,
   getUpgradeById,
+  offerBossCoreUpgrades,
   serializeUpgradeBuild,
 } from '../src/systems/upgrade-system.js';
 
@@ -20,6 +21,18 @@ class MemoryStorage {
 }
 
 const EXPECTED_MODES = ['menu', 'briefing', 'playing', 'upgrade', 'paused', 'chapterComplete', 'victory', 'defeat'];
+
+function offerSeed(runSeed, roomsCompleted, sequence) {
+  return Math.trunc(runSeed * 1103515245 + roomsCompleted * 2654435761 + sequence * 2246822519);
+}
+
+function findRunSeedForBossUpgrade(id, roomsCompleted = 1, sequence = 0) {
+  for (let runSeed = 0; runSeed < 10_000; runSeed += 1) {
+    const cards = offerBossCoreUpgrades(createUpgradeBuild(), offerSeed(runSeed, roomsCompleted, sequence));
+    if (cards.some((card) => card.id === id)) return runSeed;
+  }
+  throw new Error(`no deterministic boss offer found for ${id}`);
+}
 
 test('session locks the public mode vocabulary and valid campaign transitions', () => {
   assert.deepEqual([...GAME_SESSION_MODES], EXPECTED_MODES);
@@ -134,6 +147,38 @@ test('checkpoint restore reproduces the next authored room index and geometry', 
   assert.equal(restored.snapshot().room.objective.seed, expected.seed);
 });
 
+test('selected checkpoint resumes the same next authored template, chapter, realm projection, and threat', () => {
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const original = createGameSession({ development: true, runSave, now: () => 444 });
+  original.startRun('standard', 9090);
+  original.startRoom({ campaign: true });
+  original.completeRoom({ nextMode: 'upgrade' });
+  original.selectUpgrade(original.snapshot().build.pendingOffer.cards[0]);
+  const selectedCheckpoint = runSave.load();
+  assert.equal(selectedCheckpoint.chapterIndex, 1);
+  original.startRoom({ campaign: true });
+  const uninterrupted = original.snapshot();
+
+  const restored = createGameSession({ development: true, runSave, now: () => 555 });
+  assert.equal(restored.restoreCheckpoint(), true);
+  assert.equal(restored.snapshot().chapterIndex, selectedCheckpoint.chapterIndex);
+  restored.startRoom({ campaign: true });
+  const resumed = restored.snapshot();
+  assert.deepEqual({
+    templateId: resumed.room.templateId,
+    chapterIndex: resumed.chapterIndex,
+    realmIndex: resumed.chapterIndex,
+    threatBudget: resumed.room.threatBudget,
+  }, {
+    templateId: uninterrupted.room.templateId,
+    chapterIndex: uninterrupted.chapterIndex,
+    realmIndex: uninterrupted.chapterIndex,
+    threatBudget: uninterrupted.room.threatBudget,
+  });
+  assert.equal(resumed.room.templateId, 'moving-sanctum');
+});
+
 test('fixed-step objective updates publish bounded session changes rather than every tick', () => {
   let objectiveChanges = 0;
   const authority = {};
@@ -244,26 +289,27 @@ test('Standard saves only completed chapter entries and restores that snapshot o
   const runSave = createRunSave(storage);
   const session = createGameSession({ development: true, runSave, now: () => 1234, maxHull: 3 });
 
-  session.startRun('standard', 77);
-  session.startRoom({ id: 'chapter-0-room', chapterIndex: 0 });
+  const seed = findRunSeedForBossUpgrade('repair-swarm');
+  session.startRun('standard', seed);
+  session.startRoom({ campaign: true });
   assert.equal(runSave.getStatus().saves, 0, 'a room start is not a checkpoint');
-  session.upgradeHullCapacity(4, { repair: 1 });
-  session.setBuild({ ownedUpgrades: ['repair-swarm'] });
-  assert.equal(session.completeRoom({ nextMode: 'chapterComplete', chapterIndex: 2, score: 50 }), true);
-  assert.equal(session.snapshot().mode, 'chapterComplete');
+  assert.equal(session.completeRoom({ nextMode: 'upgrade', rewardKind: 'boss', score: 50 }), true);
+  assert.ok(session.snapshot().build.pendingOffer.cards.includes('repair-swarm'));
+  assert.equal(session.selectUpgrade('repair-swarm'), true);
+  assert.equal(session.snapshot().mode, 'upgrade');
   assert.deepEqual(runSave.load(), {
-    version: 1, mode: 'standard', seed: 77, chapterIndex: 2,
-    build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['repair-swarm'] })), hull: 4,
+    version: 1, mode: 'standard', seed, chapterIndex: 1,
+    build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['repair-swarm'], offerSequence: 1 })), hull: 4,
     stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 50 }, savedAt: 1234,
   });
   const savesAfterTransition = runSave.getStatus().saves;
-  session.startRoom({ id: 'chapter-2-room', chapterIndex: 2 });
+  session.startRoom({ campaign: true });
   assert.equal(runSave.getStatus().saves, savesAfterTransition, 'next room must not rewrite the chapter entry');
 
   session.damageHull(4);
   assert.deepEqual(
     { mode: session.snapshot().mode, runMode: session.snapshot().runMode, chapterIndex: session.snapshot().chapterIndex, hull: session.snapshot().hull, maxHull: session.snapshot().maxHull, room: session.snapshot().room },
-    { mode: 'briefing', runMode: 'standard', chapterIndex: 2, hull: 4, maxHull: 4, room: null },
+    { mode: 'briefing', runMode: 'standard', chapterIndex: 1, hull: 4, maxHull: 4, room: null },
   );
 });
 
@@ -303,8 +349,9 @@ test('checkpoint restore and corrupt storage keep session snapshots valid', () =
   assert.equal(session.getPersistenceStatus().corruptions, 1);
 
   assert.equal(runSave.save({
-    version: 1, mode: 'standard', seed: 5, chapterIndex: 2, build: { ownedUpgrades: ['ion-drive'] }, hull: 3,
-    stats: { roomsStarted: 2, roomsCompleted: 1, damageTaken: 0, score: 25 }, savedAt: 1,
+    version: 1, mode: 'standard', seed: 5, chapterIndex: 2,
+    build: serializeUpgradeBuild(createUpgradeBuild({ ownedUpgrades: ['ion-drive'], offerSequence: 1 })), hull: 3,
+    stats: { roomsStarted: 2, roomsCompleted: 2, damageTaken: 0, score: 25 }, savedAt: 1,
   }), true);
   assert.equal(session.restoreCheckpoint(), true);
   assert.deepEqual(
@@ -557,14 +604,20 @@ test('new runs and resets expose the full immutable canonical progression build 
   assert.deepEqual(Object.keys(session.snapshot().build).sort(), expectedKeys);
 });
 
-test('setBuild cannot bypass the run-locked starter weapon contract', () => {
+test('setBuild cannot replace progression, clear pending offers, or grant unoffered cards', () => {
   const session = createGameSession({ development: true });
   session.setStarterWeapon('arc-drones');
   session.startRun('standard', 12);
   session.startRoom({ id: 'starter-lock', compatibility: true });
-  const before = session.snapshot();
-  assert.throws(() => session.setBuild(createUpgradeBuild({ starterWeapon: 'pulse-cannon' })), /starter weapon/);
-  assert.deepEqual(session.snapshot(), before);
+  assert.throws(() => session.setBuild(createUpgradeBuild({ starterWeapon: 'pulse-cannon' })), /Invalid GameSession transition/);
+  session.completeRoom({ nextMode: 'upgrade' });
+  const pending = session.snapshot();
+  assert.throws(() => session.setBuild(createUpgradeBuild({ starterWeapon: 'arc-drones' })), /Invalid GameSession transition/);
+  assert.throws(() => session.setBuild(createUpgradeBuild({
+    starterWeapon: 'arc-drones', upgradeStacks: { 'drone-volley': 1 },
+  })), /Invalid GameSession transition/);
+  assert.deepEqual(session.snapshot(), pending);
+  assert.throws(() => session.startRoom({ id: 'skip', compatibility: true }), /upgrade -> playing/);
 });
 
 test('public build snapshots and cached stats are deeply immutable detached views', () => {
@@ -581,12 +634,18 @@ test('public build snapshots and cached stats are deeply immutable detached view
 });
 
 test('room repair applies its derived per-stack amount exactly once on successful completion', () => {
-  const session = createGameSession({ development: true });
-  session.startRun('standard', 91);
+  const storage = new MemoryStorage();
+  const runSave = createRunSave(storage);
+  const build = serializeUpgradeBuild(createUpgradeBuild({
+    upgradeStacks: { 'tide-reserve': 2 }, offerSequence: 2,
+  }));
+  assert.equal(runSave.save({
+    version: 1, mode: 'standard', seed: 91, chapterIndex: 2, build, hull: 3,
+    stats: { roomsStarted: 2, roomsCompleted: 2, damageTaken: 0, score: 0 }, savedAt: 1,
+  }), true);
+  const session = createGameSession({ development: true, runSave });
+  assert.equal(session.restoreCheckpoint(), true);
   session.startRoom({ id: 'repair-room', compatibility: true });
-  let build = applyUpgradeChoice(createUpgradeBuild(), 'tide-reserve');
-  build = applyUpgradeChoice(build, 'tide-reserve');
-  session.setBuild(build);
   session.damageHull(1);
   assert.equal(session.getHull(), 2);
   session.completeRoom({ nextMode: 'chapterComplete' });

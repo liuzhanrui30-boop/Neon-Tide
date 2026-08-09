@@ -316,6 +316,43 @@ test('follow-up arcs preserve upgraded radius, damage and bounded target dedupe'
   assert.equal(upgraded.chains[0].hitTarget0, upgraded.first);
 });
 
+test('chainCount six hits the primary plus six distinct targets in stable order without repeats', () => {
+  const world = createEntityWorld({ capacities: { enemy: 7, friendlyProjectile: 8 } });
+  const targets = Array.from({ length: 7 }, (_, index) => world.spawn('enemy', {
+    x: index,
+    y: 0,
+    hp: 10,
+    radius: 0.2,
+    team: 2,
+    collidable: true,
+  }));
+  world.spawn('friendlyProjectile', {
+    x: 0, y: 0, previousX: 0, previousY: 0, vx: 15, vy: 0,
+    damage: 1, radius: 0.1, team: 1, collidable: true,
+    type: 'arc-chain', weaponId: 'arc-drones', chainCount: 6,
+    chainDamageMultiplier: 1, chainRadius: 2, hitBudgetRemaining: 1,
+  });
+  const order = [];
+  for (let hop = 0; hop < 7; hop += 1) {
+    const summary = resolveCollisions(world, null, 1 / 60, createEvents());
+    order.push(...summary.damageRecords.map(({ targetId }) => targetId));
+    const chainId = world.query('friendlyProjectile').at(0);
+    if (!chainId) continue;
+    const chain = world.get(chainId);
+    const target = world.get(chain.targetId);
+    world.write(chainId, {
+      previousX: chain.x,
+      previousY: chain.y,
+      x: target.x,
+      y: target.y,
+    });
+  }
+  assert.deepEqual(order, targets);
+  assert.equal(new Set(order).size, 7);
+  assert.deepEqual(targets.map((id) => world.get(id).hp), Array(7).fill(9));
+  assert.equal(world.query('friendlyProjectile').length, 0);
+});
+
 test('body contact requires an explicit contact-damaging proxy contract', () => {
   const world = createEntityWorld({ capacities: { player: 1, enemy: 2 } });
   world.spawn('player', { x: 0, y: 0, radius: 0.4, team: 1, collidable: true });

@@ -227,7 +227,8 @@ export function selectTideLanceLine(player, candidates, objectives = [], options
 }
 
 export function deriveTideLanceSpec(buildStats = {}) {
-  if (buildStats && typeof buildStats === 'object') {
+  const cacheable = buildStats && typeof buildStats === 'object' && Object.isFrozen(buildStats);
+  if (cacheable) {
     const cached = LANCE_SPEC_CACHE.get(buildStats);
     if (cached) return cached;
   }
@@ -250,8 +251,13 @@ export function deriveTideLanceSpec(buildStats = {}) {
     propagationDamageMultiplier: clamp(finite(buildStats?.chainDamageMultiplier, 0.78), 0.5, 1),
     weakPointPriority: clamp(finite(buildStats?.weakPointPriority, 1), 1, 1.8),
   });
-  if (buildStats && typeof buildStats === 'object') LANCE_SPEC_CACHE.set(buildStats, spec);
+  if (cacheable) LANCE_SPEC_CACHE.set(buildStats, spec);
   return spec;
+}
+
+function stabilizeBuildStats(buildStats) {
+  if (!buildStats || typeof buildStats !== 'object') return null;
+  return Object.isFrozen(buildStats) ? buildStats : Object.freeze({ ...buildStats });
 }
 
 function createCandidate() {
@@ -504,6 +510,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
   function update(world, playerId, dt, events = null, buildStats = null) {
     if (!world?.query || !world?.readInto || !world?.spawn) throw new TypeError('EntityWorld is required');
     if (!Number.isFinite(dt) || dt <= 0) throw new TypeError('weapon dt must be positive and finite');
+    buildStats = stabilizeBuildStats(buildStats);
     const player = Number.isSafeInteger(playerId) ? world.readInto(playerId, playerRead) : playerId;
     if (!player || !Number.isFinite(player.x) || !Number.isFinite(player.y)) {
       return Object.freeze({ fired: 0, targetId: null, buffed: false });
@@ -587,6 +594,7 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     droneIds.fill(0);
     lastTargetId = null;
     wasBuffed = false;
+    lastBuildStats = null;
     return true;
   }
 

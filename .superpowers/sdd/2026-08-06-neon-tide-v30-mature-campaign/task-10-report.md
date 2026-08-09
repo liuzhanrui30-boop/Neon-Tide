@@ -72,3 +72,40 @@ Port 4173 was never used. Final browser validation used temporary Vite port 4412
 ### Concerns
 - Vite retains the inherited large-chunk warning for the 884.24 kB main bundle; code splitting remains outside Task 10.
 - The campaign still defaults to Pulse Cannon and exposes starter selection through session authority rather than a dedicated new starter-selection screen; Task 10 required compatible cards and authoritative starter behavior, not a new campaign input/menu.
+
+## Fix round 2/5 — Progression restore authority hardening
+
+### Status
+DONE — all three Important and all three Minor round-2 findings are fixed with authoritative Node and natural-browser regression evidence.
+
+### Review findings closed
+- **Important — selected checkpoint chapter parity:** authored campaign checkpoints now project the explicit next chapter from the authoritative room sequence, while compatibility campaign nodes preserve their explicit realm node. Natural room starts derive the same chapter instead of trusting stale completed-room input. A selected-checkpoint reload now proves the same next template, chapter, realm presentation, and threat budget as uninterrupted play.
+- **Important — public build mutation bypass:** `setBuild()` is restricted to empty pre-progression menu/briefing starter configuration. It cannot run while playing, paused, upgrading, or at a chapter boundary; cannot clear a pending offer; and cannot grant any upgrade stack. Legacy upgrade selection now goes only through the pending-offer session authority.
+- **Important — exact checkpoint validation:** persisted builds require the full exact five-field schema, exact pending-offer schema, exact sorted equality between `ownedUpgrades` and positive `upgradeStacks`, compatibility/max-stack validity, deterministic cards and progression-derived offer seed, boundary-complete room stats, and mutually possible selected-stack/offer-sequence/room counts. Forged schemas and impossible progress are rejected and cleared; valid pending and selected checkpoints still round-trip.
+- **Minor — Arc history capacity:** arc propagation now carries seven dedupe IDs, so `chainCount: 6` means the primary plus six distinct follow-ups. A seven-target aligned regression proves stable order, one hit each, and no repeat.
+- **Minor — cache external mutability:** Tide Lance identity caching is limited to frozen stat objects. Mutable callers are recomputed, weapon updates snapshot mutable inputs into frozen detached debug state, resets clear debug references, and production session stats retain stable frozen identity without per-step allocation.
+- **Minor — Rift startup readiness:** the natural upgrade harness now waits for the authoritative API, session, player projection, encounter, weapon projection, and finite player coordinates before dereferencing Rift evidence; it no longer relies on sleep-only startup timing.
+
+### Additional compatibility hardening
+- Compatibility browser coverage selects Repair Swarm through a deterministic real boss offer instead of using the removed build-injection path.
+- The Standard death/Continue regression now verifies that the selected Repair Swarm checkpoint authoritatively restores four hull rather than silently starting an empty build.
+- The browser foundation checkpoint fixture was upgraded to the exact persisted build schema.
+
+### Verification
+All Node/npm commands used Node 22.14.0:
+`PATH=/Users/kanyun/Documents/zhanrui/threejs-neon-tide/.runtime/node-v22.14.0-darwin-arm64/bin:$PATH`
+
+Port 4173 was never used. Browser validation used temporary Vite port 44219 and a fresh isolated headful Chrome 146.0.7680.80 profile on CDP 9459 (not 9333).
+
+- Focused modified Node suites — PASS: 60/60 after the final regression additions.
+- Final `npm run check` — PASS: 254/254 Node tests plus production build.
+- Required focused browser acceptance — PASS: 7/7 (Overload selected/pending checkpoint parity, Rift, Tide, weapons, objectives, anti-orbit, enemies).
+- Additional focused compatibility acceptance — PASS: desktop checkpoint/Continue and Repair Swarm/ARIA.
+- Final full browser matrix — PASS: 34/34 in one run.
+- Breakpoint cleanup failure-path self-test — PASS: 1/1.
+- `git diff --check` — PASS.
+- Production bundle — PASS: 886.06 kB minified / 247.64 kB gzip main JS.
+
+### Concerns
+- Vite retains the inherited large-chunk warning for the 886.06 kB main bundle; code splitting remains outside Task 10.
+- One earlier full-matrix attempt hit the inherited boss-pause timing assertion by two fixed steps; the focused scenario immediately passed and the final clean full matrix passed 34/34.

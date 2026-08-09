@@ -1,5 +1,10 @@
 import { UPGRADES } from '../content/upgrades.js';
-import { createUpgradeBuild, deriveBuildStats } from '../systems/upgrade-system.js';
+import {
+  createUpgradeBuild,
+  deriveBuildStats,
+  deriveUpgradeOfferSeed,
+  deserializeUpgradeBuild,
+} from '../systems/upgrade-system.js';
 
 const BUILD_KEYS = new Set(['ownedUpgrades']);
 const PROGRESSION_BUILD_KEYS = new Set(['ownedUpgrades', 'starterWeapon', 'upgradeStacks', 'offerSequence', 'pendingOffer']);
@@ -38,6 +43,34 @@ export function normalizeRunBuild(value) {
   } catch {
     return null;
   }
+}
+
+/** Persisted v1 checkpoints require the full exact progression schema. */
+export function normalizePersistedRunBuild(value) {
+  try {
+    return deserializeUpgradeBuild(value);
+  } catch {
+    return null;
+  }
+}
+
+export function isRunBuildProgressionConsistent(build, stats, runSeed = null) {
+  const normalized = normalizePersistedRunBuild(build);
+  if (!normalized || !stats || typeof stats !== 'object') return false;
+  const selectedStacks = Object.values(normalized.upgradeStacks)
+    .reduce((total, stack) => total + stack, 0);
+  const expectedOfferSequence = selectedStacks + (normalized.pendingOffer ? 1 : 0);
+  if (normalized.offerSequence !== expectedOfferSequence
+    || normalized.offerSequence > stats.roomsCompleted) return false;
+  if (normalized.pendingOffer && Number.isFinite(runSeed)) {
+    const selectedSequence = normalized.offerSequence - 1;
+    if (normalized.pendingOffer.seed !== deriveUpgradeOfferSeed(
+      runSeed,
+      stats.roomsCompleted,
+      selectedSequence,
+    )) return false;
+  }
+  return true;
 }
 
 export function maxHullForRunBuild(build, baseMaxHull) {

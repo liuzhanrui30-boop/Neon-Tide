@@ -123,6 +123,8 @@ const FLOAT_RULES = Object.freeze({
   hitTarget2: [0, Number.MAX_SAFE_INTEGER, 0],
   hitTarget3: [0, Number.MAX_SAFE_INTEGER, 0],
   hitTarget4: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget5: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget6: [0, Number.MAX_SAFE_INTEGER, 0],
 });
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([

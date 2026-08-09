@@ -7,6 +7,7 @@ const DEFAULT_OUTCOME_CAPACITY = 512;
 const DEFAULT_SPAWN_CAPACITY = 192;
 const PERFECT_PHASE_BUFF_SECONDS = 0.8;
 const EPSILON = 1e-9;
+const HIT_HISTORY_CAPACITY = 7;
 
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
@@ -95,7 +96,7 @@ export function createCollisionSystem({
   const spawnChainRadius = new Float64Array(spawns);
   const spawnWeakPointMultiplier = new Float64Array(spawns);
   const spawnObjectiveDamageMultiplier = new Float64Array(spawns);
-  const spawnHitTargets = Array.from({ length: 5 }, () => new Float64Array(spawns));
+  const spawnHitTargets = Array.from({ length: HIT_HISTORY_CAPACITY }, () => new Float64Array(spawns));
   const spawnColors = new Uint32Array(spawns);
   const spawnTypes = new Array(spawns).fill(null);
   const spawnWeapons = new Array(spawns).fill(null);
@@ -139,6 +140,8 @@ export function createCollisionSystem({
     hitTarget2: 0,
     hitTarget3: 0,
     hitTarget4: 0,
+    hitTarget5: 0,
+    hitTarget6: 0,
     splitCount: 0,
     homing: false,
     collidable: true,
@@ -188,7 +191,7 @@ export function createCollisionSystem({
     spawnChainRadius[index] = finite(data.chainRadius, 6);
     spawnWeakPointMultiplier[index] = finite(data.weakPointMultiplier, 1.5);
     spawnObjectiveDamageMultiplier[index] = finite(data.objectiveDamageMultiplier, 1);
-    for (let hitIndex = 0; hitIndex < 5; hitIndex += 1) {
+    for (let hitIndex = 0; hitIndex < HIT_HISTORY_CAPACITY; hitIndex += 1) {
       spawnHitTargets[hitIndex][index] = finite(data[`hitTarget${hitIndex}`], 0);
     }
     spawnColors[index] = data.color;
@@ -246,6 +249,8 @@ export function createCollisionSystem({
         hitTarget2: hitTargets[2],
         hitTarget3: hitTargets[3],
         hitTarget4: hitTargets[4],
+        hitTarget5: hitTargets[5],
+        hitTarget6: hitTargets[6],
       });
     }
   }
@@ -286,7 +291,7 @@ export function createCollisionSystem({
   }
 
   function projectileHitIndex(projectile, targetId) {
-    for (let index = 0; index < 5; index += 1) {
+    for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
       if (projectile[`hitTarget${index}`] === targetId) return index;
     }
     return -1;
@@ -333,6 +338,7 @@ export function createCollisionSystem({
         : 1 + Math.max(0, Math.trunc(finite(projectile.pierceCount)))));
       const hitTargets = [
         projectile.hitTarget0, projectile.hitTarget1, projectile.hitTarget2, projectile.hitTarget3, projectile.hitTarget4,
+        projectile.hitTarget5, projectile.hitTarget6,
       ];
       let historyCount = hitTargets.filter((id) => id > 0).length;
       let acceptedHits = 0;
@@ -367,6 +373,8 @@ export function createCollisionSystem({
           hitTarget2: hitTargets[2] || 0,
           hitTarget3: hitTargets[3] || 0,
           hitTarget4: hitTargets[4] || 0,
+          hitTarget5: hitTargets[5] || 0,
+          hitTarget6: hitTargets[6] || 0,
         });
       }
     }
@@ -668,7 +676,7 @@ export function createCollisionSystem({
       spawnData.chainRadius = spawnChainRadius[index];
       spawnData.weakPointMultiplier = spawnWeakPointMultiplier[index];
       spawnData.objectiveDamageMultiplier = spawnObjectiveDamageMultiplier[index];
-      for (let hitIndex = 0; hitIndex < 5; hitIndex += 1) {
+      for (let hitIndex = 0; hitIndex < HIT_HISTORY_CAPACITY; hitIndex += 1) {
         spawnData[`hitTarget${hitIndex}`] = spawnHitTargets[hitIndex][index];
       }
       spawnData.splitCount = 0;

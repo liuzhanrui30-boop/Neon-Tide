@@ -1,4 +1,7 @@
-import { normalizeRunBuild } from '../game/run-build.js';
+import {
+  isRunBuildProgressionConsistent,
+  normalizePersistedRunBuild,
+} from '../game/run-build.js';
 
 const CURRENT_VERSION = 1;
 const DEFAULT_KEY = 'neon-tide:v3:checkpoint';
@@ -41,9 +44,11 @@ export function isRunCheckpoint(value) {
     || value.mode !== 'standard'
     || !Number.isFinite(value.seed)
     || !isFiniteNonNegativeInteger(value.chapterIndex)
-    || !normalizeRunBuild(value.build)
+    || !normalizePersistedRunBuild(value.build)
     || !Number.isFinite(value.hull) || value.hull <= 0
     || !isCheckpointStats(value.stats)
+    || value.stats.roomsStarted !== value.stats.roomsCompleted
+    || !isRunBuildProgressionConsistent(value.build, value.stats, value.seed)
     || !Number.isFinite(value.savedAt) || value.savedAt < 0) {
     return false;
   }

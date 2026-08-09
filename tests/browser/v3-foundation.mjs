@@ -32,7 +32,7 @@ async function v3FoundationLoopScenario() {
         mode:'standard',
         seed:4404,
         chapterIndex:2,
-        build:{ownedUpgrades:[]},
+        build:{ownedUpgrades:[],starterWeapon:'pulse-cannon',upgradeStacks:{},offerSequence:0,pendingOffer:null},
         hull:3,
         stats:{roomsStarted:2,roomsCompleted:2,damageTaken:0,score:0},
         savedAt:1,

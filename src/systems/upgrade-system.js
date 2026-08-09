@@ -5,6 +5,11 @@ const STARTERS = new Set(STARTER_WEAPON_IDS);
 const BOSS_IDS = new Set(BOSS_CORE_UPGRADE_IDS);
 const CANONICAL_BUILDS = new WeakSet();
 const DERIVED_STATS = new WeakMap();
+const SERIALIZED_BUILD_KEYS = Object.freeze([
+  'ownedUpgrades', 'starterWeapon', 'upgradeStacks', 'offerSequence', 'pendingOffer',
+]);
+const SERIALIZED_BUILD_KEY_SET = new Set(SERIALIZED_BUILD_KEYS);
+const PENDING_OFFER_KEYS = new Set(['seed', 'rewardKind', 'cards']);
 
 export const DEFAULT_BUILD_STATS = Object.freeze({
   starterWeapon: 'pulse-cannon',
@@ -113,6 +118,14 @@ export function getUpgradeById(id) {
   return BY_ID.get(id) ?? null;
 }
 
+export function deriveUpgradeOfferSeed(runSeed, roomsCompleted, offerSequence) {
+  if (!Number.isFinite(runSeed) || !Number.isInteger(roomsCompleted) || roomsCompleted < 0
+    || !Number.isInteger(offerSequence) || offerSequence < 0) {
+    throw new TypeError('upgrade offer progression must be finite non-negative values');
+  }
+  return Math.trunc(runSeed * 1103515245 + roomsCompleted * 2654435761 + offerSequence * 2246822519);
+}
+
 export function createUpgradeBuild(value = {}) {
   if (CANONICAL_BUILDS.has(value)) return value;
   if (!isRecord(value)) throw new TypeError('upgrade build must be an object');
@@ -154,6 +167,36 @@ export function createUpgradeBuild(value = {}) {
   });
   CANONICAL_BUILDS.add(canonical);
   return canonical;
+}
+
+/**
+ * Persisted progression never uses createUpgradeBuild's authoring defaults.
+ * Every field must be present, ownedUpgrades must be the exact sorted positive
+ * stack key set, and pending offers must have the exact deterministic schema.
+ */
+export function deserializeUpgradeBuild(value) {
+  if (!isRecord(value)) throw new TypeError('serialized upgrade build must be an object');
+  const keys = Object.keys(value);
+  if (keys.length !== SERIALIZED_BUILD_KEYS.length || keys.some((key) => !SERIALIZED_BUILD_KEY_SET.has(key))) {
+    throw new TypeError('serialized upgrade build must use the exact schema');
+  }
+  if (!Array.isArray(value.ownedUpgrades) || !isRecord(value.upgradeStacks)
+    || typeof value.starterWeapon !== 'string' || !Number.isInteger(value.offerSequence)
+    || (value.pendingOffer !== null && !isRecord(value.pendingOffer))) {
+    throw new TypeError('serialized upgrade build fields have invalid types');
+  }
+  if (value.pendingOffer !== null) {
+    const pendingKeys = Object.keys(value.pendingOffer);
+    if (pendingKeys.length !== PENDING_OFFER_KEYS.size || pendingKeys.some((key) => !PENDING_OFFER_KEYS.has(key))) {
+      throw new TypeError('pending upgrade offer must use the exact schema');
+    }
+  }
+  const stackIds = Object.keys(value.upgradeStacks).sort();
+  if (value.ownedUpgrades.length !== stackIds.length
+    || value.ownedUpgrades.some((id, index) => typeof id !== 'string' || id !== stackIds[index])) {
+    throw new TypeError('owned upgrades must exactly match positive upgrade stacks');
+  }
+  return createUpgradeBuild(value);
 }
 
 export function serializeUpgradeBuild(build) {

@@ -23,6 +23,17 @@ class MemoryStorage {
   removeItem(key) { this.values.delete(key); }
 }
 
+function offerSeed(runSeed, roomsCompleted, sequence) {
+  return Math.trunc(runSeed * 1103515245 + roomsCompleted * 2654435761 + sequence * 2246822519);
+}
+
+function findRunSeedForNormalUpgrade(id) {
+  for (let runSeed = 0; runSeed < 10_000; runSeed += 1) {
+    if (offerUpgrades(createUpgradeBuild(), offerSeed(runSeed, 1, 0)).some((card) => card.id === id)) return runSeed;
+  }
+  throw new Error(`no deterministic normal offer found for ${id}`);
+}
+
 test('three-card offers are deterministic, unique, compatible and use a separate boss-core subset', () => {
   const build = createUpgradeBuild({ starterWeapon: 'arc-drones' });
   const first = offerUpgrades(build, 0xdecafbad);
@@ -154,10 +165,13 @@ test('GameSession owns pending offers and selection, and checkpoint-shaped round
 test('a Standard chapter checkpoint restores the exact pending offer and stacked build', () => {
   const runSave = createRunSave(new MemoryStorage());
   const original = createGameSession({ development: true, runSave, now: () => 55 });
-  original.startRun('standard', 123);
-  original.startRoom({ id: 'chapter-room', compatibility: true });
-  original.setBuild(applyUpgradeChoice(createUpgradeBuild(), 'pulse-echo'));
-  original.completeRoom({ nextMode: 'upgrade', chapterIndex: 1 });
+  original.startRun('standard', findRunSeedForNormalUpgrade('pulse-echo'));
+  original.startRoom({ campaign: true });
+  original.completeRoom({ nextMode: 'upgrade' });
+  assert.ok(original.snapshot().build.pendingOffer.cards.includes('pulse-echo'));
+  original.selectUpgrade('pulse-echo');
+  original.startRoom({ campaign: true });
+  original.completeRoom({ nextMode: 'upgrade' });
   const expected = original.snapshot().build;
 
   const restored = createGameSession({ development: true, runSave });

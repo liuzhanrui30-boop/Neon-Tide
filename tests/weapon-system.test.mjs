@@ -95,6 +95,35 @@ test('Tide Lance selection uses the same safely capped authoritative width, reac
   assert.equal(line.hitCap, spec.hitCap);
 });
 
+test('mutable build-stat inputs never poison identity caches or escape through weapon debug stats', () => {
+  const mutable = { lanceLength: 8 };
+  const first = deriveTideLanceSpec(mutable);
+  mutable.lanceLength = 9;
+  const second = deriveTideLanceSpec(mutable);
+  assert.equal(first.length, 8);
+  assert.equal(second.length, 9);
+  assert.notEqual(second, first);
+
+  const canonical = Object.freeze({ lanceLength: 10 });
+  assert.equal(deriveTideLanceSpec(canonical), deriveTideLanceSpec(canonical));
+
+  const world = createEntityWorld({ capacities: { player: 1, enemy: 1, friendlyProjectile: 16 } });
+  const playerId = world.spawn('player', { x: 0, y: 0, team: 1, collidable: true });
+  world.spawn('enemy', { x: 5, y: 0, hp: 20, team: 2, collidable: true });
+  const system = createWeaponSystem();
+  const callerOwned = { starterWeapon: 'pulse-cannon', weaponDamageMultiplier: 1.2 };
+  system.update(world, playerId, 1 / 60, null, callerOwned);
+  const exposed = system.getStats().lastBuildStats;
+  assert.notEqual(exposed, callerOwned);
+  assert.equal(Object.isFrozen(exposed), true);
+  callerOwned.starterWeapon = 'arc-drones';
+  callerOwned.weaponDamageMultiplier = 2;
+  assert.deepEqual(exposed, { starterWeapon: 'pulse-cannon', weaponDamageMultiplier: 1.2 });
+  system.update(world, playerId, 1 / 60, null, callerOwned);
+  assert.equal(system.getStats().lastBuildStats.starterWeapon, 'arc-drones');
+  assert.equal(system.getStats().lastBuildStats.weaponDamageMultiplier, 2);
+});
+
 test('only the selected starter uses the fixed friendly projectile pool and perfect phase accelerates its cadence', () => {
   assert.deepEqual(WEAPON_IDS, ['pulse-cannon', 'arc-drones', 'prism-missiles']);
   const run = (starterWeapon, buffSeconds, perfectFireBuffMultiplier = 0.75) => {

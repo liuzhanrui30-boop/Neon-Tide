@@ -56,7 +56,6 @@ import {
 } from "../systems/weapon-system.js";
 import { UPGRADES as V3_UPGRADES } from "../content/upgrades.js";
 import {
-  applyUpgradeChoice as applyProgressionChoice,
   createUpgradeBuild,
   getUpgradeById,
 } from "../systems/upgrade-system.js";
@@ -2697,16 +2696,7 @@ function awardReward(kind) {
 
 function applyUpgrade(id) {
   if (!getUpgradeById(id)) return false;
-  if (session.getMode() === "upgrade") return session.selectUpgrade(id);
-  try {
-    const before = state.upgradeBuild ?? createUpgradeBuild({ ownedUpgrades: state.ownedUpgrades });
-    const next = applyProgressionChoice(before, id);
-    session.setBuild(next);
-    if (id === "repair-swarm") session.upgradeHullCapacity(Math.max(state.maxHealth, 4), { repair: 1 });
-    return true;
-  } catch {
-    return false;
-  }
+  return session.getMode() === "upgrade" && session.selectUpgrade(id);
 }
 
 function beginUpgrade(stageIndex) {

@@ -53,10 +53,11 @@ async function completeAnchorRoom(page) {
 }
 
 async function beginRun(page, starterWeapon) {
+  await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;if(!api?.session||typeof api.getDebugSnapshot!=='function')return false;const debug=api.getDebugSnapshot();return debug?.session?.mode==='menu'&&debug.session.build?.pendingOffer===null;})()`);
   const selected = await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.setStarterWeapon(${JSON.stringify(starterWeapon)})`);
   assert.equal(selected, true);
   await page.startGame();
-  await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().encounter.objective?.type==='anchors'`);
+  await page.waitForPage(`(()=>{const debug=globalThis.__NEON_TIDE_V3__?.getDebugSnapshot?.();return debug?.session?.mode==='playing'&&debug.encounter?.objective?.type==='anchors'&&Number.isFinite(debug.player?.position?.x)&&Number.isFinite(debug.player?.position?.y)&&debug.weapons;})()`);
 }
 
 async function readOffer(page) {
@@ -151,7 +152,7 @@ export const v3UpgradeScenarios = [
       await selectUpgrade(page, 'overload-relay');
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().weapons.lastBuildStats?.chainTargets===3`);
       await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;return [...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id)).some((entry)=>entry?.type==='arc-chain'&&entry.chainCount===3&&Math.abs(entry.chainRadius-6.6)<1e-9);})()`, 10_000);
-      const selected = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const debug=api.getDebugSnapshot();const projectiles=[...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id));return {build:debug.session.build,stats:debug.weapons.lastBuildStats,projectiles,focusedCanvas:document.activeElement?.tagName==='CANVAS',events:debug.events};})()`);
+      const selected = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const debug=api.getDebugSnapshot();const projectiles=[...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id));return {build:debug.session.build,stats:debug.weapons.lastBuildStats,projectiles,focusedCanvas:document.activeElement?.tagName==='CANVAS',events:debug.events,nextRoom:{templateId:debug.session.room?.templateId,chapterIndex:debug.session.chapterIndex,realmIndex:debug.legacy.stageIndex,realm:document.documentElement.dataset.realm,threatBudget:debug.session.room?.threatBudget}};})()`);
       assert.equal(selected.build.upgradeStacks['overload-relay'], 1);
       assert.equal(selected.build.pendingOffer, null);
       assert.equal(selected.stats.starterWeapon, 'arc-drones');
@@ -167,10 +168,18 @@ export const v3UpgradeScenarios = [
       assert.deepEqual(restoredSelected.build, selectedBuild);
       assert.equal(restoredSelected.build.pendingOffer, null);
       await page.startGame();
+      await page.waitForPage(`(()=>{const debug=globalThis.__NEON_TIDE_V3__?.getDebugSnapshot?.();return debug?.session?.mode==='playing'&&debug.session.room?.templateId&&Number.isFinite(debug.player?.position?.x)&&debug.weapons?.lastBuildStats;})()`);
       const resumed = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
       assert.deepEqual(resumed.session.build, selectedBuild);
       assert.equal(resumed.session.mode, 'playing');
       assert.equal(resumed.weapons.lastBuildStats?.starterWeapon ?? 'arc-drones', 'arc-drones');
+      assert.deepEqual({
+        templateId: resumed.session.room.templateId,
+        chapterIndex: resumed.session.chapterIndex,
+        realmIndex: resumed.legacy.stageIndex,
+        realm: await page.evaluate(`document.documentElement.dataset.realm`),
+        threatBudget: resumed.session.room.threatBudget,
+      }, selected.nextRoom);
       assert.equal(resumed.events.dropped, 0);
     });
   }],
@@ -181,7 +190,7 @@ export const v3UpgradeScenarios = [
       const offered = await readOffer(page);
       assert.deepEqual(offered.ids, ['prism-fan', 'rift-bore', 'ion-drive']);
       await selectUpgrade(page, 'rift-bore');
-      await page.waitForPage(`globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().weapons.lastBuildStats?.projectilePierce===1`);
+      await page.waitForPage(`(()=>{const debug=globalThis.__NEON_TIDE_V3__?.getDebugSnapshot?.();return debug?.session?.mode==='playing'&&Number.isFinite(debug.player?.position?.x)&&Number.isFinite(debug.player?.position?.y)&&debug.weapons?.lastBuildStats?.projectilePierce===1;})()`);
       await page.waitForPage(`(()=>{const api=globalThis.__NEON_TIDE_V3__;return [...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id)).some((entry)=>entry?.type==='prism-missile'&&entry.hitBudgetRemaining===2);})()`, 10_000);
       const evidence = await page.evaluate(`(()=>{const api=globalThis.__NEON_TIDE_V3__;const debug=api.getDebugSnapshot();const projectiles=[...api.world.query('friendlyProjectile')].map((id)=>api.world.get(id));return {build:debug.session.build,stats:debug.weapons.lastBuildStats,projectiles,events:debug.events};})()`);
       assert.equal(evidence.build.upgradeStacks['rift-bore'], 1);

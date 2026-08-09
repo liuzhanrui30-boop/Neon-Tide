@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { APP_URL, PAUSE_ONLY_STALL_MS, POST_RESUME_STALL_MS, sleep, WALL_STALL_MS, withPage } from './harness.mjs';
 
-const COMPATIBILITY_URL = new URL('?compatibility-test', APP_URL).href;
+const COMPATIBILITY_URL = new URL('?compatibility-test&objective-seed=1', APP_URL).href;
 const withLegacyPage = (name, options, callback) => withPage(name, { ...options, appUrl: COMPATIBILITY_URL }, callback);
 
 async function desktopCoreScenario() {
@@ -346,7 +346,7 @@ async function desktopCoreScenario() {
     // beginUpgrade while a debugger frame is paused can defer its focus
     // callback in headless Chrome and does not represent player input.
     await page.gameEvaluate(`
-      session.completeRoom({nextMode:'upgrade',stageIndex:0});
+      session.completeRoom({nextMode:'upgrade',stageIndex:0,rewardKind:'boss'});
       session.selectUpgrade(session.snapshot().build.pendingOffer.cards[0]);
       session.startRoom({id:'v2.2-browser-compatibility',compatibility:true,chapterIndex:0});
       $state.stageIndex=0;
@@ -372,11 +372,10 @@ async function desktopCoreScenario() {
     await page.waitForPage(`document.querySelector('#upgrade-panel').hidden`);
     await page.waitForPage(`document.activeElement?.tagName === 'CANVAS'`);
 
-    // Trigger a real compatibility realm handoff. The legacy selection API is
-    // used only to make Repair Swarm deterministic; updateStage performs the
-    // actual chapterComplete -> checkpoint -> next-room routing.
+    // Trigger a real compatibility realm handoff after the deterministic boss
+    // offer selected Repair Swarm through session authority. updateStage
+    // performs the actual chapterComplete -> checkpoint -> next-room routing.
     await page.gameEvaluate(`
-      applyUpgrade('repair-swarm');
       $state.score=735;
       $state.stageIndex=1;
       $state.stageQueue=[];
@@ -2483,7 +2482,9 @@ async function repairAndAriaScenario() {
       $state.maxHealth=3;
       $state.health=3;
       $state.ownedUpgrades=[];
-      const applied=applyUpgrade('repair-swarm');
+      session.completeRoom({nextMode:'upgrade',rewardKind:'boss'});
+      const applied=session.selectUpgrade('repair-swarm');
+      session.startRoom({id:'repair-authority-room',compatibility:true,chapterIndex:0});
       syncHealthPips();
       return {
         applied,maxHealth:$state.maxHealth,health:$state.health,pips:dom.healthPips.length,
@@ -2507,7 +2508,7 @@ async function repairAndAriaScenario() {
     const replayHull = await page.gameEvaluate(`const snapshot=globalThis.__NEON_TIDE_V3__.session.snapshot();return {
       maxHealth:$state.maxHealth,health:$state.health,maxHull:snapshot.maxHull,hull:snapshot.hull,mode:snapshot.mode,
     }`);
-    assert.deepEqual(replayHull, { maxHealth:3,health:3,maxHull:3,hull:3,mode:'playing' });
+    assert.deepEqual(replayHull, { maxHealth:4,health:4,maxHull:4,hull:4,mode:'playing' });
 
     const bossAria = await page.gameEvaluate(`
       clearWorldEntities();

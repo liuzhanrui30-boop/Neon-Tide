@@ -148,6 +148,11 @@ const STANDARD_CAMPAIGN_SEQUENCE = Object.freeze([
   'elite-pursuit',
 ]);
 
+export function getCampaignChapterIndex(roomIndex = 0) {
+  const index = Number.isInteger(roomIndex) ? Math.max(0, roomIndex) : 0;
+  return Math.min(3, index);
+}
+
 export function getCampaignEncounter(roomIndex = 0, { mode = 'standard', seed = 0 } = {}) {
   const index = Number.isInteger(roomIndex) ? Math.max(0, roomIndex) : 0;
   const offset = mode === 'abyss' ? Math.abs(Math.trunc(Number(seed) || 0)) % STANDARD_CAMPAIGN_SEQUENCE.length : 0;
