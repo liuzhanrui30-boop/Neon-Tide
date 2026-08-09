@@ -7,7 +7,7 @@ const STANDARD_PRESSURE = Object.freeze({
   eliteFrequency: 1,
   bossRecovery: 1,
   bossVariantCount: 3,
-  telegraphFloorSeconds: 0.55,
+  telegraphFloorSeconds: 0.72,
 });
 const ABYSS_PRESSURE = Object.freeze({
   threatBudget: 1.22,
@@ -15,7 +15,7 @@ const ABYSS_PRESSURE = Object.freeze({
   eliteFrequency: 1.24,
   bossRecovery: 0.8,
   bossVariantCount: 4,
-  telegraphFloorSeconds: 0.55,
+  telegraphFloorSeconds: 0.58,
 });
 const REWARD_ROOM_INDEXES = new Set([0, 2]);
 const CHECKPOINT_ENTRIES = Object.freeze({

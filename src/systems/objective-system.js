@@ -1,4 +1,8 @@
 import { OBJECTIVE_TYPES } from '../content/encounters.js';
+import {
+  DUAL_CRISIS_ESCALATION_MULTIPLIER,
+  normalizeDualCrisisEscalationMultiplier,
+} from '../game/campaign-pacing.js';
 
 const EPSILON = 1e-9;
 const TAU = Math.PI * 2;
@@ -455,6 +459,9 @@ function setupObjective(template, seed) {
       });
     });
     base.escalationSeconds = positive(template.escalationSeconds, 28);
+    base.crisisEscalationMultiplier = normalizeDualCrisisEscalationMultiplier(
+      template.crisisEscalationMultiplier ?? DUAL_CRISIS_ESCALATION_MULTIPLIER,
+    );
     base.target = 2;
     base.choiceOrder = [];
   }
@@ -623,15 +630,16 @@ function updateHarvest(objective, player, events) {
   objective.progress = objective.cores.filter(({ collected: done }) => done).length;
 }
 
-function updateDualCrisis(objective, player, dt) {
-  const multiplier = Math.max(1, Math.min(1.6, Number(player?.buildStats?.objectiveProximityMultiplier) || 1));
-  if (objective.elapsed >= objective.escalationSeconds) {
-    for (const crisis of objective.crises) {
-      if (crisis.completed || crisis.escalated) continue;
-      crisis.escalated = true;
-      crisis.requiredSeconds *= 1.5;
-    }
+function escalateDualCrises(objective) {
+  for (const crisis of objective.crises) {
+    if (crisis.completed || crisis.escalated) continue;
+    crisis.escalated = true;
+    crisis.requiredSeconds *= objective.crisisEscalationMultiplier;
   }
+}
+
+function chargeDualCrisis(objective, player, dt, multiplier) {
+  if (dt <= EPSILON) return;
   for (const crisis of objective.crises) {
     if (crisis.completed || distanceTo(player, crisis) > crisis.radius) continue;
     crisis.charge = Math.min(crisis.requiredSeconds, crisis.charge + dt * multiplier);
@@ -639,6 +647,21 @@ function updateDualCrisis(objective, player, dt) {
       crisis.completed = true;
       objective.choiceOrder.push(crisis.id);
     }
+  }
+}
+
+function updateDualCrisis(objective, player, dt) {
+  const multiplier = Math.max(1, Math.min(1.6, Number(player?.buildStats?.objectiveProximityMultiplier) || 1));
+  const startElapsed = Math.max(0, objective.elapsed - dt);
+  if (startElapsed < objective.escalationSeconds
+    && objective.elapsed >= objective.escalationSeconds) {
+    const beforeEscalation = Math.max(0, objective.escalationSeconds - startElapsed);
+    chargeDualCrisis(objective, player, beforeEscalation, multiplier);
+    escalateDualCrises(objective);
+    chargeDualCrisis(objective, player, dt - beforeEscalation, multiplier);
+  } else {
+    if (startElapsed >= objective.escalationSeconds) escalateDualCrises(objective);
+    chargeDualCrisis(objective, player, dt, multiplier);
   }
   objective.progress = objective.crises.filter(({ completed }) => completed).length;
 }

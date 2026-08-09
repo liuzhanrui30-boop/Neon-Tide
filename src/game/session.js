@@ -910,7 +910,9 @@ export function createGameSession(options = {}) {
     getChapterIndex: () => state.chapterIndex,
     getBuildStats: () => cachedBuildStats,
     getBuildRevision: () => buildRevision,
-    getEnemyTelegraphFloorSeconds: () => state.room?.boss?.telegraphFloorSeconds ?? 0.55,
+    getEnemyTelegraphFloorSeconds: () => state.room?.boss?.telegraphFloorSeconds
+      ?? state.room?.pressure?.telegraphFloorSeconds
+      ?? 0.55,
     isObjectiveManaged: () => Boolean(state.room?.objectiveManaged),
     isCombatFrozen: () => Boolean(state.room?.combatFrozen),
     getPersistenceStatus: () => runSave?.getStatus?.() ?? null,

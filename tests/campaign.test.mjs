@@ -102,7 +102,8 @@ test('Abyss changes deterministic ordering and raises fair pressure by 18–25 p
     assert.ok(abyss.pressure[key] >= standard.pressure[key] * 1.18);
     assert.ok(abyss.pressure[key] <= standard.pressure[key] * 1.25);
   }
-  assert.equal(standard.pressure.telegraphFloorSeconds, abyss.pressure.telegraphFloorSeconds);
+  assert.ok(abyss.pressure.telegraphFloorSeconds < standard.pressure.telegraphFloorSeconds);
+  assert.ok(abyss.pressure.telegraphFloorSeconds >= 0.55);
   assert.ok(abyss.route.filter(({ kind }) => kind === 'boss').every(({ variant }) => variant === 'abyss'));
 });
 

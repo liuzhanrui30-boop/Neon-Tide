@@ -9,6 +9,9 @@ const COMPLETION_SHARE = Object.freeze({
   'dual-crisis': 0.84,
 });
 
+const DUAL_CRISIS_ESCALATION_SHARE = 0.9;
+export const DUAL_CRISIS_ESCALATION_MULTIPLIER = 1.5;
+
 // These are transparent analytical baselines, not runtime timers. Combat rooms
 // complete as soon as their real targets are destroyed; the rates only convert
 // the authored duration budget into verifiable amounts of combat work.
@@ -22,6 +25,45 @@ const positive = (value, fallback) => {
   const number = finite(value, fallback);
   return number > 0 ? number : fallback;
 };
+
+export function normalizeDualCrisisEscalationMultiplier(value) {
+  return Math.max(1, Math.min(3, positive(value, DUAL_CRISIS_ESCALATION_MULTIPLIER)));
+}
+
+function estimateSequentialDualCrisisSeconds(template) {
+  const crises = Array.isArray(template.crises)
+    ? template.crises.map((crisis) => ({
+      requiredSeconds: positive(crisis.requiredSeconds, 3.2),
+      escalated: Boolean(crisis.escalated),
+    }))
+    : [0, 1].map(() => ({
+      requiredSeconds: positive(template.crisisSeconds, 3.2),
+      escalated: false,
+    }));
+  const escalationSeconds = positive(template.escalationSeconds, 28);
+  const escalationMultiplier = normalizeDualCrisisEscalationMultiplier(
+    template.crisisEscalationMultiplier,
+  );
+  let elapsed = 0;
+  let escalationActive = false;
+  for (const crisis of crises) {
+    if (crisis.escalated) {
+      elapsed += crisis.requiredSeconds;
+      escalationActive = true;
+    } else if (escalationActive || elapsed >= escalationSeconds) {
+      elapsed += crisis.requiredSeconds * escalationMultiplier;
+      escalationActive = true;
+    } else if (elapsed + crisis.requiredSeconds > escalationSeconds) {
+      // Runtime escalation raises the unfinished crisis' total target, not only
+      // its remaining work. Charge accumulated before the threshold is kept.
+      elapsed += crisis.requiredSeconds * escalationMultiplier;
+      escalationActive = true;
+    } else {
+      elapsed += crisis.requiredSeconds;
+    }
+  }
+  return elapsed;
+}
 
 function pacingContract(type, authoredTargetDurationSeconds, effectiveTargetDurationSeconds, workSeconds) {
   return Object.freeze({
@@ -89,7 +131,11 @@ export function tuneCampaignObjectiveTemplate(template, {
   } else if (template.type === 'dual-crisis') {
     const count = 2;
     tuned.crisisSeconds = workSeconds / count;
-    tuned.escalationSeconds = Math.max(tuned.crisisSeconds, effectiveTargetDurationSeconds * 0.72);
+    tuned.escalationSeconds = Math.max(
+      tuned.crisisSeconds,
+      effectiveTargetDurationSeconds * DUAL_CRISIS_ESCALATION_SHARE,
+    );
+    tuned.crisisEscalationMultiplier = DUAL_CRISIS_ESCALATION_MULTIPLIER;
   }
 
   return Object.freeze(tuned);
@@ -130,10 +176,7 @@ export function estimateCampaignObjectiveSeconds(template) {
       + Math.max(0, count - 1) * positive(template.coreActivationIntervalSeconds, 0.01);
   }
   if (template.type === 'dual-crisis') {
-    if (Array.isArray(template.crises)) {
-      return template.crises.reduce((total, crisis) => total + positive(crisis.requiredSeconds, 3.2), 0);
-    }
-    return 2 * positive(template.crisisSeconds, 3.2);
+    return estimateSequentialDualCrisisSeconds(template);
   }
   throw new TypeError(`campaign objective estimate does not support type: ${String(template.type)}`);
 }

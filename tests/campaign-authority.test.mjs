@@ -196,7 +196,10 @@ test('Abyss campaign pressure is consumed by threat budget, movement, selection 
   assert.equal(abyssRoom.pressure.enemySpeed, 1.2);
   assert.equal(abyssRoom.pressure.selectionCadence, 1.24);
   assert.ok(abyssRoom.pressure.waveIntervalSeconds < normalRoom.pressure.waveIntervalSeconds);
-  assert.equal(abyssRoom.pressure.telegraphFloorSeconds, normalRoom.pressure.telegraphFloorSeconds);
+  assert.ok(abyssRoom.pressure.telegraphFloorSeconds < normalRoom.pressure.telegraphFloorSeconds);
+  assert.ok(abyssRoom.pressure.telegraphFloorSeconds >= 0.55);
+  assert.equal(standard.session.getEnemyTelegraphFloorSeconds(), normalRoom.pressure.telegraphFloorSeconds);
+  assert.equal(abyss.session.getEnemyTelegraphFloorSeconds(), abyssRoom.pressure.telegraphFloorSeconds);
   assert.equal(abyss.session.getEncounterSnapshot().threatState.enemySystem.contract.speedMultiplier, 1.2);
 
   for (let index = 0; index < 3; index += 1) {
@@ -211,7 +214,10 @@ test('Abyss campaign pressure is consumed by threat budget, movement, selection 
   assert.equal(abyssBoss.variantCount, 4);
   assert.equal(standardBoss.recoveryMultiplier, 1);
   assert.equal(abyssBoss.recoveryMultiplier, 0.8);
-  assert.equal(abyssBoss.telegraphFloorSeconds, standardBoss.telegraphFloorSeconds);
+  assert.ok(abyssBoss.telegraphFloorSeconds < standardBoss.telegraphFloorSeconds);
+  assert.ok(abyssBoss.telegraphFloorSeconds >= 0.55);
+  assert.equal(standard.session.getEnemyTelegraphFloorSeconds(), standardBoss.telegraphFloorSeconds);
+  assert.equal(abyss.session.getEnemyTelegraphFloorSeconds(), abyssBoss.telegraphFloorSeconds);
 
   const standardWorld = createEntityWorld();
   const abyssWorld = createEntityWorld();
