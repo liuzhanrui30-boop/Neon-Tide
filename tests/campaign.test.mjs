@@ -40,9 +40,25 @@ class MemoryRunSave {
   getStatus() { return { available: true }; }
 }
 
+const campaignAuthorities = new WeakMap();
+
+function createCampaignTestSession(options = {}) {
+  const campaignTestAuthority = {};
+  const session = createGameSession({
+    development: true,
+    deterministicTestMode: true,
+    deterministicCampaignTest: true,
+    campaignTestAuthority,
+    initialRouteKind: 'campaign',
+    ...options,
+  });
+  campaignAuthorities.set(session, campaignTestAuthority);
+  return session;
+}
+
 function completeCurrentNode(session) {
   assert.equal(session.startRoom(roomRequestForRunRoute(session.snapshot().route)), true);
-  assert.equal(session.completeRoom(), true);
+  assert.equal(campaignAuthorities.get(session).completeCurrentNode(), true);
   if (session.getMode() === 'upgrade') {
     const [choice] = session.snapshot().build.pendingOffer.cards;
     assert.equal(session.selectUpgrade(choice), true);
@@ -121,7 +137,7 @@ test('campaign routes are explicit and do not invalidate historical authored v2 
 
 test('a GameSession completes the authored route through real transitions with nine automatic-build choices', () => {
   const runSave = new MemoryRunSave();
-  const session = createGameSession({ development: true, runSave, deterministicTestMode: true, initialRouteKind: 'campaign' });
+  const session = createCampaignTestSession({ runSave });
   assert.equal(session.startRun('standard', 2026), true);
   const chapters = [];
   let upgrades = 0;
@@ -140,7 +156,7 @@ test('a GameSession completes the authored route through real transitions with n
 
 test('Standard restores the current chapter entry build while Abyss death performs a full reset without a checkpoint', () => {
   const standardSave = new MemoryRunSave();
-  const standard = createGameSession({ development: true, runSave: standardSave, deterministicTestMode: true, initialRouteKind: 'campaign' });
+  const standard = createCampaignTestSession({ runSave: standardSave });
   standard.startRun('standard', 99);
   for (let index = 0; index < 4; index += 1) completeCurrentNode(standard);
   const entry = structuredClone(standard.snapshot());
@@ -159,7 +175,7 @@ test('Standard restores the current chapter entry build while Abyss death perfor
 
   const abyssSave = new MemoryRunSave();
   abyssSave.checkpoint = structuredClone(standardSave.checkpoint);
-  const abyss = createGameSession({ development: true, runSave: abyssSave, deterministicTestMode: true, initialRouteKind: 'campaign' });
+  const abyss = createCampaignTestSession({ runSave: abyssSave });
   assert.equal(abyss.startRun('abyss', 99), true);
   assert.equal(abyssSave.checkpoint, null);
   assert.equal(abyss.startRoom(roomRequestForRunRoute(abyss.snapshot().route)), true);

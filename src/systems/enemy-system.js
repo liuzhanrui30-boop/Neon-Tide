@@ -91,6 +91,7 @@ export function createEnemySystem({
   warningCap = 3,
   worldLimit = 18,
   speedMultiplier = 1,
+  telegraphFloorSeconds = 0.55,
 } = {}) {
   if (typeof random !== 'function') throw new TypeError('enemy random must be a function');
   if (typeof warningCap !== 'function' && (!Number.isFinite(Number(warningCap)) || Number(warningCap) < 1)) {
@@ -101,6 +102,10 @@ export function createEnemySystem({
   }
   if (!Number.isFinite(Number(speedMultiplier)) || Number(speedMultiplier) < 1 || Number(speedMultiplier) > 2) {
     throw new TypeError('enemy speedMultiplier must be in [1, 2]');
+  }
+  if (typeof telegraphFloorSeconds !== 'function'
+    && (!Number.isFinite(Number(telegraphFloorSeconds)) || Number(telegraphFloorSeconds) < 0.55)) {
+    throw new TypeError('enemy telegraphFloorSeconds must be at least 0.55 or a function');
   }
   const safeProjectileCap = clamp(Math.trunc(finite(projectileCap, 96)), 1, 96);
   const safeSpeedMultiplier = Number(speedMultiplier);
@@ -130,6 +135,17 @@ export function createEnemySystem({
   let chainTriggers = 0;
   let executionProtected = 0;
   let cleanupCount = 0;
+
+  function currentTelegraphFloor() {
+    const value = typeof telegraphFloorSeconds === 'function'
+      ? telegraphFloorSeconds()
+      : telegraphFloorSeconds;
+    return Math.max(0.55, finite(value, 0.55));
+  }
+
+  function telegraphSecondsFor(roleId) {
+    return Math.max(getEnemyRole(roleId)?.telegraphSeconds ?? 0.55, currentTelegraphFloor());
+  }
 
   function emit(events, type, payload) {
     events?.emit?.(type, frozen(payload));
@@ -176,7 +192,7 @@ export function createEnemySystem({
       speed, maxSpeed: role.speedRange[1] * safeSpeedMultiplier, turnRate: roleId === 'interceptor' ? 8 : 4.5,
       threat: role.threatCost, role: roleId, type: roleId, state: overrides.state ?? stateByRole[roleId],
       stateTimer: finite(overrides.stateTimer, timerByRole[roleId]),
-      telegraphTimer: 0, duration: role.telegraphSeconds,
+      telegraphTimer: 0, duration: telegraphSecondsFor(roleId),
       sourceId: sourceIdFor(roleId, overrides.sourceId), parentId: finite(overrides.parentId),
       variantIndex: finite(overrides.variantIndex, sequence % 3),
       team: 2, color: role.color, opacity: 1,
@@ -299,16 +315,17 @@ export function createEnemySystem({
     const length = Math.hypot(deltaX, deltaY);
     const directionX = length > EPSILON ? deltaX / length : 0;
     const directionY = length > EPSILON ? deltaY / length : 1;
+    const telegraphSeconds = telegraphSecondsFor('interceptor');
     world.write(enemy.id, {
-      state: 'cut-telegraph', stateTimer: getEnemyRole('interceptor').telegraphSeconds,
-      telegraphTimer: getEnemyRole('interceptor').telegraphSeconds, duration: getEnemyRole('interceptor').telegraphSeconds,
+      state: 'cut-telegraph', stateTimer: telegraphSeconds,
+      telegraphTimer: telegraphSeconds, duration: telegraphSeconds,
       targetX: cut.x, targetY: cut.y, directionX, directionY,
       value: cut.angleDegrees, executingTelegraph: true, contactDamaging: false,
     });
     spawnWarning(world, enemy, 'interceptor-cut', {
       x: (enemy.x + cut.x) * 0.5, y: (enemy.y + cut.y) * 0.5,
       rotation: Math.atan2(directionY, directionX), scaleX: length, scaleY: 0.12,
-      duration: getEnemyRole('interceptor').telegraphSeconds, color: 0xff506f,
+      duration: telegraphSeconds, color: 0xff506f,
     });
   }
 
@@ -317,18 +334,19 @@ export function createEnemySystem({
     const base = Math.atan2(player.y - enemy.y, player.x - enemy.x);
     const selected = Math.abs(enemy.variantIndex) % 3;
     const offsets = [-0.22, 0, 0.22];
+    const telegraphSeconds = telegraphSecondsFor('striker');
     for (let index = 0; index < 3; index += 1) {
       const angle = base + offsets[index];
       spawnWarning(world, enemy, 'striker-line', {
         rotation: angle, scaleX: 16, scaleY: index === selected ? 0.13 : 0.08,
-        duration: getEnemyRole('striker').telegraphSeconds,
+        duration: telegraphSeconds,
         color: index === selected ? 0xff506f : 0xff9f43, sequence: index,
       });
     }
     const dash = base + offsets[selected];
     world.write(enemy.id, {
-      state: 'strike-telegraph', stateTimer: getEnemyRole('striker').telegraphSeconds,
-      telegraphTimer: getEnemyRole('striker').telegraphSeconds, duration: getEnemyRole('striker').telegraphSeconds,
+      state: 'strike-telegraph', stateTimer: telegraphSeconds,
+      telegraphTimer: telegraphSeconds, duration: telegraphSeconds,
       directionX: Math.cos(dash), directionY: Math.sin(dash), executingTelegraph: true,
       contactDamaging: false, variantIndex: (selected + 1) % 3,
     });
@@ -341,16 +359,17 @@ export function createEnemySystem({
     const length = Math.hypot(deltaX, deltaY);
     const directionX = length > EPSILON ? deltaX / length : 0;
     const directionY = length > EPSILON ? deltaY / length : 1;
+    const telegraphSeconds = telegraphSecondsFor('lancer');
     spawnWarning(world, enemy, 'lancer-beam', {
       x: enemy.x + directionX * LANCER_PREVIEW_CENTER,
       y: enemy.y + directionY * LANCER_PREVIEW_CENTER,
       rotation: Math.atan2(directionY, directionX),
       scaleX: LANCER_PREVIEW_LENGTH, scaleY: LANCER_PREVIEW_WIDTH,
-      duration: getEnemyRole('lancer').telegraphSeconds, color: 0xffd166,
+      duration: telegraphSeconds, color: 0xffd166,
     });
     world.write(enemy.id, {
-      state: 'beam-telegraph', stateTimer: getEnemyRole('lancer').telegraphSeconds,
-      telegraphTimer: getEnemyRole('lancer').telegraphSeconds, duration: getEnemyRole('lancer').telegraphSeconds,
+      state: 'beam-telegraph', stateTimer: telegraphSeconds,
+      telegraphTimer: telegraphSeconds, duration: telegraphSeconds,
       directionX, directionY, executingTelegraph: true,
       contactDamaging: false,
     });
@@ -389,8 +408,8 @@ export function createEnemySystem({
       ? enemy.stateTimer
       : 0;
     const duration = chained
-      ? Math.max(MINE_CHAIN_WARNING_FLOOR, finite(delay), existingWarning)
-      : Math.max(getEnemyRole('mine').telegraphSeconds, existingWarning);
+      ? Math.max(MINE_CHAIN_WARNING_FLOOR, currentTelegraphFloor(), finite(delay), existingWarning)
+      : Math.max(telegraphSecondsFor('mine'), existingWarning);
     for (let index = 0; index < 8; index += 1) {
       const angle = index / 8 * TAU;
       spawnWarning(world, enemy, 'mine-ring', {
@@ -445,20 +464,21 @@ export function createEnemySystem({
   function beginWarden(world, enemy, player) {
     removeOwned(world, enemy.id);
     const gapX = clamp(player.x, -5.8, 5.8);
+    const telegraphSeconds = telegraphSecondsFor('warden');
     for (let x = -8.4; x <= 8.4; x += 1.2) {
       if (Math.abs(x - gapX) < 1.6) continue;
       spawnWarning(world, enemy, 'warden-wall-preview', {
         x, y: enemy.y, scaleX: 0.9, scaleY: 0.16,
-        duration: getEnemyRole('warden').telegraphSeconds, color: 0xa56bff,
+        duration: telegraphSeconds, color: 0xa56bff,
       });
     }
     spawnWarning(world, enemy, 'warden-gap', {
       x: gapX, y: enemy.y, scaleX: 2.4, scaleY: 0.2, radius: 1.2,
-      duration: getEnemyRole('warden').telegraphSeconds, color: 0x78fff1, role: 'warden-gap',
+      duration: telegraphSeconds, color: 0x78fff1, role: 'warden-gap',
     });
     world.write(enemy.id, {
-      state: 'wall-telegraph', stateTimer: getEnemyRole('warden').telegraphSeconds,
-      telegraphTimer: getEnemyRole('warden').telegraphSeconds, duration: getEnemyRole('warden').telegraphSeconds,
+      state: 'wall-telegraph', stateTimer: telegraphSeconds,
+      telegraphTimer: telegraphSeconds, duration: telegraphSeconds,
       targetX: gapX, directionX: enemy.variantIndex % 2 ? -1 : 1,
       executingTelegraph: true, contactDamaging: false, weakPoint: true,
     });
@@ -487,18 +507,18 @@ export function createEnemySystem({
 
   function beginBulwarkCounter(world, enemy, token) {
     removeOwned(world, enemy.id);
-    const role = getEnemyRole('bulwark');
+    const telegraphSeconds = telegraphSecondsFor('bulwark');
     for (let index = 0; index < 10; index += 1) {
       const angle = index / 10 * TAU;
       spawnWarning(world, enemy, 'bulwark-counter-ring', {
         x: enemy.x + Math.cos(angle) * 1.4, y: enemy.y + Math.sin(angle) * 1.4,
-        rotation: angle, scaleX: 0.52, scaleY: 0.12, duration: role.telegraphSeconds,
+        rotation: angle, scaleX: 0.52, scaleY: 0.12, duration: telegraphSeconds,
         color: 0x64f5ff, sequence: index,
       });
     }
     world.write(enemy.id, {
-      state: 'counter-telegraph', stateTimer: role.telegraphSeconds,
-      telegraphTimer: role.telegraphSeconds, duration: role.telegraphSeconds,
+      state: 'counter-telegraph', stateTimer: telegraphSeconds,
+      telegraphTimer: telegraphSeconds, duration: telegraphSeconds,
       executingTelegraph: true, contactDamaging: false, armored: true,
       counterToken: token,
     });
@@ -874,6 +894,8 @@ export function createEnemySystem({
   function spawnWave(world, roles, options = {}) {
     if (!Array.isArray(roles)) throw new TypeError('wave roles must be an array');
     const arena = options.arena ?? DEFAULT_ARENA;
+    const variantCount = clamp(Math.trunc(finite(options.variantCount, 3)), 1, 8);
+    const variantOffset = Math.max(0, Math.trunc(finite(options.variantOffset, 0)));
     const ids = [];
     const group = ++sequence;
     for (let index = 0; index < roles.length; index += 1) {
@@ -887,7 +909,11 @@ export function createEnemySystem({
       else if (side === 1) x = arena.halfWidth - 0.4;
       else if (side === 2) y = -arena.halfHeight + 0.4;
       else y = arena.halfHeight - 0.4;
-      const id = spawnRole(world, role, { x, y, parentId: group, variantIndex: index, events: options.events });
+      const id = spawnRole(world, role, {
+        x, y, parentId: group,
+        variantIndex: (variantOffset + index) % variantCount,
+        events: options.events,
+      });
       if (id != null) ids.push(id);
     }
     return Object.freeze(ids);
@@ -928,7 +954,7 @@ export function createEnemySystem({
       projectilesSpawned, chainTriggers, executionProtected, cleanupCount,
       activeWarnings, activeHazards,
       caps: { enemy: currentEnemyCap(), projectile: safeProjectileCap, warning: currentWarningCap() },
-      contract: { speedMultiplier: safeSpeedMultiplier },
+      contract: { speedMultiplier: safeSpeedMultiplier, telegraphFloorSeconds: currentTelegraphFloor() },
       roles,
     });
   }

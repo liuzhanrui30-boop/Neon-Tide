@@ -21,6 +21,16 @@ await withPage('production-release-probe', { appUrl: APP_URL }, async (page) => 
   assert.equal(started.route.roomIndex, 0);
   assert.equal(started.room.timing.authoredTargetDurationSeconds, 58);
   assert.equal(started.room.pressure.enemySpeed, 1);
+  const directCompletion = await page.evaluate(`(()=>{
+    const api=globalThis.__NEON_TIDE_V3__;
+    const before=api.session.snapshot();
+    let message=null;
+    try { api.session.completeRoom({}); } catch (error) { message=String(error?.message||error); }
+    const after=api.session.snapshot();
+    return {message,before:{mode:before.mode,stats:before.stats,route:before.route},after:{mode:after.mode,stats:after.stats,route:after.route}};
+  })()`);
+  assert.match(directCompletion.message, /natural campaign completion authorization/);
+  assert.deepEqual(directCompletion.after, directCompletion.before);
 });
-console.log('ok 1 - production release probe survives stable chunk splitting');
+console.log('ok 1 - production release probe survives stable chunk splitting and rejects public campaign settlement');
 console.log('1..1');

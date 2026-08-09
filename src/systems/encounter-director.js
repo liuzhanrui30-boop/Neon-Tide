@@ -8,6 +8,10 @@ import {
 import { createAntiOrbitDirector } from './anti-orbit-director.js';
 import { ENEMY_ROLE_IDS, ENEMY_ROLES } from '../content/enemies.js';
 import { createEnemySystem } from './enemy-system.js';
+import {
+  estimateCampaignObjectiveSeconds,
+  tuneCampaignObjectiveTemplate,
+} from '../game/campaign-pacing.js';
 
 
 const THREAT_LIMITS = Object.freeze({
@@ -250,7 +254,7 @@ function summarizeAdmissionCharges(charges) {
   });
 }
 
-function createMaterializedWave(selectedWave, materializedRoles) {
+function createMaterializedWave(selectedWave, materializedRoles, bossVariant = null) {
   const materialized = summarizeMaterializedRoles(materializedRoles);
   const partitioned = partitionAdmissionCharges(selectedWave.admissionCharges, materialized.roles);
   const selectedDiagnostics = summarizeAdmissionCharges(selectedWave.admissionCharges);
@@ -269,6 +273,10 @@ function createMaterializedWave(selectedWave, materializedRoles) {
     selectedDiagnostics,
     materializedDiagnostics,
     rejectedDiagnostics,
+    ...(bossVariant ? {
+      bossVariantIndex: bossVariant.index,
+      bossVariantCount: bossVariant.count,
+    } : {}),
   });
 }
 
@@ -375,6 +383,7 @@ export function createEncounterDirector({
   let updateRevision = 0;
   let antiOrbitDirector = createAntiOrbitDirector({ seed });
   let threatRandom = createThreatRandom(seed);
+  let bossContract = null;
   const runtimeThreatLimits = getThreatLimits({ mode, quality });
   const enemySystem = createEnemySystem({
     random: () => threatRandom(),
@@ -382,6 +391,8 @@ export function createEncounterDirector({
     projectileCap: runtimeThreatLimits.projectileCap,
     warningCap: runtimeThreatLimits.simultaneousWarningCap,
     speedMultiplier: pressureContract.enemySpeed,
+    telegraphFloorSeconds: () => bossContract?.telegraphFloorSeconds
+      ?? pressureContract.telegraphFloorSeconds,
   });
   let chapterIndex = 0;
   let waveTimer = 0;
@@ -396,7 +407,25 @@ export function createEncounterDirector({
   const rolesSeen = new Set();
   let lastWave = null;
   let timingContract = null;
-  let bossContract = null;
+  let bossCurrentVariantIndex = null;
+  let bossAttacksSelected = 0;
+  const bossVariantsSeen = new Set();
+
+  function bossRecoverySeconds() {
+    return pressureContract.waveIntervalSeconds * (bossContract?.recoveryMultiplier ?? 1);
+  }
+
+  function bossBehaviorSnapshot() {
+    if (!bossContract) return null;
+    return Object.freeze({
+      recoverySeconds: bossRecoverySeconds(),
+      variantCount: bossContract.variantCount,
+      currentVariantIndex: bossCurrentVariantIndex,
+      variantsSeen: Object.freeze([...bossVariantsSeen]),
+      attacksSelected: bossAttacksSelected,
+      telegraphFloorSeconds: bossContract.telegraphFloorSeconds,
+    });
+  }
   if (objectiveAuthority) {
     Object.defineProperty(objectiveAuthority, 'visit', {
       configurable: true,
@@ -435,6 +464,7 @@ export function createEncounterDirector({
         pressure: pressureContract,
         timing: timingContract ? cloneFrozen(timingContract) : null,
         boss: bossContract ? cloneFrozen(bossContract) : null,
+        bossBehavior: bossBehaviorSnapshot(),
         threatState: Object.freeze({
           chapterIndex, waveIndex, wavesSelected, wavesSpawned, enemiesDestroyed,
           roomElapsed, untouchedSeconds, rolesSeen: Object.freeze([...rolesSeen]),
@@ -450,7 +480,14 @@ export function createEncounterDirector({
     const authoredTargetDurationSeconds = Number.isFinite(context?.timing?.targetDurationSeconds)
       ? Number(context.timing.targetDurationSeconds)
       : null;
-    const template = authored ? scaledTemplate(authored, durationScale, authoredTargetDurationSeconds) : null;
+    const template = authored
+      ? authoredTargetDurationSeconds === null
+        ? scaledTemplate(authored, durationScale)
+        : tuneCampaignObjectiveTemplate(authored, {
+          targetDurationSeconds: authoredTargetDurationSeconds,
+          durationScale,
+        })
+      : null;
     if (!template) throw new TypeError('startRoom requires a known encounter template');
     const currentIndex = roomIndex;
     const selectedRoomSeed = roomSeed(seed, currentIndex, template.id);
@@ -477,9 +514,22 @@ export function createEncounterDirector({
       authoredTargetDurationSeconds,
       effectiveTargetDurationSeconds: authoredTargetDurationSeconds * durationScale,
       objectiveScale: (authoredTargetDurationSeconds * durationScale) / Math.max(0.1, authored.timeout),
+      estimatedObjectiveSeconds: estimateCampaignObjectiveSeconds(template),
       completesOnObjective: true,
     });
-    bossContract = context.boss ? Object.freeze(clone(context.boss)) : null;
+    if (context.boss) {
+      const candidate = clone(context.boss);
+      if (!Number.isFinite(candidate.recoveryMultiplier)
+        || candidate.recoveryMultiplier <= 0 || candidate.recoveryMultiplier > 1.5
+        || !Number.isInteger(candidate.variantCount) || candidate.variantCount < 1 || candidate.variantCount > 8
+        || !Number.isFinite(candidate.telegraphFloorSeconds) || candidate.telegraphFloorSeconds < 0.55) {
+        throw new TypeError('Boss behavior contract is outside fair runtime bounds');
+      }
+      bossContract = Object.freeze(candidate);
+    } else bossContract = null;
+    bossCurrentVariantIndex = null;
+    bossAttacksSelected = 0;
+    bossVariantsSeen.clear();
     templateId = template.id;
     roomIndex += 1;
     phase = 'active';
@@ -496,7 +546,9 @@ export function createEncounterDirector({
     let count = 0;
     for (const target of objective.eliteTargets ?? []) {
       const id = enemySystem.spawnRole(world, 'bulwark', {
-        x: target.x, y: target.y, sourceId: target.sourceId, armored: false, weakPoint: true, events,
+        x: target.x, y: target.y, sourceId: target.sourceId,
+        hp: target.hp, maxHp: target.hp,
+        armored: false, weakPoint: true, events,
       });
       if (id != null) { count += 1; rolesSeen.add('bulwark'); }
     }
@@ -521,8 +573,13 @@ export function createEncounterDirector({
     waveTimer -= dt;
     if (waveTimer > 0) return null;
     const scanned = scanThreatWorld(world);
+    const bossVariant = bossContract ? {
+      index: waveIndex % bossContract.variantCount,
+      count: bossContract.variantCount,
+    } : null;
+    const selectionWaveIndex = bossVariant ? waveIndex + bossVariant.index * 2 : waveIndex;
     const wave = selectThreatWave({
-      mode, quality, chapter: chapterIndex, waveIndex, ...scanned,
+      mode, quality, chapter: chapterIndex, waveIndex: selectionWaveIndex, ...scanned,
       objectiveBurden: objectiveBurdenFor(objective),
       playerHealthRatio: hull / maxHull,
       clearRate: roomElapsed > 0 ? enemiesDestroyed / roomElapsed : 0,
@@ -532,7 +589,12 @@ export function createEncounterDirector({
     wavesSelected += 1;
     const materializedRoles = [];
     if (wave.roles.length > 0) {
-      const ids = enemySystem.spawnWave(world, wave.roles, { arena: objective.arena, events });
+      const ids = enemySystem.spawnWave(world, wave.roles, {
+        arena: objective.arena,
+        events,
+        variantOffset: bossVariant?.index ?? 0,
+        variantCount: bossVariant?.count ?? 3,
+      });
       if (ids.length > 0) {
         wavesSpawned += 1;
         for (const id of ids) {
@@ -543,7 +605,12 @@ export function createEncounterDirector({
         }
       }
     }
-    lastWave = createMaterializedWave(wave, materializedRoles);
+    if (bossVariant) {
+      bossCurrentVariantIndex = bossVariant.index;
+      bossVariantsSeen.add(bossVariant.index);
+      bossAttacksSelected += 1;
+    }
+    lastWave = createMaterializedWave(wave, materializedRoles, bossVariant);
     if (materializedRoles.length > 0) {
       emit(events, 'encounter:threat-wave', {
         templateId, chapterIndex, waveIndex: waveIndex - 1,
@@ -558,9 +625,13 @@ export function createEncounterDirector({
         selectedDiagnostics: lastWave.selectedDiagnostics,
         materializedDiagnostics: lastWave.materializedDiagnostics,
         rejectedDiagnostics: lastWave.rejectedDiagnostics,
+        bossVariantIndex: lastWave.bossVariantIndex ?? null,
+        bossVariantCount: lastWave.bossVariantCount ?? null,
+        bossRecoverySeconds: bossContract ? bossRecoverySeconds() : null,
+        telegraphFloorSeconds: bossContract?.telegraphFloorSeconds ?? pressureContract.telegraphFloorSeconds,
       });
     }
-    waveTimer = pressureContract.waveIntervalSeconds;
+    waveTimer = bossRecoverySeconds();
     return lastWave;
   }
 
@@ -624,6 +695,9 @@ export function createEncounterDirector({
     threatBudget = null;
     timingContract = null;
     bossContract = null;
+    bossCurrentVariantIndex = null;
+    bossAttacksSelected = 0;
+    bossVariantsSeen.clear();
     combatFrozen = false;
     upgradeOffered = false;
     completionAcknowledged = false;

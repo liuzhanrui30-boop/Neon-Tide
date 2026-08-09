@@ -207,8 +207,9 @@ export function createObjectiveWorldBridge({ world } = {}) {
     patch.role = 'harvest-core';
     patch.type = 'objective-core';
     patch.objectiveType = 'core-harvest';
-    patch.color = COLORS.core;
-    patch.collidable = objective.elapsed >= objective.activationDelay;
+    patch.collidable = objective.elapsed >= (core.activationAt ?? objective.activationDelay);
+    patch.color = patch.collidable ? COLORS.core : COLORS.stormInactive;
+    patch.state = patch.collidable ? 'active' : 'charging';
     patch.invulnerable = false;
     return upsert('pickup', core.sourceId);
   }

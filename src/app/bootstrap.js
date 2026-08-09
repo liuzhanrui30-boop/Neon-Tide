@@ -93,6 +93,7 @@ export function bootstrapNeonTide(options = {}) {
       const abyss = session?.snapshot().runMode === 'abyss';
       return abyss ? (coarseEntityQuality ? 3 : 4) : (coarseEntityQuality ? 2 : 3);
     },
+    telegraphFloorSeconds: () => session?.getEnemyTelegraphFloorSeconds?.() ?? 0.55,
   });
   const objectiveBridge = createObjectiveWorldBridge({ world });
   const objectiveAuthority = {};

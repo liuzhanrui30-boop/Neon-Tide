@@ -346,6 +346,7 @@ function setupObjective(template, seed) {
     progress: 0,
     target: 1,
     progressRatio: 0,
+    pacing: template.campaignPacing ? clone(template.campaignPacing) : null,
     arena,
     safeZone: null,
     spawnHooks: clone(template.spawnHooks ?? []),
@@ -385,7 +386,11 @@ function setupObjective(template, seed) {
   } else if (template.type === 'escort') {
     const angle = random() * TAU;
     const length = positive(template.escortDistance, 24);
-    const route = routeFromPoints(Array.from({ length: 13 }, (_, index) => {
+    // Long campaign escorts trace multiple readable arena loops. The path owns
+    // enough real distance for the authored work target instead of clamping a
+    // 65-second contract to the old seven-second route.
+    const routeNodeCount = Math.max(13, Math.ceil(length / 1.2) + 2);
+    const route = routeFromPoints(Array.from({ length: routeNodeCount }, (_, index) => {
       const routeAngle = angle + index * (TAU / 8);
       return point(Math.cos(routeAngle) * 4, Math.sin(routeAngle) * 1.6);
     }));
@@ -399,10 +404,12 @@ function setupObjective(template, seed) {
     base.target = positive(template.escortDistance, base.escort.routeLength);
   } else if (template.type === 'elite-hunt') {
     base.target = Math.max(1, Math.trunc(positive(template.eliteTarget, 2)));
+    const targetHp = positive(template.eliteTargetHp, 6);
     base.eliteTargets = radialPoints(random, base.target, 3.2, 5.2).map((entry, index) => ({
       ...entry,
       id: `elite-${index + 1}`,
       sourceId: stableSourceId(base.seed, 'elite', index),
+      hp: targetHp,
     }));
     base.eliteIds = base.eliteTargets.map(({ id }) => id);
   } else if (template.type === 'storm-corridor') {
@@ -428,11 +435,13 @@ function setupObjective(template, seed) {
     base.stormGraceSeconds = positive(template.stormGraceSeconds, 2.5);
   } else if (template.type === 'core-harvest') {
     const count = Math.max(2, Math.trunc(positive(template.coreCount, 5)));
+    base.activationDelay = positive(template.activationDelay, 0.75);
+    base.coreActivationIntervalSeconds = Math.max(0, finite(template.coreActivationIntervalSeconds));
     base.cores = ellipticalRadialPoints(random, count, 2.6, 6).map((entry, index) => ({
       ...entry, id: `core-${index + 1}`, radius: positive(template.collectRadius, 1.15), collected: false,
       sourceId: stableSourceId(base.seed, 'core', index),
+      activationAt: base.activationDelay + index * base.coreActivationIntervalSeconds,
     }));
-    base.activationDelay = positive(template.activationDelay, 0.75);
     base.target = count;
   } else if (template.type === 'dual-crisis') {
     const rotation = random() * TAU;
@@ -589,17 +598,18 @@ function updateStorm(objective, player, dt) {
 }
 
 function updateHarvest(objective, player, events) {
+  const active = (core) => objective.elapsed >= finite(core.activationAt, objective.activationDelay) - EPSILON;
   if (objective.elapsed < objective.activationDelay - EPSILON) return;
   const collected = newEvents(objective, events, (event) => ['core:collected', 'pickupCollected'].includes(event?.type));
   for (const payload of collected) {
     const ids = Array.isArray(payload.ids) ? payload.ids : payload.id != null ? [payload.id] : [];
     for (const id of ids) {
       const core = objective.cores.find((entry) => entry.id === id || entry.sourceId === id);
-      if (core) core.collected = true;
+      if (core && active(core)) core.collected = true;
     }
     let remaining = Math.max(0, Math.trunc(finite(payload.count, ids.length || 1)) - ids.length);
     while (remaining > 0) {
-      const core = objective.cores.find(({ collected: done }) => !done);
+      const core = objective.cores.find((entry) => !entry.collected && active(entry));
       if (!core) break;
       core.collected = true;
       remaining -= 1;
@@ -607,7 +617,8 @@ function updateHarvest(objective, player, events) {
   }
   for (const core of objective.cores) {
     const pickupMultiplier = Math.max(1, Math.min(3, Number(player?.buildStats?.pickupRadiusMultiplier) || 1));
-    if (!core.collected && distanceTo(player, core) <= core.radius * pickupMultiplier) core.collected = true;
+    if (!core.collected && active(core)
+      && distanceTo(player, core) <= core.radius * pickupMultiplier) core.collected = true;
   }
   objective.progress = objective.cores.filter(({ collected: done }) => done).length;
 }

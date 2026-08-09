@@ -182,6 +182,8 @@ export function createGameSession(options = {}) {
   let lastObjectivePublishKey = null;
   let buildRevision = 0;
   let cachedBuildStats = deriveBuildStats(state.build);
+  const campaignSettlementAuthority = Symbol('campaign-settlement-authority');
+  let campaignCompletionGrant = null;
 
   function assignBuild(build) {
     state.build = createUpgradeBuild(build);
@@ -336,6 +338,7 @@ export function createGameSession(options = {}) {
     state.hull = Math.min(state.maxHull, checkpoint.hull);
     state.stats = cloneValue(checkpoint.stats);
     state.terminalReason = null;
+    campaignCompletionGrant = null;
     encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: checkpoint.seed, roomIndex: checkpoint.stats.roomsStarted,
       durationScale: encounterDurationScale,
@@ -392,6 +395,7 @@ export function createGameSession(options = {}) {
     state.maxHull = baseMaxHull;
     state.stats = createStats();
     state.terminalReason = null;
+    campaignCompletionGrant = null;
     encounterDirector = createDirector({
       mode: runMode, quality: encounterQuality, seed, durationScale: encounterDurationScale,
       pressure: state.route.kind === 'campaign' ? activeCampaign.pressure : null,
@@ -485,6 +489,7 @@ export function createGameSession(options = {}) {
       timing,
       boss,
     });
+    campaignCompletionGrant = null;
     state.route = campaignRequest
       ? createCampaignRunRoute(routeRoomIndex, state.seed, state.runMode)
       : compatibility
@@ -504,6 +509,7 @@ export function createGameSession(options = {}) {
       pressure: cloneValue(encounter.pressure),
       timing: cloneValue(encounter.timing),
       boss: cloneValue(encounter.boss),
+      bossBehavior: cloneValue(encounter.bossBehavior),
       encounterPhase: encounter.phase,
       combatFrozen: encounter.combatFrozen,
     };
@@ -533,6 +539,7 @@ export function createGameSession(options = {}) {
       state.room.pressure = cloneValue(encounter.pressure);
       state.room.timing = cloneValue(encounter.timing);
       state.room.boss = cloneValue(encounter.boss);
+      state.room.bossBehavior = cloneValue(encounter.bossBehavior);
       state.room.encounterPhase = encounter.phase;
       state.room.combatFrozen = encounter.combatFrozen;
       state.revision += 1;
@@ -544,11 +551,23 @@ export function createGameSession(options = {}) {
       lastObjectivePublishKey = publishKey;
     }
     if (update.phase === 'failed') {
-      return completeRoom({ outcome: 'defeat', reason: liveObjective?.failureReason ?? 'objectiveFailed' });
+      return completeRoom(
+        { outcome: 'defeat', reason: liveObjective?.failureReason ?? 'objectiveFailed' },
+        campaignSettlementAuthority,
+      );
     }
     if (update.phase === 'complete' && encounterDirector.completeRoom()) {
+      if (state.route?.kind === 'campaign') {
+        campaignCompletionGrant = Object.freeze({
+          roomIndex: state.route.roomIndex,
+          roomsStarted: state.stats.roomsStarted,
+        });
+      }
       return state.route?.kind === 'campaign'
-        ? completeRoom({ objective: cloneValue(liveObjective), score: 100 })
+        ? completeRoom(
+          { objective: cloneValue(liveObjective), score: 100 },
+          campaignSettlementAuthority,
+        )
         : completeRoom({ nextMode: 'upgrade', objective: cloneValue(liveObjective), score: 100 });
     }
     return current ?? update;
@@ -564,7 +583,7 @@ export function createGameSession(options = {}) {
     return transition('playing', { resumed: true });
   }
 
-  function completeRoom(result = {}) {
+  function completeRoom(result = {}, authority = null) {
     if (!result || typeof result !== 'object' || Array.isArray(result)) throw new TypeError('result must be an object');
     if (state.mode !== 'playing') {
       const requested = result.outcome === 'victory' ? 'victory' : result.outcome === 'defeat' ? 'defeat' : result.nextMode ?? 'chapterComplete';
@@ -580,6 +599,18 @@ export function createGameSession(options = {}) {
       || Object.hasOwn(result, 'bossCore')
       || result.outcome === 'victory')) {
       throw new TypeError('campaign completion is authoritative and cannot be overridden by callers');
+    }
+    if (campaignNode && authority !== campaignSettlementAuthority) {
+      throw new TypeError('natural campaign completion authorization is required');
+    }
+    if (campaignNode && result.outcome !== 'defeat') {
+      const grant = campaignCompletionGrant;
+      campaignCompletionGrant = null;
+      if (!grant
+        || grant.roomIndex !== completedRoute.roomIndex
+        || grant.roomsStarted !== state.stats.roomsStarted) {
+        throw new TypeError('natural campaign completion authorization is invalid or already consumed');
+      }
     }
     const inferredCampaignMode = campaignNode
       ? completedRoute.roomIndex === CAMPAIGN_ROUTE_ROOM_COUNT - 1
@@ -827,6 +858,7 @@ export function createGameSession(options = {}) {
     cachedBuildStats = deriveBuildStats(state.build);
     buildRevision += 1;
     activeCampaign = createCampaign(0, 'standard');
+    campaignCompletionGrant = null;
     encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
     });
@@ -878,6 +910,7 @@ export function createGameSession(options = {}) {
     getChapterIndex: () => state.chapterIndex,
     getBuildStats: () => cachedBuildStats,
     getBuildRevision: () => buildRevision,
+    getEnemyTelegraphFloorSeconds: () => state.room?.boss?.telegraphFloorSeconds ?? 0.55,
     isObjectiveManaged: () => Boolean(state.room?.objectiveManaged),
     isCombatFrozen: () => Boolean(state.room?.combatFrozen),
     getPersistenceStatus: () => runSave?.getStatus?.() ?? null,
