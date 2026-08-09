@@ -74,13 +74,13 @@ async function v3PlayerScenario() {
       return {started,locked,afterMove,neutral};
     `);
     assert.equal(autoLock.started, true);
-    assert.equal(autoLock.locked.mode, 'target');
-    assert.equal(autoLock.locked.index, 1);
-    assert.ok(autoLock.locked.x < 0, JSON.stringify(autoLock));
+    assert.equal(autoLock.locked.mode, 'pending');
+    assert.equal(autoLock.locked.index, -1);
+    assert.ok(autoLock.locked.x > 0, JSON.stringify(autoLock));
     assert.ok(autoLock.afterMove.facing.x > 0, JSON.stringify(autoLock));
     assert.ok(Math.abs(autoLock.afterMove.direction.x-autoLock.locked.x)<1e-12);
     assert.ok(Math.abs(autoLock.afterMove.direction.y-autoLock.locked.y)<1e-12);
-    assert.deepEqual(autoLock.neutral, {started:true,mode:'neutral',index:-1,direction:{x:0,y:-1}});
+    assert.deepEqual(autoLock.neutral, {started:true,mode:'pending',index:-1,direction:{x:0,y:-1}});
 
     await page.pressKey(' ', 'Space');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().player.dashCharges[0] < 0.1`);

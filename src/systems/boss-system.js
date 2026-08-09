@@ -383,30 +383,70 @@ export function createBossSystem({ seed = 0, mode = 'standard' } = {}) {
     if (orbitCounterCooldown > 0) return;
     orbitCounterTriggers += 1;
     orbitCounterCooldown = 5.5;
-    const angle = Math.atan2(player.y - arenaCenterY, player.x - arenaCenterX) + Math.PI;
-    const gap = angle + (orbitDirection || 1) * 0.75;
+    const velocityLength = Math.hypot(player.vx, player.vy);
+    const travelDirection = velocityLength > EPSILON
+      ? normalized(player.vx, player.vy)
+      : normalized(player.x - lastPlayerX, player.y - lastPlayerY);
+    const speed = clamp(velocityLength, 4.5, 6.5);
+    const normalX = -travelDirection.y;
+    const normalY = travelDirection.x;
+    const gatePositions = [];
     let spawned = 0;
-    for (let index = 0; index < 10; index += 1) {
-      const nodeAngle = angle + index * TAU / 10;
-      if (Math.abs(angularDelta(gap, nodeAngle)) < 0.42) continue;
-      if (spawnWarning(world, {
-        x: arenaCenterX + Math.cos(nodeAngle) * 6.3,
-        y: arenaCenterY + Math.sin(nodeAngle) * 4.2,
+    const spawnCounterGate = (x, y, rotation) => {
+      gatePositions.push(Object.freeze({ x, y }));
+      const id = spawnWarning(world, {
+        x,
+        y,
+        rotation,
         radius: 0.45,
-        scale: 0.7,
+        scaleX: 5.2,
+        scaleY: 0.9,
         team: 2,
         ownerId: bodyId,
         attackKind: 'orbit-counter',
         duration: 0.8,
         opacity: 0.85,
         color: 0xffc857,
-        variant: 'circle',
-      })) spawned += 1;
+        variant: 'oriented-box',
+      });
+      if (id) spawned += 1;
+    };
+    for (const leadSeconds of [0.95, 1.35]) {
+      const x = clamp(
+        player.x + travelDirection.x * speed * leadSeconds,
+        arenaCenterX - definition.arena.halfWidth + 0.45,
+        arenaCenterX + definition.arena.halfWidth - 0.45,
+      );
+      const y = clamp(
+        player.y + travelDirection.y * speed * leadSeconds,
+        arenaCenterY - definition.arena.halfHeight + 0.45,
+        arenaCenterY + definition.arena.halfHeight - 0.45,
+      );
+      spawnCounterGate(x, y, Math.atan2(normalY, normalX));
+    }
+    const semiWidth = Math.max(1, definition.arena.halfWidth - 1.3);
+    const semiHeight = Math.max(1, definition.arena.halfHeight - 1.7);
+    const orbitAngle = Math.atan2(
+      (player.y - arenaCenterY) / semiHeight,
+      (player.x - arenaCenterX) / semiWidth,
+    );
+    const trackScale = clamp(lastOrbitRadius, 0.86, 1.05);
+    for (const leadAngle of [0.48, 0.82]) {
+      const angle = orbitAngle + (orbitDirection || 1) * leadAngle;
+      const x = arenaCenterX + Math.cos(angle) * semiWidth * trackScale;
+      const y = arenaCenterY + Math.sin(angle) * semiHeight * trackScale;
+      const normal = normalized(Math.cos(angle) / semiWidth, Math.sin(angle) / semiHeight);
+      spawnCounterGate(x, y, Math.atan2(normal.y, normal.x));
     }
     if (spawned > 0) {
       attackCounts.telegraph += spawned;
       attacksSeen.add('orbit-counter');
-      emit(events, 'boss:orbit-counter', { bossId: definition.id, gapAngle: gap, trigger: orbitCounterTriggers });
+      emit(events, 'boss:orbit-counter', {
+        bossId: definition.id,
+        gatePositions: Object.freeze(gatePositions),
+        escape: 'move-inward-or-reverse',
+        trigger: orbitCounterTriggers,
+      });
     }
   }
 
@@ -658,9 +698,9 @@ export function createBossSystem({ seed = 0, mode = 'standard' } = {}) {
       if (id) attackCounts.current += 1;
     } else if (warning.attackKind === 'orbit-counter') {
       id = spawnOwned(world, 'enemyHazard', {
-        x: warning.x, y: warning.y, radius: warning.radius,
-        scale: warning.scale, scaleX: warning.scaleX, scaleY: warning.scaleY,
-        variant: 'circle', team: 2, ownerId: bodyId,
+        x: warning.x, y: warning.y, rotation: warning.rotation, radius: warning.radius,
+        scaleX: warning.scaleX, scaleY: warning.scaleY,
+        variant: 'oriented-box', team: 2, ownerId: bodyId,
         attackKind: warning.attackKind, state: 'active', damage: 0.5,
         contactDamaging: true, collidable: true,
         age: 0, lifetime: 1.6, color: 0xffc857,

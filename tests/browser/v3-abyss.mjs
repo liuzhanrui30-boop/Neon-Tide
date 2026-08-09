@@ -121,6 +121,24 @@ async function fireTideLance(page) {
   } finally {
     await page.dispatchKey('keyUp', 'e', 'KeyE');
   }
+  return snapshot(page);
+}
+
+async function faceAwayFromNearestOrgan(page) {
+  const state = await page.evaluate(`(()=>{
+    const app=globalThis.__NEON_TIDE_V3__;
+    const player=app.world.get(app.world.query('player').at(0));
+    const organs=app.getDebugSnapshot().encounter.bossBehavior.parts.organs
+      .filter((organ)=>!organ.destroyed).map((organ)=>app.world.get(organ.entityId)).filter(Boolean)
+      .sort((left,right)=>Math.hypot(left.x-player.x,left.y-player.y)-Math.hypot(right.x-player.x,right.y-player.y)||left.id-right.id);
+    return {player:{x:player.x,y:player.y},target:organs[0]};
+  })()`);
+  const dx = state.target.x - state.player.x;
+  const dy = state.target.y - state.player.y;
+  const targetX = state.player.x + (Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? -0.9 : 0.9) : 0);
+  const targetY = state.player.y + (Math.abs(dx) < Math.abs(dy) ? (dy > 0 ? -0.9 : 0.9) : 0);
+  await driveTo(page, targetX, targetY, { tolerance: 0.18 });
+  return snapshot(page);
 }
 
 async function completeOrdinaryNode(page) {
@@ -147,7 +165,6 @@ async function reachMaw(page) {
     $state.enemySpawnTimer=Infinity;
     $state.formationTimer=Infinity;
     $state.shardSpawnTimer=Infinity;
-    $state.hurtInvuln=Math.max($state.hurtInvuln,120);
     return true;
   `);
 }
@@ -166,6 +183,13 @@ async function performNaturalRouteBreaks(page) {
     [-7.4, 0], [7.4, 0], [-7.4, 0], [7.4, 0],
   ];
   for (const [x, y] of route) await driveTo(page, x, y, { tolerance: 0.38 });
+  for (let correction = 0; correction < 8; correction += 1) {
+    const current = await snapshot(page);
+    if (current.encounter.bossBehavior.phase === 'weakPoints') break;
+    const center = current.encounter.bossBehavior.arenaCenter;
+    await driveTo(page, center.x, center.y, { tolerance: 0.3 });
+    await driveTo(page, center.x + (correction % 2 === 0 ? -7.4 : 7.4), center.y, { tolerance: 0.38 });
+  }
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='weakPoints'`, 8000);
   const shiftedCenter = (await snapshot(page)).encounter.bossBehavior.arenaCenter;
   await primeTideLance(page);
@@ -176,16 +200,19 @@ async function performNaturalRouteBreaks(page) {
 
 export const v3AbyssScenarios = [
   ['v3 Abyss Maw rejects a real keyboard orbit, accepts a real keyboard varied route, and dies to real weapons', async () => {
-    await withPage('v3-abyss-maw-natural', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
+    await withPage('v3-abyss-maw-orbit-pressure', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
       await reachMaw(page);
       assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
 
+      const beforeFixed = await snapshot(page);
       const fixed = await performFixedOuterOrbit(page);
       assert.equal(fixed.encounter.bossBehavior.phase, 'hunt');
       assert.equal(fixed.encounter.bossBehavior.routeBreaks, 0);
       assert.equal(fixed.encounter.bossBehavior.destroyedOrgans, 0);
       assert.ok(fixed.encounter.bossBehavior.orbitCounterTriggers > 0);
       assert.ok(fixed.encounter.bossBehavior.attackCounts.active > 0, 'orbit warning became real damage');
+      assert.ok(fixed.session.hull < beforeFixed.session.hull, 'unchanged outer orbit takes real hull damage');
+      assert.ok(fixed.session.stats.damageTaken > beforeFixed.session.stats.damageTaken);
 
       const readable = await page.evaluate(`(()=>{
         const app=globalThis.__NEON_TIDE_V3__;
@@ -201,7 +228,11 @@ export const v3AbyssScenarios = [
       assert.ok(readable.rendered > 0);
       assert.equal(readable.objectiveType, 'boss');
       assert.match(readable.hudText, /深渊巨口/);
+    });
 
+    await withPage('v3-abyss-maw-natural', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
+      await reachMaw(page);
+      assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
       const varied = await performNaturalRouteBreaks(page);
       assert.equal(varied.encounter.bossBehavior.phase, 'weakPoints');
       assert.equal(varied.encounter.bossBehavior.suctionOutcome.succeeded, true);
@@ -211,7 +242,15 @@ export const v3AbyssScenarios = [
 
       const center = varied.encounter.bossBehavior.arenaCenter;
       await driveTo(page, center.x, center.y, { tolerance: 0.3 });
-      await fireTideLance(page);
+      const beforeLance = await faceAwayFromNearestOrgan(page);
+      const fired = await fireTideLance(page);
+      const aim = fired.weapons.lastLanceAim;
+      const visual = fired.legacy.tideLanceLock;
+      assert.ok(aim.targetIds.some((id) => varied.encounter.bossBehavior.parts.organs.some((organ) => organ.entityId === id)));
+      assert.ok(Math.abs(visual.directionX - aim.directionX) < 1e-6);
+      assert.ok(Math.abs(visual.directionY - aim.directionY) < 1e-6);
+      assert.ok(beforeLance.player.facing.x * aim.directionX + beforeLance.player.facing.y * aim.directionY < 0.8,
+        'authoritative Boss aim differs from unrelated player facing');
       await page.waitForPage(`(globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.damageByWeapon['tide-lance']??0)>0`, 6000);
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='enraged'`, 30000);
       const enraged = await snapshot(page);

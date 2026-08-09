@@ -203,10 +203,13 @@ test('fixed outer orbit at legal 60 Hz speed cannot expose organs and provokes a
   const world = createEntityWorld();
   const playerId = world.spawn('player', { x: 0, y: 0, hp: 8, maxHp: 8, radius: 0.4, team: 1, collidable: true });
   const events = { emit() {}, input: [] };
+  const collisions = createCollisionSystem();
   const dt = 1 / 60;
   let angle = 0;
   let damagingCounterSeen = false;
-  for (let step = 0; step < 720; step += 1) {
+  let hull = 8;
+  let counterDamage = 0;
+  for (let step = 0; step < 1500; step += 1) {
     const player = world.get(playerId);
     const angularStep = 5 * dt / 9;
     angle += angularStep;
@@ -222,6 +225,14 @@ test('fixed outer orbit at legal 60 Hz speed cannot expose organs and provokes a
       vy: (y - player.y) * scale / dt,
     });
     director.update({ world, player: world.get(playerId), presentationPending: 1, damageRecords: [] }, dt, events);
+    const collision = collisions.resolve(world, {
+      damageHull(amount) {
+        hull = Math.max(0, hull - amount);
+        counterDamage += amount;
+        return true;
+      },
+    }, dt, events);
+    assert.equal(collision.damageRecords.length, 0, 'outer counter damages the player, not Boss parts');
     damagingCounterSeen ||= [...world.query('enemyHazard')].some((id) => {
       const hazard = world.get(id);
       return hazard?.ownerKind === 'boss' && hazard.attackKind === 'orbit-counter'
@@ -232,6 +243,8 @@ test('fixed outer orbit at legal 60 Hz speed cannot expose organs and provokes a
   assert.equal(director.getSnapshot().bossBehavior.routeBreaks, 0);
   assert.ok(director.getSnapshot().bossBehavior.orbitCounterTriggers > 0);
   assert.equal(damagingCounterSeen, true);
+  assert.ok(counterDamage > 0, 'a legal unchanged outer orbit must take real CollisionSystem damage');
+  assert.ok(hull < 8);
   world.dispose();
 });
 

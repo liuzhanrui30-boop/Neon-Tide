@@ -1,4 +1,8 @@
-import { createEntityReadTarget, getAuthoritativeContactRadius } from '../game/entity-world.js';
+import {
+  createEntityReadTarget,
+  ENTITY_HIT_HISTORY_CAPACITY,
+  getAuthoritativeContactRadius,
+} from '../game/entity-world.js';
 import { isEnemyExecutionProtected, isEnemyExecutionProtectedContact } from '../content/enemies.js';
 import { AUTO_PULSE_BUFF_MULTIPLIER, PERFECT_PHASE_REFUND } from './player-system.js';
 
@@ -7,7 +11,7 @@ const DEFAULT_OUTCOME_CAPACITY = 512;
 const DEFAULT_SPAWN_CAPACITY = 192;
 const PERFECT_PHASE_BUFF_SECONDS = 0.8;
 const EPSILON = 1e-9;
-const HIT_HISTORY_CAPACITY = 7;
+const HIT_HISTORY_CAPACITY = ENTITY_HIT_HISTORY_CAPACITY;
 
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
@@ -131,6 +135,7 @@ export function createCollisionSystem({
   const spawnWeapons = new Array(spawns).fill(null);
   const hitCandidateIds = new Float64Array(outcomes);
   const hitCandidateAlong = new Float64Array(outcomes);
+  const hitTargets = new Float64Array(HIT_HISTORY_CAPACITY);
   const projectileRead = createEntityReadTarget();
   const targetRead = createEntityReadTarget();
   const impactRead = createEntityReadTarget();
@@ -164,18 +169,16 @@ export function createCollisionSystem({
     chainRadius: 6,
     weakPointMultiplier: 1.5,
     objectiveDamageMultiplier: 1,
-    hitTarget0: 0,
-    hitTarget1: 0,
-    hitTarget2: 0,
-    hitTarget3: 0,
-    hitTarget4: 0,
-    hitTarget5: 0,
-    hitTarget6: 0,
     splitCount: 0,
     homing: false,
     collidable: true,
     color: 0xffffff,
   };
+  const hitHistoryPatch = { hitBudgetRemaining: 0 };
+  for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
+    spawnData[`hitTarget${index}`] = 0;
+    hitHistoryPatch[`hitTarget${index}`] = 0;
+  }
   let resolves = 0;
   let totalHits = 0;
   let totalDamage = 0;
@@ -256,7 +259,7 @@ export function createCollisionSystem({
       }
     }
     if (projectile.type === 'arc-chain' && projectile.chainCount > 0) {
-      queueSpawn(state, {
+      const chainSpawn = {
         x: target.x,
         y: target.y,
         vx: projectile.vx,
@@ -273,14 +276,11 @@ export function createCollisionSystem({
         color: projectile.color || 0x8af7ff,
         type: 'arc-chain',
         weaponId: projectile.weaponId || 'arc-drones',
-        hitTarget0: hitTargets[0],
-        hitTarget1: hitTargets[1],
-        hitTarget2: hitTargets[2],
-        hitTarget3: hitTargets[3],
-        hitTarget4: hitTargets[4],
-        hitTarget5: hitTargets[5],
-        hitTarget6: hitTargets[6],
-      });
+      };
+      for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
+        chainSpawn[`hitTarget${index}`] = hitTargets[index];
+      }
+      queueSpawn(state, chainSpawn);
     }
   }
 
@@ -366,11 +366,12 @@ export function createCollisionSystem({
       let remaining = Math.max(1, Math.min(maximumHitBudget, configuredBudget > 0
         ? configuredBudget
         : 1 + Math.max(0, Math.trunc(finite(projectile.pierceCount)))));
-      const hitTargets = [
-        projectile.hitTarget0, projectile.hitTarget1, projectile.hitTarget2, projectile.hitTarget3, projectile.hitTarget4,
-        projectile.hitTarget5, projectile.hitTarget6,
-      ];
-      let historyCount = hitTargets.filter((id) => id > 0).length;
+      let historyCount = 0;
+      for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
+        const targetId = projectile[`hitTarget${index}`];
+        hitTargets[index] = targetId;
+        if (targetId > 0) historyCount += 1;
+      }
       let acceptedHits = 0;
       for (let candidateIndex = 0; candidateIndex < candidateCount && remaining > 0; candidateIndex += 1) {
         const target = world.readInto(hitCandidateIds[candidateIndex], targetRead);
@@ -396,16 +397,11 @@ export function createCollisionSystem({
       if (remaining === 0) {
         state.despawnCount = addUnique(despawnIds, state.despawnCount, projectile.id);
       } else {
-        world.write(projectile.id, {
-          hitBudgetRemaining: remaining,
-          hitTarget0: hitTargets[0] || 0,
-          hitTarget1: hitTargets[1] || 0,
-          hitTarget2: hitTargets[2] || 0,
-          hitTarget3: hitTargets[3] || 0,
-          hitTarget4: hitTargets[4] || 0,
-          hitTarget5: hitTargets[5] || 0,
-          hitTarget6: hitTargets[6] || 0,
-        });
+        hitHistoryPatch.hitBudgetRemaining = remaining;
+        for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
+          hitHistoryPatch[`hitTarget${index}`] = hitTargets[index] || 0;
+        }
+        world.write(projectile.id, hitHistoryPatch);
       }
     }
   }

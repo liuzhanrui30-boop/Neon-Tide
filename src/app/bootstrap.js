@@ -248,7 +248,8 @@ export function bootstrapNeonTide(options = {}) {
           });
         }
         const buildStats = session.getBuildStats();
-        weaponSystem.update(world, playerId, dt, events, buildStats);
+        const weaponFrame = weaponSystem.update(world, playerId, dt, events, buildStats);
+        runtime?.applyAuthoritativeTideLanceAim(weaponFrame.lanceAim);
         projectileSystem.update(world, dt, events);
         const summary = collisionSystem.resolve(world, session, dt, events, buildStats);
         runtime?.applyCombatSummary(world, summary);

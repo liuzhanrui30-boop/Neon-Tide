@@ -49,7 +49,7 @@ import { normalizeActionSnapshot } from "../systems/input-system.js";
 import { AUTO_PULSE_INTERVAL } from "../systems/player-system.js";
 import { createEntityReadTarget, ENTITY_FLAG_HIDDEN } from "../game/entity-world.js";
 import {
-  TIDE_LANCE_RETARGET_SECONDS,
+  applyTideLanceAimDirection,
   deriveTideLanceSpec,
   selectAutoTarget,
   selectTideLanceLine,
@@ -3091,7 +3091,7 @@ function canStartLaser() {
   return getLaserAvailability().canStart;
 }
 
-function selectTideLanceLock() {
+function selectAutomaticPulseLock() {
   const candidates = enemies.map((enemy) => ({
     id: enemy.sourceId,
     x: enemy.group.position.x,
@@ -3144,20 +3144,8 @@ function selectTideLanceLock() {
   });
 }
 
-function projectLaserTargetIndex(lock) {
-  return lock?.enemy ? enemies.indexOf(lock.enemy) : -1;
-}
-
-function applyTideLanceLock(lock) {
-  state.laserDirection.set(lock.direction.x, lock.direction.y);
-  state.laserTargetMode = "target";
-  state.laserTargetSourceId = lock.target.id;
-  state.laserTargetIndex = projectLaserTargetIndex(lock);
-  state.laserLockScore = lock.score;
-}
-
 function fireAutomaticPulse(sequence) {
-  const lock = selectTideLanceLock();
+  const lock = selectAutomaticPulseLock();
   if (!lock?.enemy || lock.enemy.dead) {
     return Object.freeze({
       hit: false,
@@ -3212,18 +3200,13 @@ function startLaserCharge() {
   state.laserElapsed = 0;
   state.laserSequence += 1;
   state.laserSequenceTargets = 0;
-  const lock = selectTideLanceLock();
-  if (lock?.target) {
-    applyTideLanceLock(lock);
-  } else {
-    state.laserDirection.copy(player.facing);
-    if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
-    else state.laserDirection.normalize();
-    state.laserTargetMode = "neutral";
-    state.laserTargetIndex = -1;
-    state.laserTargetSourceId = 0;
-    state.laserLockScore = 0;
-  }
+  state.laserDirection.copy(player.facing);
+  if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
+  else state.laserDirection.normalize();
+  state.laserTargetMode = "pending";
+  state.laserTargetIndex = -1;
+  state.laserTargetSourceId = 0;
+  state.laserLockScore = 0;
   state.laserRetargetUsed = false;
   events.emit("player:tideLanceLock", Object.freeze({
     mode: state.laserTargetMode,
@@ -3414,40 +3397,9 @@ function resolveLaserHits() {
   return primaryHits + propagationHits;
 }
 
-function maybeRetargetTideLance() {
-  if (state.laserState !== "charge" || state.laserTargetMode !== "target"
-    || state.laserRetargetUsed || state.laserElapsed >= TIDE_LANCE_RETARGET_SECONDS) {
-    return false;
-  }
-  const lock = selectTideLanceLock();
-  if (!lock?.target) return false;
-  const currentEnemy = combatBridge.enemiesBySourceId.get(state.laserTargetSourceId);
-  const currentObjective = combatBridge.objective?.id === state.laserTargetSourceId
-    ? combatBridge.objective
-    : null;
-  const currentTargetAlive = Boolean((currentEnemy && !currentEnemy.dead)
-    || (currentObjective && !currentObjective.completed && currentObjective.hp > 0));
-  const changedTarget = lock.target.id !== state.laserTargetSourceId;
-  const improved = lock.score > state.laserLockScore + 1e-6;
-  if (currentTargetAlive && (!changedTarget || !improved)) return false;
-  applyTideLanceLock(lock);
-  state.laserRetargetUsed = true;
-  events.emit("player:tideLanceLock", Object.freeze({
-    mode: state.laserTargetMode,
-    targetIndex: state.laserTargetIndex,
-    targetId: state.laserTargetSourceId || null,
-    directionX: state.laserDirection.x,
-    directionY: state.laserDirection.y,
-    score: state.laserLockScore,
-    retargeted: true,
-  }));
-  return true;
-}
-
 function updateLaser(dt) {
   if (!["charge", "active"].includes(state.laserState)) return state.laserState;
   const previousPhase = state.laserState;
-  maybeRetargetTideLance();
   state.laserElapsed += Math.max(0, Number.isFinite(dt) ? dt : 0);
   const phase = getLaserPhase(state.laserElapsed);
   if (phase === "done") {
@@ -3476,6 +3428,21 @@ function updateLaser(dt) {
     laserAudio.onHits(resolveLaserHits());
   }
   return state.laserState;
+}
+
+function applyAuthoritativeTideLanceAim(aim) {
+  if (!["charge", "active"].includes(state.laserState)
+    || !aim || aim.sequence !== state.laserSequence
+    || !applyTideLanceAimDirection(state.laserDirection, aim)) return false;
+  const targetId = aim.targetIds?.[0] ?? 0;
+  const previousTargetId = state.laserTargetSourceId;
+  state.laserTargetMode = targetId ? "target" : "neutral";
+  state.laserTargetIndex = -1;
+  state.laserTargetSourceId = targetId;
+  state.laserLockScore = aim.score;
+  state.laserRetargetUsed ||= previousTargetId > 0 && targetId > 0 && previousTargetId !== targetId;
+  syncLaserTransform();
+  return true;
 }
 
 function setEnemyState(enemy, nextState, duration = 0, telegraph = 0) {
@@ -5452,10 +5419,14 @@ function syncCombatWorld(entityWorld) {
     fireTimer: state.autoFireRateBuffTimer,
     cooldown: state.autoPulseTimer,
     invulnerable: state.dashInvulnerable || state.hurtInvuln > 0,
-    attackKind: state.laserState === 'active' ? 'tide-lance' : state.dashTimer > 0 ? 'dash' : null,
-    sequence: state.laserState === 'active' ? state.laserSequence : state.dashSequence,
-    directionX: state.laserState === 'active' ? state.laserDirection.x : player.facing.x,
-    directionY: state.laserState === 'active' ? state.laserDirection.y : player.facing.y,
+    attackKind: state.laserState === 'active'
+      ? 'tide-lance'
+      : state.laserState === 'charge'
+        ? 'tide-lance-charge'
+        : state.dashTimer > 0 ? 'dash' : null,
+    sequence: ["charge", "active"].includes(state.laserState) ? state.laserSequence : state.dashSequence,
+    directionX: ["charge", "active"].includes(state.laserState) ? state.laserDirection.x : player.facing.x,
+    directionY: ["charge", "active"].includes(state.laserState) ? state.laserDirection.y : player.facing.y,
     collidable: true,
   });
 
@@ -5940,6 +5911,7 @@ return Object.freeze({
   render,
   applySession,
   syncCombatWorld,
+  applyAuthoritativeTideLanceAim,
   applyCombatSummary,
   applyExternalForce,
   consumePresentationEvent,

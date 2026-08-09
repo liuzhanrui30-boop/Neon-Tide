@@ -1,11 +1,12 @@
 # Task 12 report — Abyss chapter and Abyss Maw vertical slice
 
 ## Status
-DONE FOR REVIEW — the first complete campaign chapter has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure, real pooled attacks, collision-based weak-point destruction, deterministic cleanup, and Standard retry behavior. The full deterministic suite and production build pass; the final browser rerun is explicitly pending because the isolated local Chrome CDP transport timed out.
+DONE FOR REVIEW — the first complete campaign chapter has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure that causes real collision damage, pooled attacks, collision-based weak-point destruction, deterministic cleanup, and Standard retry behavior. The full deterministic suite and production build pass. The isolated browser run proved the fixed-orbit damage contract, but no complete browser PASS is claimed because the natural route timed out before the final input-only corrective-crossing update and was not rerun by instruction.
 
 ## Commit
 - `f7fe820 feat: add Abyss chapter and Maw boss`
-- `fix: harden Abyss Maw runtime contracts` (review-fix commit)
+- `8020e33 fix: harden Abyss Maw runtime contracts`
+- `fix: close Abyss combat authority gaps` (current review-fix commit)
 
 ## Delivered
 
@@ -54,8 +55,11 @@ DONE FOR REVIEW — the first complete campaign chapter has authored room pacing
 
 ### Review hardening
 - Route breaks now require natural 60 Hz movement from an armed outer radius through the inner radius. Teleport-sized samples reset progress, and a legal fixed orbit still triggers active damaging counters without advancing the Boss.
+- The anti-orbit counter now predicts the player's real velocity and supplements it with forward ellipse gates. Its preview and active oriented boxes are identical, retain a readable inward/reversal escape contract, and enter the normal collision pipeline instead of merely incrementing telemetry.
 - Boss warnings, rendering, and collision share the same oriented-box dimensions and rotation for tentacle, bite, and suction-current geometry.
 - Tide Lance is a real swept `friendlyProjectile` with bounded EntityWorld damage and the same authoritative reach, width, and hit budget as selection; no browser-only kill bullets remain.
+- Tide Lance distinct-hit memory is a fixed preallocated 16-target schema shared by EntityWorld and CollisionSystem. A ten-target, two-frame regression proves that already traversed targets cannot be hit again by the beam tail.
+- WeaponSystem is the sole Tide Lance aim authority. The exact selected direction and target set drive both the ECS damage ray and the legacy visible beam, including Boss organs; the legacy runtime no longer performs a competing auto-target or retarget pass.
 - Boss-owned enemies, hazards, warnings, projectiles, and parts have explicit ownership sets and a single Boss writer. Generic enemy/projectile systems skip them, while cleanup and hot snapshots avoid pool-wide ownership scans.
 - Authored beat timing now scales with `durationScale`; failed Boss part spawns retry and fail closed; reported spawn/attack counts reflect successful allocations only.
 - Standard/Abyss recovery, variant, telegraph-floor, jelly, suction, and orbit-counter behavior is contract-driven. Public Boss objectives are deeply frozen detached snapshots.
@@ -67,30 +71,33 @@ DONE FOR REVIEW — the first complete campaign chapter has authored room pacing
 
 ## TDD evidence
 - Red phase: the focused Abyss/Boss tests initially failed with missing chapter, Boss content, and Boss system modules.
+- Review red phase: the legal 60 Hz outer orbit produced counter telemetry but zero collision damage; Tide Lance forgot targets beyond seven slots; and its visible beam did not consume a WeaponSystem-owned aim projection.
 - Green phase: implemented immutable chapter beats, real Director consumption, outcome-gated Boss phases, attacks, collision records, cleanup, retry behavior, and browser authority until the focused suite passed.
+- Review green phase: real counter gates reduce hull through BossSystem + CollisionSystem, 16 fixed hit-history slots retain ten distinct targets across frames, and one authoritative Boss-aware aim drives both visual and damage rays.
 - Refactor phase: kept `ObjectiveSystem` as a discriminator/consumer rather than a second Boss writer, gated Maw by campaign provenance, preserved compatibility routes, bounded all Boss entities, and made cleanup generation-safe and idempotent.
 
 ## Verification
-All final deterministic commands used Node `22.14.0`.
+All final deterministic commands used Node `24.19.0`.
 
-- `npm test` — PASS: `302/302`.
+- `npm test` — PASS: `303/303`.
 - `npm run build` — PASS:
   - minified production build
   - unminified production build
-  - entry-size assertion (`31,065` bytes, limit `500,000`)
-- `node --check tests/browser/v3-abyss.mjs` — PASS.
+  - entry-size assertion (`31,156` bytes, limit `500,000`)
+- `node --check` for every changed source/browser module — PASS.
 - `git diff --check` — PASS.
-- Browser acceptance used temporary Vite `4174` and isolated **headful** Chrome `146` on CDP `9337`. A real-keyboard run reached Maw and completed both the fixed-orbit and natural-route sections. After tightening the test to use long key holds with in-page RAF polling, the final full rerun was not completed because Chrome intermittently returned `Input.dispatchKeyEvent timed out`. No browser PASS is claimed for this review fix; an independent rerun is required.
-- Temporary `4174`/`9337` processes were stopped. Existing `127.0.0.1:4173` and CDP `9333` were not touched.
+- Browser acceptance used temporary Vite `4174` and isolated **headful** Chrome `146` on CDP `9337`. The fixed-orbit page reached Maw with real keyboard movement, stayed in `hunt`, kept route breaks at zero, activated a counter, and recorded real hull plus `damageTaken` loss without any invulnerability override.
+- The natural-route page did not reach `weakPoints` before its local timeout. The route helper was then hardened with bounded adaptive center crossings that still use only real keyboard input and ordinary movement/physics, but the browser was not rerun per delivery instruction. No full browser PASS is claimed; an independent rerun remains required.
+- Temporary `4174`/`9337` processes and stale task-owned PIDs `47704`/`47707` were stopped and verified absent. Existing `127.0.0.1:4173` and CDP `9333` were not touched.
 
 ### Final production chunks
-- Main entry: `15.33 kB` minified / `5.74 kB` gzip.
-- Gameplay core: `206.03 kB` / `65.49 kB` gzip.
-- Legacy runtime: `174.90 kB` / `55.53 kB` gzip.
+- Main entry: `15.38 kB` minified / `5.75 kB` gzip.
+- Gameplay core: `206.90 kB` / `65.81 kB` gzip.
+- Legacy runtime: `174.44 kB` / `55.41 kB` gzip.
 - Render core: `20.47 kB` / `7.39 kB` gzip.
 - Three.js vendor: `525.56 kB` / `132.54 kB` gzip.
 - Deferred non-Abyss chapter chunks: `0.28–0.29 kB` / `0.22 kB` gzip.
-- Unminified main entry: `31,065` bytes, below the enforced `500,000`-byte ceiling.
+- Unminified main entry: `31,156` bytes, below the enforced `500,000`-byte ceiling.
 
 ## Remaining concern
-- Vite's existing size warning still applies only to the separately cached Three.js vendor chunk. The application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.
+- The complete real-input browser scenario still needs an independent rerun after the adaptive crossing helper change. Vite's existing size warning applies only to the separately cached Three.js vendor chunk; the application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.

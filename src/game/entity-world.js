@@ -46,6 +46,7 @@ export function getAuthoritativeContactRadius(entity) {
 }
 
 export const ENTITY_FLAG_HIDDEN = 1;
+export const ENTITY_HIT_HISTORY_CAPACITY = 16;
 
 const MAX_KIND_CAPACITY = 1_000_000;
 const CALLBACK_SCRATCH_DEPTH = 8;
@@ -56,6 +57,11 @@ const VELOCITY_LIMIT = 100_000;
 const SCALE_LIMIT = 10_000;
 const GENERAL_LIMIT = 1_000_000_000_000;
 const STRING_LIMIT = 128;
+
+const HIT_TARGET_RULES = Object.fromEntries(Array.from(
+  { length: ENTITY_HIT_HISTORY_CAPACITY },
+  (_, index) => [`hitTarget${index}`, [0, Number.MAX_SAFE_INTEGER, 0]],
+));
 
 const FLOAT_RULES = Object.freeze({
   x: [-POSITION_LIMIT, POSITION_LIMIT, 0],
@@ -118,13 +124,7 @@ const FLOAT_RULES = Object.freeze({
   targetId: [0, Number.MAX_SAFE_INTEGER, 0],
   parentId: [0, Number.MAX_SAFE_INTEGER, 0],
   sourceId: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget0: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget1: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget2: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget3: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget4: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget5: [0, Number.MAX_SAFE_INTEGER, 0],
-  hitTarget6: [0, Number.MAX_SAFE_INTEGER, 0],
+  ...HIT_TARGET_RULES,
 });
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([

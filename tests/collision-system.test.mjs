@@ -318,6 +318,37 @@ test('piercing projectiles remember distinct targets across fixed steps and neve
   assert.equal(world.get(projectile), null);
 });
 
+test('Tide Lance remembers at least ten distinct targets across frames without tail re-hits', () => {
+  const world = createEntityWorld({ capacities: { enemy: 12, friendlyProjectile: 1 } });
+  const targets = Array.from({ length: 10 }, (_, index) => world.spawn('enemy', {
+    x: 1 + index,
+    y: 0,
+    hp: 5,
+    maxHp: 5,
+    radius: 0.24,
+    team: 2,
+    collidable: true,
+  }));
+  const projectile = world.spawn('friendlyProjectile', {
+    previousX: 0, previousY: 0, x: 11, y: 0,
+    damage: 1, radius: 0.08, team: 1, collidable: true,
+    type: 'tide-lance', weaponId: 'tide-lance', piercing: true,
+    pierceCount: 15, hitBudgetRemaining: 16,
+  });
+
+  const first = resolveCollisions(world, null, 1 / 60, createEvents());
+  assert.deepEqual(first.damageRecords.map(({ targetId }) => targetId), targets);
+  assert.deepEqual(targets.map((id) => world.get(id).hp), Array(10).fill(4));
+  assert.equal(world.get(projectile).hitBudgetRemaining, 6);
+
+  world.write(projectile, { previousX: 0, previousY: 0, x: 11, y: 0 });
+  const second = resolveCollisions(world, null, 1 / 60, createEvents());
+  assert.deepEqual(second.damageRecords, []);
+  assert.deepEqual(targets.map((id) => world.get(id).hp), Array(10).fill(4));
+  assert.equal(world.get(projectile).hitBudgetRemaining, 6);
+  world.dispose();
+});
+
 test('follow-up arcs preserve upgraded radius, damage and bounded target dedupe', () => {
   const run = (chainRadius) => {
     const world = createEntityWorld({ capacities: { enemy: 2, friendlyProjectile: 4 } });

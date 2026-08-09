@@ -4,6 +4,7 @@ import { createEntityWorld } from '../src/game/entity-world.js';
 import {
   TIDE_LANCE_CHARGE_SECONDS,
   WEAPON_IDS,
+  applyTideLanceAimDirection,
   createWeaponSystem,
   deriveTideLanceSpec,
   selectAutoTarget,
@@ -198,7 +199,7 @@ test('a Tide Lance input rising edge spawns one real swept projectile through En
     team: 2, collidable: true, weakPoint: true, role: 'boss',
   });
   const system = createWeaponSystem();
-  system.update(world, playerId, 1 / 60, { emit() { return true; } }, {
+  const frame = system.update(world, playerId, 1 / 60, { emit() { return true; } }, {
     starterWeapon: 'pulse-cannon', lanceLength: 7.2, lanceHalfWidth: 0.275,
     lanceTargetCap: 8, lanceDamageMultiplier: 1,
   });
@@ -211,5 +212,18 @@ test('a Tide Lance input rising edge spawns one real swept projectile through En
   assert.equal(lance.previousY, 0);
   assert.ok(lance.x > 5.9 && Math.abs(lance.y) < 1e-9, 'auto aim chooses the exposed Boss weak point');
   assert.equal(lance.hitBudgetRemaining, 8);
+  assert.ok(frame.lanceAim.targetIds.includes(world.query('bossPart').at(0)));
+  assert.ok(frame.lanceAim.directionX > 0.99);
+  assert.ok(Math.abs(frame.lanceAim.directionY) < 1e-9);
+  const visibleDirection = { x: 0, y: 1 };
+  assert.equal(applyTideLanceAimDirection(visibleDirection, frame.lanceAim), true);
+  const rayLength = Math.hypot(lance.x - lance.previousX, lance.y - lance.previousY);
+  const rayDirection = {
+    x: (lance.x - lance.previousX) / rayLength,
+    y: (lance.y - lance.previousY) / rayLength,
+  };
+  assert.ok(Math.abs(visibleDirection.x - rayDirection.x) < 1e-9);
+  assert.ok(Math.abs(visibleDirection.y - rayDirection.y) < 1e-9);
+  assert.ok(Math.abs(visibleDirection.y) < 0.1, 'Boss aim overrides unrelated upward facing');
   world.dispose();
 });
