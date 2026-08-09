@@ -215,6 +215,14 @@ test('a Tide Lance input rising edge spawns one real swept projectile through En
   assert.ok(frame.lanceAim.targetIds.includes(world.query('bossPart').at(0)));
   assert.ok(frame.lanceAim.directionX > 0.99);
   assert.ok(Math.abs(frame.lanceAim.directionY) < 1e-9);
+  assert.equal(frame.lanceAim.originX, lance.previousX);
+  assert.equal(frame.lanceAim.originY, lance.previousY);
+  assert.equal(frame.lanceAim.endX, lance.x);
+  assert.equal(frame.lanceAim.endY, lance.y);
+  assert.ok(Math.abs(Math.hypot(
+    frame.lanceAim.endX - frame.lanceAim.originX,
+    frame.lanceAim.endY - frame.lanceAim.originY,
+  ) - 7.2) < 1e-9);
   const visibleDirection = { x: 0, y: 1 };
   assert.equal(applyTideLanceAimDirection(visibleDirection, frame.lanceAim), true);
   const rayLength = Math.hypot(lance.x - lance.previousX, lance.y - lance.previousY);

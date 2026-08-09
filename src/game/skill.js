@@ -28,6 +28,62 @@ export const gainWeaponEnergy = (current, focusedOrMultiplier = false) => {
 
 export const canFireLaser = (energy) => finite(energy) >= LASER_RULES.maxEnergy;
 
+export function getTideLanceAvailability({
+  mode,
+  laserState,
+  weaponEnergy,
+  dashTimer = 0,
+  dashInvulnTimer = 0,
+  objectiveManaged = false,
+  stageEnd = NaN,
+  elapsed = 0,
+  stepSeconds = 1 / 60,
+} = {}) {
+  if (mode === 'paused') return { canStart: false, reason: 'paused' };
+  if (mode !== 'playing') return { canStart: false, reason: 'locked' };
+  if (laserState === 'charge') return { canStart: false, reason: 'charge' };
+  if (laserState === 'active') return { canStart: false, reason: 'active' };
+  const legacyStageEnd = Number(stageEnd);
+  if (!objectiveManaged && Number.isFinite(legacyStageEnd)
+    && legacyStageEnd - finite(elapsed) <= Math.max(0, finite(stepSeconds, 1 / 60)) * 2) {
+    return { canStart: false, reason: 'stage-end' };
+  }
+  if (!canFireLaser(weaponEnergy)) return { canStart: false, reason: 'charging' };
+  if (finite(dashTimer) > 0 || finite(dashInvulnTimer) > 0) return { canStart: false, reason: 'dash' };
+  if (!['idle', 'ready'].includes(laserState)) return { canStart: false, reason: 'conflict' };
+  return { canStart: true, reason: 'ready' };
+}
+
+export const selectTideLanceDamageAuthority = ({ ecsCombatAuthority = false } = {}) => (
+  ecsCombatAuthority ? 'ecs' : 'legacy'
+);
+
+export function createTideLanceRay({
+  originX = 0,
+  originY = 0,
+  directionX = 0,
+  directionY = 1,
+  length = LASER_RULES.length,
+} = {}) {
+  const rawX = finite(directionX);
+  const rawY = finite(directionY, 1);
+  const magnitude = Math.hypot(rawX, rawY);
+  const unitX = magnitude > 0 ? rawX / magnitude : 0;
+  const unitY = magnitude > 0 ? rawY / magnitude : 1;
+  const startX = finite(originX);
+  const startY = finite(originY);
+  const rayLength = Math.max(0, finite(length, LASER_RULES.length));
+  return Object.freeze({
+    originX: startX,
+    originY: startY,
+    directionX: unitX,
+    directionY: unitY,
+    length: rayLength,
+    endX: startX + unitX * rayLength,
+    endY: startY + unitY * rayLength,
+  });
+}
+
 export const getLaserPhase = (elapsed = 0) => {
   const seconds = Math.max(0, finite(elapsed));
   if (seconds < LASER_RULES.chargeDuration) return 'charge';

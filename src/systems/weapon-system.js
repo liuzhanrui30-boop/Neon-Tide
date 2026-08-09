@@ -1,4 +1,5 @@
 import { createEntityReadTarget } from '../game/entity-world.js';
+import { createTideLanceRay } from '../game/skill.js';
 import { AUTO_PULSE_BUFF_MULTIPLIER } from './player-system.js';
 
 export const TIDE_LANCE_CHARGE_SECONDS = 0.28;
@@ -533,12 +534,16 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
       [],
       spec,
     );
-    return Object.freeze({
-      ...line,
+    const ray = createTideLanceRay({
       originX: player.x,
       originY: player.y,
-      endX: player.x + line.directionX * spec.length,
-      endY: player.y + line.directionY * spec.length,
+      directionX: line.directionX,
+      directionY: line.directionY,
+      length: spec.length,
+    });
+    return Object.freeze({
+      ...line,
+      ...ray,
       sequence: player.sequence,
     });
   }
@@ -549,8 +554,8 @@ export function createWeaponSystem({ maxCandidates = DEFAULT_MAX_CANDIDATES } = 
     const id = world.spawn('friendlyProjectile', {
       x: aim.endX,
       y: aim.endY,
-      previousX: player.x,
-      previousY: player.y,
+      previousX: aim.originX,
+      previousY: aim.originY,
       vx: 0,
       vy: 0,
       damage: 3.2 * spec.damageMultiplier,

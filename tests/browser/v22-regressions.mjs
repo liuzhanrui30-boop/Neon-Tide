@@ -754,6 +754,7 @@ async function chargedLightLanceScenario() {
       updateLaser(0.1);
       active.laterCoreOpacity=$player.laser.core.material.opacity;
       clearWorldEntities();
+      combatBridge.entityWorld=null;
       const aligned=Array.from({length:6},(_,index)=>spawnEnemy('chaser',new THREE.Vector2(index+1,0)));
       const offAxis=spawnEnemy('chaser',new THREE.Vector2(2,2));
       const resolved=resolveLaserHits();
@@ -873,6 +874,7 @@ async function lightLanceCombatContractsScenario() {
       $state.formationTimer=Infinity;
       $state.shardSpawnTimer=Infinity;
       $state.health=99;$state.maxHealth=99;$state.hurtInvuln=99;
+      combatBridge.entityWorld=null;
       $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
       const prepareShot=()=>{
         clearLaserState();
@@ -3147,6 +3149,7 @@ async function finalBulwarkAndWarningOwnershipScenario() {
       $state.laserState='active';
       $state.laserSequence=73;
       $state.laserSequenceTargets=0;
+      combatBridge.entityWorld=null;
       resolveLaserHits();
       const laser={state:naturalBulwark.state,timer:naturalBulwark.stateTimer,attacks:$state.stats.realmAttackRoles.Bulwark,hp:naturalBulwark.hp};
       resolveLaserHits();
@@ -3363,6 +3366,7 @@ async function finalBossAriaScenario() {
       $player.position.set(0,0);$player.facing.set(0,1);
       $state.dashTimer=0;$state.dashInvulnTimer=0;
       $state.laserDirection.set(0,1);$state.laserState='active';$state.laserSequence+=1;$state.laserSequenceTargets=0;
+      combatBridge.entityWorld=null;
       resolveLaserHits();
       const laserOnly={...read(),hp:laserBoss.hp};
       $state.dashSequence+=1;damageEnemy(laserBoss);

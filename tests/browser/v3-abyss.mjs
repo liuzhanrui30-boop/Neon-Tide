@@ -161,7 +161,6 @@ async function reachMaw(page) {
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.room?.boss?.id==='abyss-maw'`);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior?.parts?.body?.entityId>0`);
   await page.gameEvaluate(`
-    clearWorldEntities();
     $state.enemySpawnTimer=Infinity;
     $state.formationTimer=Infinity;
     $state.shardSpawnTimer=Infinity;
@@ -199,6 +198,32 @@ async function performNaturalRouteBreaks(page) {
 }
 
 export const v3AbyssScenarios = [
+  ['v3 Abyss Maw managed weak points accept a real Tide Lance after legacy stage time', async () => {
+    await withPage('v3-abyss-maw-managed-lance-after-31', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
+      await reachMaw(page);
+      const weakPoints = await performNaturalRouteBreaks(page);
+      assert.equal(weakPoints.encounter.bossBehavior.phase, 'weakPoints');
+      const timing = await page.gameEvaluate(`
+        $state.elapsed=Math.max($state.elapsed,31.25);
+        $state.weaponEnergy=100;
+        $state.laserState='ready';
+        $state.dashTimer=0;
+        $state.dashInvulnTimer=0;
+        return {elapsed:$state.elapsed,managed:session.isObjectiveManaged(),availability:getLaserAvailability()};
+      `);
+      assert.ok(timing.elapsed > 31, JSON.stringify(timing));
+      assert.equal(timing.managed, true);
+      assert.deepEqual(timing.availability, { canStart: true, reason: 'ready' });
+      const fired = await fireTideLance(page);
+      assert.ok(fired.weapons.lanceShots > 0);
+      assert.equal(fired.encounter.bossBehavior.phase, 'weakPoints');
+      const aim = fired.weapons.lastLanceAim;
+      const ray = fired.legacy.tideLanceRay;
+      for (const field of ['originX', 'originY', 'directionX', 'directionY', 'endX', 'endY']) {
+        assert.ok(Math.abs(ray[field] - aim[field]) < 1e-6, `${field}: ${JSON.stringify({ ray, aim })}`);
+      }
+    });
+  }],
   ['v3 Abyss Maw rejects a real keyboard orbit, accepts a real keyboard varied route, and dies to real weapons', async () => {
     await withPage('v3-abyss-maw-orbit-pressure', { appUrl: ABYSS_URL, reducedMotion: true }, async (page) => {
       await reachMaw(page);
@@ -249,6 +274,10 @@ export const v3AbyssScenarios = [
       assert.ok(aim.targetIds.some((id) => varied.encounter.bossBehavior.parts.organs.some((organ) => organ.entityId === id)));
       assert.ok(Math.abs(visual.directionX - aim.directionX) < 1e-6);
       assert.ok(Math.abs(visual.directionY - aim.directionY) < 1e-6);
+      const ray = fired.legacy.tideLanceRay;
+      for (const field of ['originX', 'originY', 'directionX', 'directionY', 'endX', 'endY']) {
+        assert.ok(Math.abs(ray[field] - aim[field]) < 1e-6, `${field}: ${JSON.stringify({ ray, aim })}`);
+      }
       assert.ok(beforeLance.player.facing.x * aim.directionX + beforeLance.player.facing.y * aim.directionY < 0.8,
         'authoritative Boss aim differs from unrelated player facing');
       await page.waitForPage(`(globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.damageByWeapon['tide-lance']??0)>0`, 6000);

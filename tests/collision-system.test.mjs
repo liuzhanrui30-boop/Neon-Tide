@@ -318,9 +318,9 @@ test('piercing projectiles remember distinct targets across fixed steps and neve
   assert.equal(world.get(projectile), null);
 });
 
-test('Tide Lance remembers at least ten distinct targets across frames without tail re-hits', () => {
-  const world = createEntityWorld({ capacities: { enemy: 12, friendlyProjectile: 1 } });
-  const targets = Array.from({ length: 10 }, (_, index) => world.spawn('enemy', {
+test('Tide Lance consumes all sixteen distinct hit slots across frames without tail re-hits or a seventeenth hit', () => {
+  const world = createEntityWorld({ capacities: { enemy: 17, friendlyProjectile: 1 } });
+  const targets = Array.from({ length: 17 }, (_, index) => world.spawn('enemy', {
     x: 1 + index,
     y: 0,
     hp: 5,
@@ -330,22 +330,23 @@ test('Tide Lance remembers at least ten distinct targets across frames without t
     collidable: true,
   }));
   const projectile = world.spawn('friendlyProjectile', {
-    previousX: 0, previousY: 0, x: 11, y: 0,
+    previousX: 0, previousY: 0, x: 8.2, y: 0,
     damage: 1, radius: 0.08, team: 1, collidable: true,
     type: 'tide-lance', weaponId: 'tide-lance', piercing: true,
     pierceCount: 15, hitBudgetRemaining: 16,
   });
 
   const first = resolveCollisions(world, null, 1 / 60, createEvents());
-  assert.deepEqual(first.damageRecords.map(({ targetId }) => targetId), targets);
-  assert.deepEqual(targets.map((id) => world.get(id).hp), Array(10).fill(4));
-  assert.equal(world.get(projectile).hitBudgetRemaining, 6);
+  assert.deepEqual(first.damageRecords.map(({ targetId }) => targetId), targets.slice(0, 8));
+  assert.deepEqual(targets.slice(0, 8).map((id) => world.get(id).hp), Array(8).fill(4));
+  assert.equal(world.get(projectile).hitBudgetRemaining, 8);
 
-  world.write(projectile, { previousX: 0, previousY: 0, x: 11, y: 0 });
+  world.write(projectile, { previousX: 0, previousY: 0, x: 17.5, y: 0 });
   const second = resolveCollisions(world, null, 1 / 60, createEvents());
-  assert.deepEqual(second.damageRecords, []);
-  assert.deepEqual(targets.map((id) => world.get(id).hp), Array(10).fill(4));
-  assert.equal(world.get(projectile).hitBudgetRemaining, 6);
+  assert.deepEqual(second.damageRecords.map(({ targetId }) => targetId), targets.slice(8, 16));
+  assert.deepEqual(targets.slice(0, 16).map((id) => world.get(id).hp), Array(16).fill(4));
+  assert.equal(world.get(targets[16]).hp, 5);
+  assert.equal(world.get(projectile), null);
   world.dispose();
 });
 

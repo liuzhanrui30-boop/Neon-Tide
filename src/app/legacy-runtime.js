@@ -28,8 +28,11 @@ import {
   LASER_RULES,
   gainWeaponEnergy,
   canFireLaser,
+  createTideLanceRay,
   getLaserPhase,
+  getTideLanceAvailability,
   laserHitsCircle,
+  selectTideLanceDamageAuthority,
   selectLaserTargets,
 } from "../game/skill.js";
 import { REALMS } from "../game/realms.js";
@@ -439,6 +442,8 @@ const combatBridge = {
   suppressedFeedback: 0,
   pendingFeedback: null,
   consumedWeaponEvents: 0,
+  entityWorld: null,
+  lanceAim: null,
 };
 const RUNTIME_COLLECTION_AUDIT_INTERVAL = 2;
 const runtimeAudit = {
@@ -2265,6 +2270,8 @@ function resetState() {
   combatBridge.suppressedFeedback = 0;
   combatBridge.pendingFeedback = null;
   combatBridge.consumedWeaponEvents = 0;
+  combatBridge.entityWorld = null;
+  combatBridge.lanceAim = null;
   state.stats.projectilePeak = 0;
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
@@ -3051,20 +3058,32 @@ function collectShard(index) {
 
 function syncLaserTransform() {
   if (!player.laser) return;
-  const direction = state.laserDirection.lengthSq() > 0
-    ? state.laserDirection
-    : player.facing;
+  const ray = getCurrentTideLanceRay();
   player.laser.group.position.set(
-    player.position.x + direction.x * player.radius,
-    player.position.y + direction.y * player.radius,
+    ray.originX,
+    ray.originY,
     3.35,
   );
-  player.laser.group.rotation.z = Math.atan2(direction.y, direction.x);
+  player.laser.group.rotation.z = Math.atan2(ray.directionY, ray.directionX);
+}
+
+function getCurrentTideLanceRay(length = deriveTideLanceSpec(getBuildStats()).length) {
+  const aim = combatBridge.lanceAim?.sequence === state.laserSequence
+    ? combatBridge.lanceAim
+    : null;
+  return createTideLanceRay({
+    originX: Number.isFinite(aim?.originX) ? aim.originX : player.position.x,
+    originY: Number.isFinite(aim?.originY) ? aim.originY : player.position.y,
+    directionX: Number.isFinite(aim?.directionX) ? aim.directionX : state.laserDirection.x,
+    directionY: Number.isFinite(aim?.directionY) ? aim.directionY : state.laserDirection.y,
+    length: Number.isFinite(aim?.length) ? aim.length : length,
+  });
 }
 
 function clearLaserState() {
   state.laserElapsed = 0;
   state.laserSequenceTargets = 0;
+  combatBridge.lanceAim = null;
   state.laserState = canFireLaser(state.weaponEnergy) ? "ready" : "idle";
   if (player.laser) {
     player.laser.group.visible = false;
@@ -3077,14 +3096,17 @@ function clearLaserState() {
 }
 
 function getLaserAvailability() {
-  if (state.mode === "paused") return { canStart: false, reason: "paused" };
-  if (state.mode !== "playing") return { canStart: false, reason: "locked" };
-  if (state.laserState === "charge") return { canStart: false, reason: "charge" };
-  if (state.laserState === "active") return { canStart: false, reason: "active" };
-  if (!canFireLaser(state.weaponEnergy)) return { canStart: false, reason: "charging" };
-  if (state.dashTimer > 0 || state.dashInvulnTimer > 0) return { canStart: false, reason: "dash" };
-  if (!["idle", "ready"].includes(state.laserState)) return { canStart: false, reason: "conflict" };
-  return { canStart: true, reason: "ready" };
+  return getTideLanceAvailability({
+    mode: state.mode,
+    laserState: state.laserState,
+    weaponEnergy: state.weaponEnergy,
+    dashTimer: state.dashTimer,
+    dashInvulnTimer: state.dashInvulnTimer,
+    objectiveManaged: session.isObjectiveManaged(),
+    stageEnd: STAGES[state.stageIndex]?.end,
+    elapsed: state.elapsed,
+    stepSeconds: loop.getStats().stepSeconds,
+  });
 }
 
 function canStartLaser() {
@@ -3200,6 +3222,7 @@ function startLaserCharge() {
   state.laserElapsed = 0;
   state.laserSequence += 1;
   state.laserSequenceTargets = 0;
+  combatBridge.lanceAim = null;
   state.laserDirection.copy(player.facing);
   if (state.laserDirection.lengthSq() <= 0) state.laserDirection.set(0, 1);
   else state.laserDirection.normalize();
@@ -3235,8 +3258,6 @@ function startLaserCharge() {
 
 function attemptLaser() {
   input.laserBuffer = 0;
-  const stageEnd = STAGES[state.stageIndex]?.end;
-  if (Number.isFinite(stageEnd) && stageEnd - state.elapsed <= loop.getStats().stepSeconds * 2) return false;
   return startLaserCharge();
 }
 
@@ -3275,17 +3296,18 @@ function deferOrDestroyLaserTarget(enemy) {
 
 function resolveLaserHits() {
   if (state.laserState !== "active") return 0;
+  if (selectTideLanceDamageAuthority({ ecsCombatAuthority: Boolean(combatBridge.entityWorld) }) === 'ecs') return 0;
   const lanceSpec = deriveTideLanceSpec(getBuildStats());
   const remainingTargets = Math.max(0, lanceSpec.hitCap - state.laserSequenceTargets);
   if (remainingTargets <= 0) return 0;
-  const originX = player.position.x + state.laserDirection.x * player.radius;
-  const originY = player.position.y + state.laserDirection.y * player.radius;
+  const ray = getCurrentTideLanceRay(lanceSpec.length);
+  const { originX, originY } = ray;
   const beam = {
     originX,
     originY,
-    directionX: state.laserDirection.x,
-    directionY: state.laserDirection.y,
-    length: lanceSpec.length,
+    directionX: ray.directionX,
+    directionY: ray.directionY,
+    length: ray.length,
     width: lanceSpec.width,
   };
   const enemyCandidates = enemies
@@ -3434,6 +3456,7 @@ function applyAuthoritativeTideLanceAim(aim) {
   if (!["charge", "active"].includes(state.laserState)
     || !aim || aim.sequence !== state.laserSequence
     || !applyTideLanceAimDirection(state.laserDirection, aim)) return false;
+  combatBridge.lanceAim = aim;
   const targetId = aim.targetIds?.[0] ?? 0;
   const previousTargetId = state.laserTargetSourceId;
   state.laserTargetMode = targetId ? "target" : "neutral";
@@ -4902,6 +4925,7 @@ function updateLaserHUD() {
     conflict: "光矛 // 状态冲突",
     paused: "光矛 // 已暂停",
     locked: "光矛 // 不可用",
+    "stage-end": "光矛 // 不可用",
   };
   dom.laserStatus.textContent = statusByReason[availability.reason] ?? `光矛 // 充能中 ${roundedEnergy}%`;
   dom.laserButton.classList.toggle("ready", ready);
@@ -4915,6 +4939,7 @@ function updateLaserHUD() {
     conflict: "潮汐光矛暂不可用，状态冲突",
     paused: "潮汐光矛已暂停，继续游戏后可发射",
     locked: "潮汐光矛当前状态不可用",
+    "stage-end": "潮汐光矛当前关卡切换中",
   };
   dom.laserButton.setAttribute("aria-label", labelByReason[availability.reason] ?? `潮汐光矛充能中，能量 ${roundedEnergy}`);
   dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
@@ -5399,6 +5424,7 @@ function syncCombatWorld(entityWorld) {
     }) ?? 0;
   }
   if (!combatBridge.playerId) return null;
+  combatBridge.entityWorld = entityWorld;
   entityWorld.write(combatBridge.playerId, {
     previousX: player.position.x - player.velocity.x * loop.getStats().stepSeconds,
     previousY: player.position.y - player.velocity.y * loop.getStats().stepSeconds,
@@ -5548,7 +5574,9 @@ function applyCombatSummary(entityWorld, summary) {
   if (!summary || !Array.isArray(summary.damageRecords)) return false;
   let firstHitPosition = null;
   let destroyedThisStep = 0;
+  let tideLanceHits = 0;
   for (const record of summary.damageRecords) {
+    if (record.weaponId === 'tide-lance') tideLanceHits += 1;
     if (record.targetKind === "objective"
       && (record.targetId === combatBridge.objectiveEntityId
         || record.targetSourceId === combatBridge.objective?.sourceId)) {
@@ -5586,6 +5614,13 @@ function applyCombatSummary(entityWorld, summary) {
   combatBridge.pendingFeedback = firstHitPosition && summary.weaponHitEventEmitted
     ? Object.freeze({ position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep })
     : null;
+  if (tideLanceHits > 0) {
+    const hitCap = deriveTideLanceSpec(getBuildStats()).hitCap;
+    state.stats.laserHits += tideLanceHits;
+    state.laserSequenceTargets = Math.min(hitCap, state.laserSequenceTargets + tideLanceHits);
+    state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
+    laserAudio.onHits(tideLanceHits);
+  }
   if (summary.perfectPhases > 0 && combatBridge.playerId) {
     const entityPlayer = entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget);
     if (entityPlayer) {
@@ -5753,6 +5788,12 @@ function animate() {
   // Keep the compatibility-derived view debugger-visible for inherited CDP
   // probes while live progression uses the bounded build-stat projection.
   void getDerivedValues;
+  // Keep the public combat bridge methods debugger-visible so browser
+  // regressions can exercise the exact integration path without a second
+  // test-only damage implementation.
+  void syncCombatWorld;
+  void applyCombatSummary;
+  void applyAuthoritativeTideLanceAim;
   // Keep the retired pulse in this debugger-visible lexical scope solely for
   // the inherited compatibility probe. Live combat never sets this flag.
   if (globalThis.__NEON_TIDE_COMPAT_PULSE_PROBE__ === true) updateAutomaticPulse(0);
@@ -5882,6 +5923,17 @@ function getDebugSnapshot() {
       spec: deriveTideLanceSpec(getBuildStats()),
       propagationHits: state.stats.laserPropagationHits ?? 0,
     }),
+    tideLanceRay: (() => {
+      const originX = player.laser?.group.position.x ?? player.position.x;
+      const originY = player.laser?.group.position.y ?? player.position.y;
+      return createTideLanceRay({
+        originX,
+        originY,
+        directionX: state.laserDirection.x,
+        directionY: state.laserDirection.y,
+        length: player.laser?.group.scale.x ?? 0,
+      });
+    })(),
     combatBridge: Object.freeze({
       playerId: combatBridge.playerId || null,
       enemies: combatBridge.enemiesById.size,
@@ -5901,6 +5953,7 @@ function getDebugSnapshot() {
       feedbackEvents: combatBridge.feedbackEvents,
       suppressedFeedback: combatBridge.suppressedFeedback,
       consumedWeaponEvents: combatBridge.consumedWeaponEvents,
+      damageAuthority: selectTideLanceDamageAuthority({ ecsCombatAuthority: Boolean(combatBridge.entityWorld) }),
     }),
   });
 }

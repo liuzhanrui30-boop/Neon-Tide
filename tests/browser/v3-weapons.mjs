@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { withPage } from './harness.mjs';
+import { APP_URL, withPage } from './harness.mjs';
+
+const COMPATIBILITY_URL = new URL('?compatibility-test&objective-seed=1', APP_URL).href;
 
 async function v3WeaponsScenario() {
   await withPage('v3-weapons-no-input', {}, async (page) => {
@@ -260,6 +262,58 @@ async function v3WeaponsScenario() {
   });
 }
 
+async function v3TideLanceSingleAuthorityScenario() {
+  await withPage('v3-tide-lance-single-damage-authority', { appUrl: COMPATIBILITY_URL, reducedMotion: true }, async (page) => {
+    await page.startGame();
+    await page.waitForGame(`return $enemies.some((enemy)=>enemy&&!enemy.dead&&enemy.type!=='boss')`, Boolean, 8000);
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge.enemies>0`, 8000);
+    const probe = await page.gameEvaluate(`
+      const api=globalThis.__NEON_TIDE_V3__;
+      $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+      const target=$enemies.find((enemy)=>enemy&&!enemy.dead&&enemy.type!=='boss');
+      for(let index=$enemies.length-1;index>=0;index-=1){if($enemies[index]!==target)removeEnemy(index);}
+      $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
+      target.group.position.set(3,0,2);target.hp=50;target.maxHp=50;target.dead=false;target.pendingLaserDeath=false;
+      setEnemyState(target,'recover',10,0);
+      for(const id of [...api.world.query('friendlyProjectile')])api.world.despawn(id);
+      syncCombatWorld(api.world);
+      const mirrorId=target.v3EntityId;
+      const mirrorBefore=api.world.get(mirrorId)?.hp;
+      $state.laserState='active';$state.laserElapsed=LASER_RULES.chargeDuration;
+      $state.laserSequence+=1;$state.laserSequenceTargets=0;$state.laserDirection.set(1,0);
+      const legacyBefore=target.hp;
+      const legacyResolved=resolveLaserHits();
+      const legacyAfterDirect=target.hp;
+      syncCombatWorld(api.world);
+      const projectile=api.world.spawn('friendlyProjectile',{
+        previousX:0,previousY:0,x:LASER_RULES.length,y:0,damage:3.2,radius:LASER_RULES.width/2,
+        team:1,collidable:true,piercing:true,pierceCount:15,hitBudgetRemaining:16,
+        type:'tide-lance',weaponId:'tide-lance',sequence:$state.laserSequence,
+      });
+      const first=api.collisionSystem.resolve(api.world,api.session,1/60,api.events,api.session.getBuildStats());
+      applyCombatSummary(api.world,first);
+      const second=api.collisionSystem.resolve(api.world,api.session,1/60,api.events,api.session.getBuildStats());
+      applyCombatSummary(api.world,second);
+      return {
+        sourceId:target.sourceId,mirrorId,projectile,legacyBefore,mirrorBefore,legacyResolved,legacyAfterDirect,
+        first:first.damageRecords,second:second.damageRecords,legacyAfter:target.hp,mirrorAfter:api.world.get(mirrorId)?.hp,
+        authority:api.getDebugSnapshot().legacy.combatBridge.damageAuthority,
+      };
+    `);
+    assert.ok(probe.sourceId > 0 && probe.mirrorId > 0, JSON.stringify(probe));
+    assert.equal(probe.authority, 'ecs');
+    assert.equal(probe.legacyResolved, 0);
+    assert.equal(probe.legacyAfterDirect, probe.legacyBefore);
+    assert.equal(probe.first.length, 1, JSON.stringify(probe));
+    assert.equal(probe.first[0].targetId, probe.mirrorId);
+    assert.equal(probe.first[0].weaponId, 'tide-lance');
+    assert.deepEqual(probe.second, []);
+    assert.ok(Math.abs((probe.legacyBefore - probe.legacyAfter) - probe.first[0].amount) < 1e-9, JSON.stringify(probe));
+    assert.equal(probe.legacyAfter, probe.mirrorAfter);
+  });
+}
+
 export const v3WeaponScenarios = Object.freeze([
   ['v3 weapons no-input automatic combat', v3WeaponsScenario],
+  ['v3 Tide Lance uses one ECS damage authority for a natural legacy mirror', v3TideLanceSingleAuthorityScenario],
 ]);

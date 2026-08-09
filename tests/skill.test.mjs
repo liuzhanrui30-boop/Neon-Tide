@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LASER_RULES, canFireLaser, gainWeaponEnergy, getLaserPhase, laserHitsCircle, selectLaserTargets } from '../src/game/skill.js';
+import {
+  LASER_RULES,
+  canFireLaser,
+  createTideLanceRay,
+  gainWeaponEnergy,
+  getLaserPhase,
+  getTideLanceAvailability,
+  laserHitsCircle,
+  selectTideLanceDamageAuthority,
+  selectLaserTargets,
+} from '../src/game/skill.js';
 
 test('twenty normal pickups charge one laser and firing requires full energy', () => {
   let energy = 0;
@@ -26,4 +36,40 @@ test('laser timing, narrow collision and penetration cap are stable', () => {
 test('laser phase changes exactly at charge and completion boundaries', () => {
   assert.equal(getLaserPhase(0.28), 'active');
   assert.equal(getLaserPhase(0.60), 'done');
+});
+
+test('managed campaign Tide Lance availability ignores legacy stage-end timing while compatibility keeps it', () => {
+  const shared = {
+    mode: 'playing',
+    laserState: 'ready',
+    weaponEnergy: LASER_RULES.maxEnergy,
+    dashTimer: 0,
+    dashInvulnTimer: 0,
+    elapsed: 31.25,
+    stageEnd: 30,
+    stepSeconds: 1 / 60,
+  };
+  assert.deepEqual(getTideLanceAvailability({ ...shared, objectiveManaged: true }), {
+    canStart: true,
+    reason: 'ready',
+  });
+  assert.deepEqual(getTideLanceAvailability({ ...shared, objectiveManaged: false }), {
+    canStart: false,
+    reason: 'stage-end',
+  });
+  assert.equal(selectTideLanceDamageAuthority({ ecsCombatAuthority: true }), 'ecs');
+  assert.equal(selectTideLanceDamageAuthority({ ecsCombatAuthority: false }), 'legacy');
+});
+
+test('Tide Lance ray is a normalized center-to-length segment', () => {
+  const ray = createTideLanceRay({ originX: 2, originY: -3, directionX: 3, directionY: 4, length: 7.2 });
+  assert.deepEqual(ray, {
+    originX: 2,
+    originY: -3,
+    directionX: 0.6,
+    directionY: 0.8,
+    length: 7.2,
+    endX: 6.32,
+    endY: 2.7600000000000007,
+  });
 });
