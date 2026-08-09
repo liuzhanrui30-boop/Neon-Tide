@@ -1,5 +1,10 @@
 import { getEncounterTemplate, getThreatBudget } from '../content/encounters.js';
-import { createObjective, getObjectiveSnapshot, updateObjective } from './objective-system.js';
+import {
+  completeObjectiveForDeterministicTest,
+  createObjective,
+  getObjectiveSnapshot,
+  updateObjective,
+} from './objective-system.js';
 import { createAntiOrbitDirector } from './anti-orbit-director.js';
 import { ENEMY_ROLE_IDS, ENEMY_ROLES } from '../content/enemies.js';
 import { createEnemySystem } from './enemy-system.js';
@@ -291,25 +296,59 @@ function roomSeed(seed, roomIndex, templateId) {
   return value;
 }
 
-function scaledTemplate(template, scale) {
-  if (scale >= 0.999) return template;
+function scaledTemplate(template, scale, authoredTargetDurationSeconds = null) {
+  if (authoredTargetDurationSeconds === null && scale >= 0.999) return template;
+  const targetDuration = authoredTargetDurationSeconds === null
+    ? template.timeout
+    : authoredTargetDurationSeconds;
+  const effectiveTargetDuration = Math.max(0.1, targetDuration * scale);
+  const objectiveScale = effectiveTargetDuration / Math.max(0.1, template.timeout);
   return {
     ...template,
-    timeout: Math.max(6, template.timeout * scale),
-    killTarget: Math.max(3, Math.ceil((template.killTarget ?? 1) * scale)),
-    anchorSeconds: Math.max(0.2, (template.anchorSeconds ?? 1) * scale),
-    holdSeconds: Math.max(1, (template.holdSeconds ?? 1) * scale),
-    escortDistance: Math.max(3, (template.escortDistance ?? 1) * scale),
-    eliteTarget: Math.max(1, Math.ceil((template.eliteTarget ?? 1) * scale)),
-    survivalSeconds: Math.max(2, (template.survivalSeconds ?? 1) * scale),
-    coreCount: Math.max(2, Math.ceil((template.coreCount ?? 2) * scale)),
-    crisisSeconds: Math.max(0.4, (template.crisisSeconds ?? 1) * scale),
+    timeout: effectiveTargetDuration,
+    killTarget: Math.max(3, Math.ceil((template.killTarget ?? 1) * objectiveScale)),
+    anchorSeconds: Math.max(0.2, (template.anchorSeconds ?? 1) * objectiveScale),
+    holdSeconds: Math.max(1, (template.holdSeconds ?? 1) * objectiveScale),
+    escortDistance: Math.max(3, (template.escortDistance ?? 1) * objectiveScale),
+    eliteTarget: Math.max(1, Math.ceil((template.eliteTarget ?? 1) * objectiveScale)),
+    survivalSeconds: Math.max(2, (template.survivalSeconds ?? 1) * objectiveScale),
+    coreCount: Math.max(2, Math.ceil((template.coreCount ?? 2) * objectiveScale)),
+    crisisSeconds: Math.max(0.4, (template.crisisSeconds ?? 1) * objectiveScale),
+    escalationSeconds: Math.max(2, (template.escalationSeconds ?? 8) * objectiveScale),
   };
+}
+
+function normalizePressure(value, mode) {
+  if (value == null) return Object.freeze({
+    threatBudget: 1,
+    enemySpeed: 1,
+    selectionCadence: mode === 'abyss' ? 4 / 3 : 1,
+    waveIntervalSeconds: mode === 'abyss' ? 1.8 : 2.4,
+    telegraphFloorSeconds: 0.55,
+  });
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('encounter pressure must be a contract object');
+  }
+  const threatBudget = finite(value.threatBudget, 1);
+  const enemySpeed = finite(value.enemySpeed, 1);
+  const selectionCadence = finite(value.eliteFrequency ?? value.selectionCadence, 1);
+  const telegraphFloorSeconds = finite(value.telegraphFloorSeconds, 0.55);
+  if (threatBudget < 1 || threatBudget > 2 || enemySpeed < 1 || enemySpeed > 2
+    || selectionCadence < 1 || selectionCadence > 2 || telegraphFloorSeconds < 0.4) {
+    throw new TypeError('encounter pressure contract is outside fair bounds');
+  }
+  return Object.freeze({
+    threatBudget,
+    enemySpeed,
+    selectionCadence,
+    waveIntervalSeconds: 2.4 / selectionCadence,
+    telegraphFloorSeconds,
+  });
 }
 
 export function createEncounterDirector({
   mode = 'standard', quality = 'desktop', seed = 0, roomIndex: initialRoomIndex = 0, durationScale = 1,
-  objectiveAuthority = null,
+  objectiveAuthority = null, pressure = null, deterministicTestAuthority = null,
 } = {}) {
   if (!['standard', 'abyss'].includes(mode)) throw new TypeError('encounter mode must be standard or abyss');
   if (!Number.isFinite(Number(seed))) throw new TypeError('encounter seed must be finite');
@@ -318,7 +357,13 @@ export function createEncounterDirector({
   if (objectiveAuthority !== null && (!objectiveAuthority || typeof objectiveAuthority !== 'object' || Array.isArray(objectiveAuthority))) {
     throw new TypeError('objectiveAuthority must be an internal channel object');
   }
+  if (deterministicTestAuthority !== null
+    && (!deterministicTestAuthority || typeof deterministicTestAuthority !== 'object' || Array.isArray(deterministicTestAuthority))) {
+    throw new TypeError('deterministicTestAuthority must be an internal channel object');
+  }
   const qualityName = typeof quality === 'string' ? quality : quality?.tier ?? 'desktop';
+  const pressureContract = normalizePressure(pressure, mode);
+  const usesCampaignPressure = pressure !== null;
   let roomIndex = initialRoomIndex;
   let phase = 'idle';
   let objective = null;
@@ -336,6 +381,7 @@ export function createEncounterDirector({
     enemyCap: runtimeThreatLimits.activeEnemyCap,
     projectileCap: runtimeThreatLimits.projectileCap,
     warningCap: runtimeThreatLimits.simultaneousWarningCap,
+    speedMultiplier: pressureContract.enemySpeed,
   });
   let chapterIndex = 0;
   let waveTimer = 0;
@@ -349,6 +395,8 @@ export function createEncounterDirector({
   let objectiveTargetsSpawned = false;
   const rolesSeen = new Set();
   let lastWave = null;
+  let timingContract = null;
+  let bossContract = null;
   if (objectiveAuthority) {
     Object.defineProperty(objectiveAuthority, 'visit', {
       configurable: true,
@@ -357,6 +405,15 @@ export function createEncounterDirector({
         if (!objective) return false;
         visitor(objective);
         return true;
+      },
+    });
+  }
+  if (deterministicTestAuthority) {
+    Object.defineProperty(deterministicTestAuthority, 'completeObjective', {
+      configurable: true,
+      value() {
+        if (phase !== 'active' || !objective) return false;
+        return completeObjectiveForDeterministicTest(objective);
       },
     });
   }
@@ -374,18 +431,26 @@ export function createEncounterDirector({
       threatBudget: threatBudget ? cloneFrozen(threatBudget) : null,
       templateId,
       antiOrbit: antiOrbitDirector.getSnapshot(),
-      ...(phase === 'idle' ? {} : { threatState: Object.freeze({
-        chapterIndex, waveIndex, wavesSelected, wavesSpawned, enemiesDestroyed,
-        roomElapsed, untouchedSeconds, rolesSeen: Object.freeze([...rolesSeen]),
-        lastWave: lastWave ? cloneFrozen(lastWave) : null,
-        enemySystem: enemySystem.getStats(),
-      }) }),
+      ...(phase === 'idle' ? {} : {
+        pressure: pressureContract,
+        timing: timingContract ? cloneFrozen(timingContract) : null,
+        boss: bossContract ? cloneFrozen(bossContract) : null,
+        threatState: Object.freeze({
+          chapterIndex, waveIndex, wavesSelected, wavesSpawned, enemiesDestroyed,
+          roomElapsed, untouchedSeconds, rolesSeen: Object.freeze([...rolesSeen]),
+          lastWave: lastWave ? cloneFrozen(lastWave) : null,
+          enemySystem: enemySystem.getStats(),
+        }),
+      }),
     });
   }
 
   function startRoom(templateValue, context = {}) {
     const authored = getEncounterTemplate(templateValue);
-    const template = authored ? scaledTemplate(authored, durationScale) : null;
+    const authoredTargetDurationSeconds = Number.isFinite(context?.timing?.targetDurationSeconds)
+      ? Number(context.timing.targetDurationSeconds)
+      : null;
+    const template = authored ? scaledTemplate(authored, durationScale, authoredTargetDurationSeconds) : null;
     if (!template) throw new TypeError('startRoom requires a known encounter template');
     const currentIndex = roomIndex;
     const selectedRoomSeed = roomSeed(seed, currentIndex, template.id);
@@ -399,7 +464,22 @@ export function createEncounterDirector({
     lastHull = null;
     objectiveTargetsSpawned = false;
     lastWave = null;
-    threatBudget = getThreatBudget(template, { mode, quality });
+    const baseThreatBudget = getThreatBudget(template, {
+      mode: usesCampaignPressure ? 'standard' : mode,
+      quality,
+    });
+    threatBudget = Object.freeze({
+      ...baseThreatBudget,
+      total: Math.max(1, Math.round(baseThreatBudget.total * pressureContract.threatBudget)),
+    });
+    timingContract = authoredTargetDurationSeconds === null ? null : Object.freeze({
+      kind: context.timing.kind === 'boss' ? 'boss' : 'room',
+      authoredTargetDurationSeconds,
+      effectiveTargetDurationSeconds: authoredTargetDurationSeconds * durationScale,
+      objectiveScale: (authoredTargetDurationSeconds * durationScale) / Math.max(0.1, authored.timeout),
+      completesOnObjective: true,
+    });
+    bossContract = context.boss ? Object.freeze(clone(context.boss)) : null;
     templateId = template.id;
     roomIndex += 1;
     phase = 'active';
@@ -480,7 +560,7 @@ export function createEncounterDirector({
         rejectedDiagnostics: lastWave.rejectedDiagnostics,
       });
     }
-    waveTimer = mode === 'abyss' ? 1.8 : 2.4;
+    waveTimer = pressureContract.waveIntervalSeconds;
     return lastWave;
   }
 
@@ -542,6 +622,8 @@ export function createEncounterDirector({
     objective = null;
     templateId = null;
     threatBudget = null;
+    timingContract = null;
+    bossContract = null;
     combatFrozen = false;
     upgradeOffered = false;
     completionAcknowledged = false;

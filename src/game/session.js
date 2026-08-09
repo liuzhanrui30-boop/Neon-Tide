@@ -19,7 +19,12 @@ import {
   createNextStandardRunRoute,
   normalizeRunRoute,
 } from './run-route.js';
-import { createCampaign, getCampaignNode, isCampaignChapterEntry } from './campaign.js';
+import {
+  createCampaign,
+  getCampaignCheckpointContract,
+  getCampaignNode,
+  isCampaignChapterEntry,
+} from './campaign.js';
 import { createEncounterDirector } from '../systems/encounter-director.js';
 import {
   applyUpgradeChoice,
@@ -99,6 +104,11 @@ export function createGameSession(options = {}) {
   const seedFactory = options.seedFactory ?? (() => Math.floor(Date.now() + Math.random() * 0x7fffffff));
   const encounterQuality = options.encounterQuality ?? options.quality ?? 'desktop';
   const encounterDurationScale = options.encounterDurationScale ?? 1;
+  // Historical/test callers keep the authored route unless they explicitly
+  // opt into the 3.0 campaign. Production bootstrap always passes campaign.
+  const initialRouteKind = options.initialRouteKind ?? 'authored';
+  const deterministicCampaignTest = development && options.deterministicCampaignTest === true;
+  const campaignTestAuthority = options.campaignTestAuthority ?? null;
   const objectiveAuthority = options.objectiveAuthority ?? null;
   const encounterDirectorFactory = options.encounterDirectorFactory
     ?? ((configuration) => createEncounterDirector(configuration));
@@ -113,14 +123,27 @@ export function createGameSession(options = {}) {
   if (typeof now !== 'function') throw new TypeError('now must be a function');
   if (typeof seedFactory !== 'function') throw new TypeError('seedFactory must be a function');
   if (typeof encounterDirectorFactory !== 'function') throw new TypeError('encounterDirectorFactory must be a function');
+  if (!['campaign', 'authored', 'compatibility'].includes(initialRouteKind)) {
+    throw new TypeError('initialRouteKind must be campaign, authored, or compatibility');
+  }
+  if (campaignTestAuthority !== null
+    && (!campaignTestAuthority || typeof campaignTestAuthority !== 'object' || Array.isArray(campaignTestAuthority))) {
+    throw new TypeError('campaignTestAuthority must be an internal channel object');
+  }
   if (objectiveAuthority !== null && (!objectiveAuthority || typeof objectiveAuthority !== 'object' || Array.isArray(objectiveAuthority))) {
     throw new TypeError('objectiveAuthority must be an internal channel object');
   }
 
   let directorAuthority = null;
+  let directorTestAuthority = null;
   function createDirector(configuration) {
     directorAuthority = {};
-    return encounterDirectorFactory({ ...configuration, objectiveAuthority: directorAuthority });
+    directorTestAuthority = deterministicCampaignTest ? {} : null;
+    return encounterDirectorFactory({
+      ...configuration,
+      objectiveAuthority: directorAuthority,
+      deterministicTestAuthority: directorTestAuthority,
+    });
   }
   let activeCampaign = createCampaign(0, 'standard');
   let encounterDirector = createDirector({
@@ -241,6 +264,23 @@ export function createGameSession(options = {}) {
     return maxHullForRunBuild(build, baseMaxHull);
   }
 
+  function isExactCampaignCheckpoint(checkpoint) {
+    if (checkpoint?.route?.kind !== 'campaign') return true;
+    const expected = getCampaignCheckpointContract(checkpoint.route.roomIndex);
+    const build = normalizePersistedRunBuild(checkpoint.build);
+    if (!expected || !build
+      || checkpoint.chapterIndex !== expected.chapterIndex
+      || checkpoint.route.chapterIndex !== expected.chapterIndex
+      || checkpoint.stats?.roomsStarted !== checkpoint.route.roomIndex
+      || checkpoint.stats?.roomsCompleted !== checkpoint.route.roomIndex
+      || build.offerSequence !== expected.offerSequence) return false;
+    const selectedStacks = Object.values(build.upgradeStacks)
+      .reduce((total, stack) => total + stack, 0);
+    return build.pendingOffer
+      ? build.pendingOffer.rewardKind === 'boss' && selectedStacks === expected.offerSequence - 1
+      : selectedStacks === expected.offerSequence;
+  }
+
   function isCheckpoint(checkpoint) {
     return checkpoint
       && checkpoint.version === 2
@@ -255,6 +295,7 @@ export function createGameSession(options = {}) {
       && checkpoint.stats.roomsCompleted >= 1
       && checkpoint.chapterIndex <= checkpoint.stats.roomsCompleted
       && isRunBuildProgressionConsistent(checkpoint.build, checkpoint.stats, checkpoint.seed)
+      && isExactCampaignCheckpoint(checkpoint)
       && normalizeRunRoute(checkpoint.route, {
         seed: checkpoint.seed,
         stats: checkpoint.stats,
@@ -298,6 +339,7 @@ export function createGameSession(options = {}) {
     encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: checkpoint.seed, roomIndex: checkpoint.stats.roomsStarted,
       durationScale: encounterDurationScale,
+      pressure: state.route?.kind === 'campaign' ? activeCampaign.pressure : null,
     });
     const restored = publishTransition(previous, 'briefing', {
       checkpointRestored: true,
@@ -334,7 +376,15 @@ export function createGameSession(options = {}) {
     state.seed = seed;
     state.chapterIndex = 0;
     activeCampaign = createCampaign(seed, runMode);
-    state.route = createCampaignRunRoute(0, seed, runMode);
+    state.route = initialRouteKind === 'campaign'
+      ? createCampaignRunRoute(0, seed, runMode)
+      : initialRouteKind === 'authored'
+        ? createNextStandardRunRoute(0, seed)
+        : createCompatibilityRunRoute({
+          roomIndex: 0,
+          chapterIndex: 0,
+          templateId: 'v2.2-compatibility-chapter-0',
+        });
     state.room = null;
     const starterWeapon = state.build?.starterWeapon ?? 'pulse-cannon';
     assignBuild({ starterWeapon });
@@ -344,6 +394,7 @@ export function createGameSession(options = {}) {
     state.terminalReason = null;
     encounterDirector = createDirector({
       mode: runMode, quality: encounterQuality, seed, durationScale: encounterDurationScale,
+      pressure: state.route.kind === 'campaign' ? activeCampaign.pressure : null,
     });
     // A new attempt must never inherit an older Standard checkpoint. Abyss
     // additionally guarantees that it cannot expose a stale Continue path.
@@ -363,7 +414,18 @@ export function createGameSession(options = {}) {
     // Requests without nodeId are the exact Task 7–10 authored compatibility contract.
     // New 3.0 routes always carry the deterministic node id.
     const campaignRequest = room.campaign === true && typeof room.nodeId === 'string';
-    const legacyAuthored = room.legacyAuthored === true;
+    const legacyAuthored = room.legacyAuthored === true
+      || (state.route?.kind === 'authored' && !compatibility && !campaignRequest);
+    const requestKind = campaignRequest
+      ? 'campaign'
+      : compatibility
+        ? 'compatibility'
+        : legacyAuthored
+          ? 'authored'
+          : null;
+    if (requestKind !== state.route?.kind) {
+      throw new TypeError(`room request type does not match authoritative ${state.route?.kind ?? 'missing'} route`);
+    }
     let campaignNode = null;
     let authoredTemplate = null;
     let encounterChapterIndex = state.chapterIndex;
@@ -379,8 +441,11 @@ export function createGameSession(options = {}) {
       authoredTemplate = getEncounterTemplate(campaignNode.objectiveTemplate);
       encounterChapterIndex = campaignNode.chapterIndex;
     } else if (legacyAuthored) {
-      authoredTemplate = getEncounterTemplate(room.objectiveTemplate ?? state.route?.templateId);
-      encounterChapterIndex = Number.isInteger(room.chapterIndex) ? room.chapterIndex : state.chapterIndex;
+      const authoritativeRequest = room.legacyAuthored === true || room.campaign === true;
+      authoredTemplate = getEncounterTemplate(authoritativeRequest
+        ? room.objectiveTemplate ?? state.route?.templateId
+        : room) ?? getEncounterTemplate(state.route?.templateId);
+      encounterChapterIndex = state.route.chapterIndex;
     } else if (!compatibility) {
       authoredTemplate = getEncounterTemplate(room)
         ?? getCampaignEncounter(state.stats.roomsStarted, { mode: state.runMode, seed: state.seed });
@@ -403,7 +468,23 @@ export function createGameSession(options = {}) {
       || encounterChapterIndex > MAX_CAMPAIGN_CHAPTER_INDEX) {
       throw new TypeError('room chapter index is outside the campaign');
     }
-    const encounter = encounterDirector.startRoom(compatibilityTemplate, { chapterIndex: encounterChapterIndex });
+    const timing = campaignNode ? {
+      kind: campaignNode.kind,
+      targetDurationSeconds: campaignNode.targetDurationSeconds,
+    } : null;
+    const boss = campaignNode?.kind === 'boss' ? {
+      id: campaignNode.bossId,
+      label: campaignNode.bossLabel,
+      targetDurationSeconds: campaignNode.targetDurationSeconds,
+      recoveryMultiplier: activeCampaign.pressure.bossRecovery,
+      variantCount: activeCampaign.pressure.bossVariantCount,
+      telegraphFloorSeconds: activeCampaign.pressure.telegraphFloorSeconds,
+    } : null;
+    const encounter = encounterDirector.startRoom(compatibilityTemplate, {
+      chapterIndex: encounterChapterIndex,
+      timing,
+      boss,
+    });
     state.route = campaignRequest
       ? createCampaignRunRoute(routeRoomIndex, state.seed, state.runMode)
       : compatibility
@@ -420,6 +501,9 @@ export function createGameSession(options = {}) {
       objectiveManaged: !compatibility,
       objective: cloneValue(encounter.objective),
       threatBudget: cloneValue(encounter.threatBudget),
+      pressure: cloneValue(encounter.pressure),
+      timing: cloneValue(encounter.timing),
+      boss: cloneValue(encounter.boss),
       encounterPhase: encounter.phase,
       combatFrozen: encounter.combatFrozen,
     };
@@ -446,6 +530,9 @@ export function createGameSession(options = {}) {
       const previous = snapshot();
       state.room.objective = cloneValue(encounter.objective);
       state.room.threatBudget = cloneValue(encounter.threatBudget);
+      state.room.pressure = cloneValue(encounter.pressure);
+      state.room.timing = cloneValue(encounter.timing);
+      state.room.boss = cloneValue(encounter.boss);
       state.room.encounterPhase = encounter.phase;
       state.room.combatFrozen = encounter.combatFrozen;
       state.revision += 1;
@@ -487,6 +574,13 @@ export function createGameSession(options = {}) {
     const campaignNode = completedRoute?.kind === 'campaign'
       ? getCampaignNode(activeCampaign, completedRoute.roomIndex)
       : null;
+    if (campaignNode && (Object.hasOwn(result, 'nextMode')
+      || Object.hasOwn(result, 'chapterIndex')
+      || Object.hasOwn(result, 'rewardKind')
+      || Object.hasOwn(result, 'bossCore')
+      || result.outcome === 'victory')) {
+      throw new TypeError('campaign completion is authoritative and cannot be overridden by callers');
+    }
     const inferredCampaignMode = campaignNode
       ? completedRoute.roomIndex === CAMPAIGN_ROUTE_ROOM_COUNT - 1
         ? 'victory'
@@ -745,6 +839,19 @@ export function createGameSession(options = {}) {
     onTransition(transitionRecord);
     onChange(transitionRecord);
     return true;
+  }
+
+  if (deterministicCampaignTest && campaignTestAuthority) {
+    Object.defineProperty(campaignTestAuthority, 'completeCurrentNode', {
+      configurable: true,
+      value() {
+        if (state.route?.kind !== 'campaign' || state.mode !== 'playing'
+          || !directorTestAuthority?.completeObjective?.()) return false;
+        updateRoom({ presentationPending: 0 }, 0, null);
+        updateRoom({ presentationPending: 0 }, 0, null);
+        return state.mode !== 'playing';
+      },
+    });
   }
 
   return Object.freeze({

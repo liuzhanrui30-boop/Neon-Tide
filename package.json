@@ -5,10 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && vite build --minify false --outDir dist-unminified && node tests/assert-build-output.mjs dist-unminified",
     "preview": "vite preview",
     "test": "node --test",
-    "check": "npm test && npm run build"
+    "check": "npm test && npm run build",
+    "test:production-probe": "node tests/browser-production-probe.mjs"
   },
   "dependencies": {
     "three": "^0.180.0"

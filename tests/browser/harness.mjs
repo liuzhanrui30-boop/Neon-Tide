@@ -281,17 +281,16 @@ export class GamePage {
       return;
     }
 
-    const marker = source.lastIndexOf('.getDelta()');
-    assert.ok(marker >= 0, `${this.name}: production animate marker missing`);
-    this.breakpointLocation = { scriptId: scriptInfo.scriptId, ...offsetToLocation(source, marker) };
-    const animateWindow = source.slice(Math.max(0, marker - 3000), marker + 1200);
-    const stateMatch = animateWindow.match(/function\s+[A-Za-z_$][\w$]*\(\)\{const\s+[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\.getDelta\(\),[A-Za-z_$][\w$]*=([A-Za-z_$][\w$]*)\.reducedMotion/);
-    const enemyMatches = [...source.matchAll(/([A-Za-z_$][\w$]*)\.find\(([A-Za-z_$][\w$]*)=>\2\.type==="boss"/g)];
-    assert.ok(stateMatch && enemyMatches.length, `${this.name}: production state/enemy symbols missing`);
-    this.names = {
-      state: stateMatch[1],
-      enemies: enemyMatches.at(-1)[1],
-    };
+    const probe = await this.evaluate(`globalThis.__NEON_TIDE_V3__?.getReleaseProbe?.()`);
+    assert.deepEqual(probe, {
+      apiVersion: 1,
+      runtimeReady: true,
+      frameScheduled: true,
+      routeKind: null,
+      disposed: false,
+    }, `${this.name}: stable production release probe is unavailable`);
+    this.breakpointLocation = null;
+    this.names = {};
   }
 
   requireDev(feature) {
@@ -334,6 +333,7 @@ export class GamePage {
   }
 
   async scopeEvaluate(expression, { stallMs = 0 } = {}) {
+    assert.ok(this.breakpointLocation, `${this.name}: lexical runtime scope evaluation requires the Vite dev source`);
     this.scopeEvaluationCount += 1;
     const evaluationNumber = this.scopeEvaluationCount;
     await this.client.send('Page.bringToFront');

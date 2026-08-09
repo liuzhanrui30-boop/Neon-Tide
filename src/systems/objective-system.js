@@ -483,6 +483,16 @@ function finish(objective, events, status, reason = null) {
   return true;
 }
 
+// This hook is deliberately reachable only through an injected deterministic
+// campaign-test authority. Production gameplay completes objectives through
+// updateObjective and never receives the authority object.
+export function completeObjectiveForDeterministicTest(objective, events = null) {
+  if (!objective || typeof objective !== 'object' || Array.isArray(objective)) {
+    throw new TypeError('deterministic objective completion requires objective authority');
+  }
+  return finish(objective, events, 'completed');
+}
+
 function updatePurge(objective, events) {
   const kills = newEvents(objective, events, (event) => ['enemy:destroyed', 'enemyDestroyed', 'kill'].includes(event?.type));
   for (const payload of kills) {

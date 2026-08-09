@@ -59,7 +59,14 @@ export function bootstrapNeonTide(options = {}) {
   const searchParams = new URLSearchParams(globalThis.location?.search ?? '');
   const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
   const compatibilityTestMode = import.meta.env.DEV && searchParams.has('compatibility-test');
-  const campaignRouting = import.meta.env.PROD || searchParams.has('campaign-test');
+  const campaignTestMode = import.meta.env.DEV && searchParams.has('campaign-test');
+  const campaignRouting = import.meta.env.PROD || campaignTestMode;
+  const initialRouteKind = compatibilityTestMode
+    ? 'compatibility'
+    : campaignRouting
+      ? 'campaign'
+      : 'authored';
+  const campaignTestAuthority = campaignTestMode ? {} : null;
   const requestedCampaignSeed = Number(searchParams.get('objective-seed'));
   const campaignSeed = import.meta.env.DEV && Number.isFinite(requestedCampaignSeed)
     ? requestedCampaignSeed
@@ -135,6 +142,9 @@ export function bootstrapNeonTide(options = {}) {
     runSave,
     encounterQuality: entityQuality,
     encounterDurationScale: options.encounterDurationScale ?? (objectiveTestMode ? 0.18 : 1),
+    initialRouteKind,
+    deterministicCampaignTest: campaignTestMode,
+    campaignTestAuthority,
     objectiveAuthority,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
@@ -334,6 +344,16 @@ export function bootstrapNeonTide(options = {}) {
     });
   }
 
+  function getReleaseProbe() {
+    return Object.freeze({
+      apiVersion: 1,
+      runtimeReady: Boolean(runtime),
+      frameScheduled: animationFrameId !== null,
+      routeKind: session.snapshot().route?.kind ?? null,
+      disposed,
+    });
+  }
+
   function dispose() {
     if (disposed) return false;
     disposed = true;
@@ -368,8 +388,10 @@ export function bootstrapNeonTide(options = {}) {
     enemySystem,
     objectiveBridge,
     presentationEvents,
+    ...(campaignTestAuthority?.completeCurrentNode ? { campaignTest: campaignTestAuthority } : {}),
     dispose,
     getDebugSnapshot,
+    getReleaseProbe,
   });
   debugApi = app;
   Object.defineProperty(globalThis, '__NEON_TIDE_V3__', {

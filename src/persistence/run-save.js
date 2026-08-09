@@ -13,6 +13,7 @@ import {
   normalizeRunRoute,
 } from '../game/run-route.js';
 import { serializeUpgradeBuild } from '../systems/upgrade-system.js';
+import { getCampaignCheckpointContract } from '../game/campaign.js';
 
 const CURRENT_VERSION = 2;
 const DEFAULT_KEY = 'neon-tide:v3:checkpoint';
@@ -47,6 +48,25 @@ function isSemanticallyPossibleProgress(chapterIndex, stats) {
 function hullMatchesBuild(hull, build) {
   const maxHull = maxHullForRunBuild(build, BASE_RUN_MAX_HULL);
   return Number.isFinite(maxHull) && hull <= maxHull;
+}
+
+function isExactCampaignChapterEntry(value) {
+  if (value.route?.kind !== 'campaign') return true;
+  const expected = getCampaignCheckpointContract(value.route.roomIndex);
+  const build = normalizePersistedRunBuild(value.build);
+  if (!expected || !build
+    || value.chapterIndex !== expected.chapterIndex
+    || value.route.chapterIndex !== expected.chapterIndex
+    || value.stats.roomsStarted !== value.route.roomIndex
+    || value.stats.roomsCompleted !== value.route.roomIndex
+    || build.offerSequence !== expected.offerSequence) return false;
+  const selectedStacks = Object.values(build.upgradeStacks)
+    .reduce((total, stack) => total + stack, 0);
+  if (build.pendingOffer) {
+    return build.pendingOffer.rewardKind === 'boss'
+      && selectedStacks === expected.offerSequence - 1;
+  }
+  return selectedStacks === expected.offerSequence;
 }
 
 function createHistoricalCompatibilityRoute(roomIndex, chapterIndex) {
@@ -87,6 +107,7 @@ export function isRunCheckpoint(value) {
     || !isCheckpointStats(value.stats)
     || !isSemanticallyPossibleProgress(value.chapterIndex, value.stats)
     || !isRunBuildProgressionConsistent(value.build, value.stats, value.seed)
+    || !isExactCampaignChapterEntry(value)
     || !hullMatchesBuild(value.hull, value.build)
     || !normalizeRunRoute(value.route, {
       seed: value.seed,

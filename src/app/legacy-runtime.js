@@ -4955,6 +4955,7 @@ function updateLaserHUD() {
 
 function renderJourneyStrip(snapshot = session.snapshot()) {
   const routeIndex = Number.isInteger(snapshot.route?.roomIndex) ? snapshot.route.roomIndex : 0;
+  const campaignWon = snapshot.mode === "victory" && snapshot.route?.kind === "campaign";
   const renderKey = `${snapshot.runMode ?? "none"}:${snapshot.route?.kind ?? "none"}:${routeIndex}:${snapshot.mode}`;
   if (renderKey === journeyRenderKey) return false;
   journeyRenderKey = renderKey;
@@ -4964,7 +4965,7 @@ function renderJourneyStrip(snapshot = session.snapshot()) {
     const chapterEnd = chapterStart + nodeCount;
     const item = document.createElement("li");
     item.dataset.realm = chapter.id;
-    const stateName = snapshot.runMode && routeIndex >= chapterEnd
+    const stateName = campaignWon || (snapshot.runMode && routeIndex >= chapterEnd)
       ? "completed"
       : snapshot.runMode && routeIndex >= chapterStart && routeIndex < chapterEnd
         ? "current"

@@ -90,6 +90,7 @@ export function createEnemySystem({
   projectileCap = 96,
   warningCap = 3,
   worldLimit = 18,
+  speedMultiplier = 1,
 } = {}) {
   if (typeof random !== 'function') throw new TypeError('enemy random must be a function');
   if (typeof warningCap !== 'function' && (!Number.isFinite(Number(warningCap)) || Number(warningCap) < 1)) {
@@ -98,7 +99,11 @@ export function createEnemySystem({
   if (typeof enemyCap !== 'function' && (!Number.isFinite(Number(enemyCap)) || Number(enemyCap) < 1)) {
     throw new TypeError('enemy enemyCap must be a positive number or function');
   }
+  if (!Number.isFinite(Number(speedMultiplier)) || Number(speedMultiplier) < 1 || Number(speedMultiplier) > 2) {
+    throw new TypeError('enemy speedMultiplier must be in [1, 2]');
+  }
   const safeProjectileCap = clamp(Math.trunc(finite(projectileCap, 96)), 1, 96);
+  const safeSpeedMultiplier = Number(speedMultiplier);
   const enemyRead = createEntityReadTarget();
   const playerRead = createEntityReadTarget();
   const auxiliaryRead = createEntityReadTarget();
@@ -151,9 +156,10 @@ export function createEnemySystem({
     }
     const x = finite(overrides.x);
     const y = finite(overrides.y);
-    const speed = Number.isFinite(Number(overrides.speed))
+    const authoredSpeed = Number.isFinite(Number(overrides.speed))
       ? clamp(Number(overrides.speed), role.speedRange[0], role.speedRange[1])
       : randomRange(random, role.speedRange);
+    const speed = authoredSpeed * safeSpeedMultiplier;
     const stateByRole = {
       hunter: 'hunt', interceptor: 'approach', striker: 'track', lancer: 'lock',
       swarm: 'formation-merge', mine: 'deploy', warden: 'patrol', bulwark: 'chase',
@@ -167,7 +173,7 @@ export function createEnemySystem({
       vx: finite(overrides.vx), vy: finite(overrides.vy),
       hp: finite(overrides.hp, role.hp), maxHp: finite(overrides.maxHp, overrides.hp ?? role.hp),
       radius: role.radius, contactRadius: contactRadius(role), damage: Math.min(0.1, role.damage),
-      speed, maxSpeed: role.speedRange[1], turnRate: roleId === 'interceptor' ? 8 : 4.5,
+      speed, maxSpeed: role.speedRange[1] * safeSpeedMultiplier, turnRate: roleId === 'interceptor' ? 8 : 4.5,
       threat: role.threatCost, role: roleId, type: roleId, state: overrides.state ?? stateByRole[roleId],
       stateTimer: finite(overrides.stateTimer, timerByRole[roleId]),
       telegraphTimer: 0, duration: role.telegraphSeconds,
@@ -922,6 +928,7 @@ export function createEnemySystem({
       projectilesSpawned, chainTriggers, executionProtected, cleanupCount,
       activeWarnings, activeHazards,
       caps: { enemy: currentEnemyCap(), projectile: safeProjectileCap, warning: currentWarningCap() },
+      contract: { speedMultiplier: safeSpeedMultiplier },
       roles,
     });
   }

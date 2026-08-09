@@ -18,6 +18,11 @@ const ABYSS_PRESSURE = Object.freeze({
   telegraphFloorSeconds: 0.55,
 });
 const REWARD_ROOM_INDEXES = new Set([0, 2]);
+const CHECKPOINT_ENTRIES = Object.freeze({
+  4: Object.freeze({ chapterIndex: 1, offerSequence: 3 }),
+  8: Object.freeze({ chapterIndex: 2, offerSequence: 6 }),
+  12: Object.freeze({ chapterIndex: 3, offerSequence: 9 }),
+});
 
 function seed32(value) {
   let seed = Math.trunc(Number(value)) >>> 0;
@@ -120,4 +125,8 @@ export function getCampaignNode(campaign, routeIndex) {
 export function isCampaignChapterEntry(campaign, routeIndex) {
   const node = getCampaignNode(campaign, routeIndex);
   return Boolean(node && node.roomIndex === 0);
+}
+
+export function getCampaignCheckpointContract(routeIndex) {
+  return CHECKPOINT_ENTRIES[routeIndex] ?? null;
 }

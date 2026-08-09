@@ -187,7 +187,7 @@ test('selected checkpoint resumes the same next authored template, chapter, real
 test('pending compatibility checkpoint resumes the exact route after selecting an upgrade', () => {
   const storage = new MemoryStorage();
   const runSave = createRunSave(storage);
-  const original = createGameSession({ development: true, runSave, now: () => 777 });
+  const original = createGameSession({ development: true, runSave, now: () => 777, initialRouteKind: 'compatibility' });
   original.startRun('standard', 8181);
   original.startRoom({ id: 'legacy-reef-stage', compatibility: true, chapterIndex: 1 });
   original.completeRoom({ nextMode: 'upgrade' });
@@ -418,7 +418,7 @@ test('session validates run modes, seeds, rooms and damage', () => {
 });
 
 test('huge compatibility chapters fail before mutating the session', () => {
-  const session = createGameSession({ development: true });
+  const session = createGameSession({ development: true, initialRouteKind: 'compatibility' });
   session.startRun('standard', 3);
   assert.throws(
     () => session.startRoom({ id: 'huge-route', compatibility: true, chapterIndex: 999999 }),
@@ -638,7 +638,7 @@ test('pending upgrade authority rejects forged, stale, maxed and incompatible ch
 });
 
 test('an unresolved pending offer cannot transition back to playing or be skipped', () => {
-  const session = createGameSession({ development: true, deterministicTestMode: true });
+  const session = createGameSession({ development: true, deterministicTestMode: true, initialRouteKind: 'compatibility' });
   session.startRun('standard', 77);
   session.startRoom({ id: 'offer-room', compatibility: true });
   session.completeRoom({ nextMode: 'upgrade' });
@@ -663,7 +663,7 @@ test('new runs and resets expose the full immutable canonical progression build 
 });
 
 test('setBuild cannot replace progression, clear pending offers, or grant unoffered cards', () => {
-  const session = createGameSession({ development: true });
+  const session = createGameSession({ development: true, initialRouteKind: 'compatibility' });
   session.setStarterWeapon('arc-drones');
   session.startRun('standard', 12);
   session.startRoom({ id: 'starter-lock', compatibility: true });

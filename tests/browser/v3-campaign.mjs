@@ -31,7 +31,7 @@ async function completeNode(page) {
     kind: before.session.room.kind,
     id: before.session.room.id,
   };
-  assert.equal(await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.completeRoom()`), true);
+  assert.equal(await page.evaluate(`globalThis.__NEON_TIDE_V3__.campaignTest.completeCurrentNode()`), true);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()!=='playing'`);
   const completed = await snapshot(page);
   if (completed.session.mode === 'upgrade') {
@@ -62,6 +62,10 @@ export const v3CampaignScenarios = [
         input:globalThis.__NEON_TIDE_V3__.inputSystem.snapshot(),
       }))()`);
       assert.equal(menu.mode, 'menu', 'a persisted preference must never auto-start a run');
+      assert.deepEqual(await page.evaluate(`globalThis.__NEON_TIDE_V3__.getReleaseProbe()`), {
+        apiVersion: 1, runtimeReady: true, frameScheduled: true, routeKind: null, disposed: false,
+      });
+      assert.equal(await page.evaluate(`typeof globalThis.__NEON_TIDE_V3__.campaignTest.completeCurrentNode`), 'function');
       assert.equal(menu.selected, 'standard');
       assert.ok(menu.labels[0].includes('章节检查点'));
       assert.ok(menu.labels[1].includes('整局重开'));
@@ -138,6 +142,12 @@ export const v3CampaignScenarios = [
       assert.equal(route.filter(({ kind }) => kind === 'boss').length, 4);
       assert.equal(standard.session.build.offerSequence, 9);
       assert.equal(standard.events.dropped, 0);
+      const victoryMap = await page.evaluate(`[...document.querySelectorAll('#journey-strip li')].map((entry)=>({
+        state:entry.dataset.state,
+        current:entry.hasAttribute('aria-current'),
+        done:[...entry.querySelectorAll('.chapter-nodes i')].every((node)=>node.classList.contains('done')),
+      }))`);
+      assert.ok(victoryMap.every(({ state, current, done }) => state === 'completed' && !current && done));
 
       await page.trustedClick('.mode-option.danger');
       assert.equal(await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.getMode()`), 'victory');

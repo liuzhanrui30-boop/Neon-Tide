@@ -146,7 +146,7 @@ test('family stats alter real projectile traversal, drone arcs, Lance weak-point
 });
 
 test('GameSession owns pending offers and selection, and checkpoint-shaped round trips preserve equality', () => {
-  const session = createGameSession({ development: true, deterministicTestMode: true });
+  const session = createGameSession({ development: true, deterministicTestMode: true, initialRouteKind: 'compatibility' });
   session.startRun('standard', 90210);
   session.startRoom({ id: 'compat-room', compatibility: true });
   session.completeRoom({ nextMode: 'upgrade', rewardKind: 'normal' });
@@ -198,7 +198,10 @@ test('derived build stats are cached by canonical build identity and invalidate 
 test('cached stats invalidate on upgrade selection, checkpoint restore and reset without per-step churn', () => {
   const storage = new MemoryStorage();
   const runSave = createRunSave(storage);
-  const session = createGameSession({ development: true, deterministicTestMode: true, runSave, now: () => 10 });
+  const session = createGameSession({
+    development: true, deterministicTestMode: true, runSave, now: () => 10,
+    initialRouteKind: 'compatibility',
+  });
   session.startRun('standard', 404);
   session.startRoom({ id: 'cache-room', compatibility: true });
   session.completeRoom({ nextMode: 'upgrade' });
