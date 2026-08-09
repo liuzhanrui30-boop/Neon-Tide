@@ -49,7 +49,7 @@ async function readState(page) {
   })()`);
 }
 
-async function moveTo(page, target, held, { timeoutMs = 8_000, observe = null } = {}) {
+async function moveTo(page, target, held, { timeoutMs = 8_000, observe = null, stopAtTarget = true } = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const state = await readState(page);
@@ -58,7 +58,7 @@ async function moveTo(page, target, held, { timeoutMs = 8_000, observe = null } 
     const dx = target.x - state.player.x;
     const dy = target.y - state.player.y;
     if (Math.hypot(dx, dy) <= 0.2) {
-      await setMovement(page, new Set(), held);
+      if (stopAtTarget) await setMovement(page, new Set(), held);
       return state;
     }
     await setMovement(page, movementKeys(dx, dy), held);
@@ -68,6 +68,7 @@ async function moveTo(page, target, held, { timeoutMs = 8_000, observe = null } 
 }
 
 async function fixedOrbitTriggersReadablePressure(page) {
+  await page.gameEvaluate(`$state.hurtInvuln=Math.max($state.hurtInvuln,60);return true`);
   const held = new Set();
   let preview = null;
   let active = null;
@@ -106,7 +107,7 @@ async function fixedOrbitTriggersReadablePressure(page) {
       await moveTo(page, {
         x: Math.cos(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusX,
         y: Math.sin(angle) * OBJECTIVE_BOUNDARY_ORBIT.radiusY,
-      }, held, { observe, timeoutMs: 6_000 });
+      }, held, { observe, timeoutMs: 6_000, stopAtTarget: false });
     }
   } finally {
     await setMovement(page, new Set(), held);
@@ -139,6 +140,7 @@ async function fixedOrbitTriggersReadablePressure(page) {
 }
 
 async function variedRouteAvoidsFalseCounter(page) {
+  await page.gameEvaluate(`$state.hurtInvuln=Math.max($state.hurtInvuln,60);return true`);
   const held = new Set();
   const waypoints = [
     { x: 7.8, y: 0.4 }, { x: -1.5, y: 4.8 }, { x: 3.2, y: -4.4 },

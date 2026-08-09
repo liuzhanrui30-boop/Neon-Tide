@@ -5,8 +5,15 @@ import {
   STARTER_WEAPON_IDS,
   UPGRADE_TAGS,
   UPGRADES,
+  UPGRADE_EFFECT_CONSUMERS,
   validateUpgrades,
 } from '../src/content/upgrades.js';
+import {
+  DEFAULT_BUILD_STATS,
+  applyUpgradeChoice,
+  createUpgradeBuild,
+  deriveBuildStats,
+} from '../src/systems/upgrade-system.js';
 
 const EXPECTED_TAGS = ['overload', 'rift', 'tide', 'weapon', 'phase', 'lance', 'survival', 'objective'];
 
@@ -46,6 +53,13 @@ test('the immutable localized pool contains exactly 24 bounded no-input upgrades
   }
   assert.ok(BOSS_CORE_UPGRADE_IDS.length >= 3);
   assert.ok(BOSS_CORE_UPGRADE_IDS.every((id) => UPGRADES.some((upgrade) => upgrade.id === id && upgrade.bossCore)));
+  const effectKeys = [...new Set(UPGRADES.flatMap(({ effects }) => Object.keys(effects)))].sort();
+  assert.deepEqual(Object.keys(UPGRADE_EFFECT_CONSUMERS).sort(), effectKeys);
+  assert.ok(Object.values(UPGRADE_EFFECT_CONSUMERS).every((consumer) => typeof consumer === 'string' && consumer.length > 0));
+  assert.ok(UPGRADES.some(({ compatibleStarterWeapons }) => compatibleStarterWeapons.length === 1));
+  assert.ok(STARTER_WEAPON_IDS.every((starter) => UPGRADES.some(({ compatibleStarterWeapons }) => (
+    !compatibleStarterWeapons.includes(starter)
+  ))));
 });
 
 test('upgrade validation rejects IDs, copy, tags, stacking bounds, formulas, compatibility and active inputs', () => {
@@ -61,4 +75,32 @@ test('upgrade validation rejects IDs, copy, tags, stacking bounds, formulas, com
     source.slice(0, 23),
   ];
   for (const pool of invalid) assert.throws(() => validateUpgrades(pool), TypeError);
+});
+
+test('every declared effect changes its canonical derived stat incrementally and remains bounded', () => {
+  assert.deepEqual(
+    Object.keys(UPGRADE_EFFECT_CONSUMERS).sort(),
+    Object.keys(DEFAULT_BUILD_STATS).filter((key) => key !== 'starterWeapon').sort(),
+  );
+  for (const upgrade of UPGRADES) {
+    const starterWeapon = upgrade.compatibleStarterWeapons[0];
+    let build = createUpgradeBuild({ starterWeapon });
+    const baseline = deriveBuildStats(build);
+    build = applyUpgradeChoice(build, upgrade.id);
+    const first = deriveBuildStats(build);
+    for (const [key, formula] of Object.entries(upgrade.effects)) {
+      const expected = Math.max(formula.min, Math.min(formula.max, formula.base + formula.perStack));
+      assert.equal(first[key], expected, `${upgrade.id}/${key} first stack`);
+      assert.notEqual(first[key], baseline[key], `${upgrade.id}/${key} is inert`);
+    }
+    while ((build.upgradeStacks[upgrade.id] ?? 0) < upgrade.maxStacks) {
+      const previous = deriveBuildStats(build);
+      build = applyUpgradeChoice(build, upgrade.id);
+      const current = deriveBuildStats(build);
+      for (const [key, formula] of Object.entries(upgrade.effects)) {
+        assert.ok(current[key] >= formula.min && current[key] <= formula.max, `${upgrade.id}/${key} bounds`);
+        assert.notEqual(current[key], previous[key], `${upgrade.id}/${key} stack is inert`);
+      }
+    }
+  }
 });

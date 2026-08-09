@@ -14,9 +14,12 @@ class FakeElement {
     this.classList = new FakeClassList();
     this.textContent = '';
     this.textWrites = 0;
+    this.children = [];
   }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name) ?? null; }
+  append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = children; }
 }
 
 test('HUD exposes truthful dash progress and changes live phase text only semantically', () => {
@@ -108,4 +111,20 @@ test('upgrade cards expose behavior, current to new stack, tags and starter comp
     assert.equal(card.compatible, true);
     assert.equal(card.starterWeapon, 'pulse-cannon');
   }
+});
+
+test('upgrade card aria labels include behavior, stack change, tags and starter compatibility', () => {
+  const upgradeOptions = new FakeElement();
+  const root = { createElement() { return new FakeElement(); }, querySelector() { return null; }, querySelectorAll() { return []; } };
+  const renderer = createHudRenderer({ root, upgradeOptions });
+  const build = attachPendingOffer(createUpgradeBuild({ starterWeapon: 'pulse-cannon' }), 77);
+  const view = renderer.renderUpgradeOffer(build, 'zhCN');
+  assert.equal(upgradeOptions.children.length, 3);
+  upgradeOptions.children.forEach((button, index) => {
+    const label = button.getAttribute('aria-label');
+    assert.match(label, new RegExp(view.cards[index].behavior));
+    assert.match(label, /层数 0 → 1/);
+    assert.match(label, /标签/);
+    assert.match(label, /适配初始武器 pulse-cannon/);
+  });
 });

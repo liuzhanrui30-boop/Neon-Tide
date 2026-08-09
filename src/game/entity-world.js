@@ -118,10 +118,16 @@ const FLOAT_RULES = Object.freeze({
   targetId: [0, Number.MAX_SAFE_INTEGER, 0],
   parentId: [0, Number.MAX_SAFE_INTEGER, 0],
   sourceId: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget0: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget1: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget2: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget3: [0, Number.MAX_SAFE_INTEGER, 0],
+  hitTarget4: [0, Number.MAX_SAFE_INTEGER, 0],
 });
 const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([
-  'color', 'flags', 'team', 'phase', 'variantIndex', 'splitCount', 'chainCount', 'pierceCount', 'sequence',
+  'color', 'flags', 'team', 'phase', 'variantIndex', 'splitCount', 'chainCount', 'pierceCount',
+  'hitBudgetRemaining', 'sequence',
   'counterToken', 'dashToken', 'lanceToken', 'warningGroup',
 ]);
 const BOOLEAN_FIELDS = Object.freeze([

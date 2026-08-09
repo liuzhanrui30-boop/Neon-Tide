@@ -19,10 +19,12 @@ export const LASER_RULES = freeze({
   maxTargets: 5,
 });
 
-export const gainWeaponEnergy = (current, focused) => Math.min(
-  LASER_RULES.maxEnergy,
-  Math.max(0, finite(current)) + (focused ? LASER_RULES.focusedPickupEnergy : LASER_RULES.pickupEnergy),
-);
+export const gainWeaponEnergy = (current, focusedOrMultiplier = false) => {
+  const gain = typeof focusedOrMultiplier === 'number'
+    ? LASER_RULES.pickupEnergy * Math.max(1, Math.min(1.6, finite(focusedOrMultiplier, 1)))
+    : focusedOrMultiplier ? LASER_RULES.focusedPickupEnergy : LASER_RULES.pickupEnergy;
+  return Math.min(LASER_RULES.maxEnergy, Math.max(0, finite(current)) + gain);
+};
 
 export const canFireLaser = (energy) => finite(energy) >= LASER_RULES.maxEnergy;
 
@@ -48,15 +50,17 @@ export const laserHitsCircle = (beam = {}, circle = {}) => {
   const offsetX = x - originX;
   const offsetY = y - originY;
   const along = (offsetX * unitX) + (offsetY * unitY);
-  if (along < 0 || along > LASER_RULES.length) return false;
+  const length = Math.max(0, finite(beam.length, LASER_RULES.length));
+  if (along < 0 || along > length) return false;
   const perpendicular = Math.abs((offsetX * unitY) - (offsetY * unitX));
-  return perpendicular <= (LASER_RULES.width / 2) + radius;
+  const width = Math.max(0, finite(beam.width, LASER_RULES.width));
+  return perpendicular <= (width / 2) + radius;
 };
 
-export const selectLaserTargets = (candidates = []) => Object.freeze(
+export const selectLaserTargets = (candidates = [], maxTargets = LASER_RULES.maxTargets) => Object.freeze(
   (Array.isArray(candidates) ? candidates : [])
     .filter((candidate) => Number.isFinite(candidate?.along) && candidate.along >= 0)
     .slice()
     .sort((left, right) => left.along - right.along)
-    .slice(0, LASER_RULES.maxTargets),
+    .slice(0, Math.max(1, Math.min(16, Math.trunc(finite(maxTargets, LASER_RULES.maxTargets))))),
 );

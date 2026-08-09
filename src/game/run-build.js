@@ -33,14 +33,19 @@ export function normalizeRunBuild(value) {
     seen.add(id);
     ownedUpgrades.push(id);
   }
-  return Object.freeze({ ownedUpgrades: Object.freeze(ownedUpgrades) });
+  try {
+    return createUpgradeBuild({ ownedUpgrades });
+  } catch {
+    return null;
+  }
 }
 
 export function maxHullForRunBuild(build, baseMaxHull) {
   const normalized = normalizeRunBuild(build);
   if (!normalized) return null;
-  if (Object.hasOwn(normalized, 'upgradeStacks')) {
-    return Math.max(baseMaxHull, baseMaxHull + deriveBuildStats(normalized).hullBonus);
-  }
-  return normalized.ownedUpgrades.includes(REPAIR_SWARM_ID) ? Math.max(baseMaxHull, REPAIR_SWARM_MAX_HULL) : baseMaxHull;
+  const derived = Math.max(baseMaxHull, baseMaxHull + deriveBuildStats(normalized).hullBonus);
+  // Legacy Repair Swarm checkpoints encoded the capacity as a one-key build.
+  return normalized.ownedUpgrades.includes(REPAIR_SWARM_ID)
+    ? Math.max(derived, REPAIR_SWARM_MAX_HULL)
+    : derived;
 }

@@ -143,7 +143,8 @@ function updateMovement(player, input, dt, buildStats = null) {
   const hasDirection = magnitude > 0.01;
 
   if (hasDirection) {
-    const facingBlend = 1 - Math.exp(-TURN_ACCELERATION * 0.5 * dt);
+    const steeringMultiplier = clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2);
+    const facingBlend = 1 - Math.exp(-TURN_ACCELERATION * 0.5 * steeringMultiplier * dt);
     player.facing.x += (requested.x - player.facing.x) * facingBlend;
     player.facing.y += (requested.y - player.facing.y) * facingBlend;
     const normalizedFacing = normalize(player.facing.x, player.facing.y);
@@ -164,7 +165,7 @@ function updateMovement(player, input, dt, buildStats = null) {
     let steeringX = requested.x * speed - player.velocity.x;
     let steeringY = requested.y * speed - player.velocity.y;
     const steeringLength = Math.hypot(steeringX, steeringY);
-    const maxSteering = TURN_ACCELERATION * dt;
+    const maxSteering = TURN_ACCELERATION * clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2) * dt;
     if (steeringLength > maxSteering) {
       steeringX = (steeringX / steeringLength) * maxSteering;
       steeringY = (steeringY / steeringLength) * maxSteering;
@@ -212,9 +213,14 @@ function updateCameraLead(player, dt) {
   player.cameraLead.y += (target.y - player.cameraLead.y) * blend;
 }
 
-function updateAutomaticPulse(player, dt, events) {
+function updateAutomaticPulse(player, dt, events, buildStats = null) {
   const buffed = player.autoFireRateBuffTimer > 0;
-  const interval = AUTO_PULSE_INTERVAL * (buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1);
+  const buffMultiplier = clamp(
+    Number(buildStats?.perfectFireBuffMultiplier) || AUTO_PULSE_BUFF_MULTIPLIER,
+    0.6,
+    AUTO_PULSE_BUFF_MULTIPLIER,
+  );
+  const interval = AUTO_PULSE_INTERVAL * (buffed ? buffMultiplier : 1);
   player.autoFireTimer -= dt;
   let guard = 0;
   while (player.autoFireTimer <= 1e-9 && guard < 4) {
@@ -237,7 +243,7 @@ export function updatePlayerState(player, input, dt, events = null, buildStats =
   player.dashTimer = approachZero(player.dashTimer - dt);
   player.phaseTimer = approachZero(player.phaseTimer - dt);
   player.perfectPhaseWindow = approachZero(player.perfectPhaseWindow - dt);
-  updateAutomaticPulse(player, dt, events);
+  updateAutomaticPulse(player, dt, events, buildStats);
   player.autoFireRateBuffTimer = approachZero(player.autoFireRateBuffTimer - dt);
   for (let index = 0; index < 2; index += 1) {
     const recovery = DASH_RECOVERY * clamp(Number(buildStats?.dashRecoveryMultiplier) || 1, 0.65, 1);
@@ -255,7 +261,7 @@ export function updatePlayerState(player, input, dt, events = null, buildStats =
   return player;
 }
 
-export function resolvePlayerHit(player, session, events) {
+export function resolvePlayerHit(player, session, events, buildStats = null) {
   if (!player || typeof player !== 'object') throw new TypeError('player state is required');
   if (player.perfectPhaseWindow > 0) {
     player.perfectPhaseWindow = 0;
@@ -263,15 +269,20 @@ export function resolvePlayerHit(player, session, events) {
     const refundIndex = player.dashCharges[0] <= player.dashCharges[1] ? 0 : 1;
     const before = player.dashCharges[refundIndex];
     player.dashCharges[refundIndex] = clamp(before + PERFECT_PHASE_REFUND, 0, 1);
+    const fireRateMultiplier = clamp(
+      Number(buildStats?.perfectFireBuffMultiplier) || AUTO_PULSE_BUFF_MULTIPLIER,
+      0.6,
+      AUTO_PULSE_BUFF_MULTIPLIER,
+    );
     player.autoFireTimer = Math.min(
-      player.autoFireTimer * AUTO_PULSE_BUFF_MULTIPLIER,
-      AUTO_PULSE_INTERVAL * AUTO_PULSE_BUFF_MULTIPLIER,
+      player.autoFireTimer * fireRateMultiplier,
+      AUTO_PULSE_INTERVAL * fireRateMultiplier,
     );
     player.autoFireRateBuffTimer = Math.max(player.autoFireRateBuffTimer, AUTO_FIRE_BUFF_DURATION);
     emit(events, 'perfectPhase', {
       refundIndex,
       refunded: player.dashCharges[refundIndex] - before,
-      fireRateMultiplier: 0.75,
+      fireRateMultiplier,
       duration: AUTO_FIRE_BUFF_DURATION,
     });
     return false;

@@ -94,6 +94,37 @@ test('perfect phase consumes one collision, refunds one charge, buffs cadence, a
   assert.equal(events.emitted.filter(({ type }) => type === 'perfectPhase').length, 1);
 });
 
+test('every real perfect-phase collision family consumes the upgraded fire-surge multiplier', () => {
+  const collisionFamilies = [
+    ['enemyProjectile', { damage: 1 }],
+    ['enemy', { hp: 3, damage: 1, contactDamaging: true }],
+    ['objective', { hp: 3, damage: 1, contactDamaging: true }],
+    ['enemyHazard', { hp: 3, damage: 1, contactDamaging: true }],
+  ];
+  for (const [kind, patch] of collisionFamilies) {
+    const world = createEntityWorld({ capacities: { player: 1, [kind]: 2 } });
+    const playerId = world.spawn('player', {
+      x: 0, y: 0, radius: 0.5, team: 1, collidable: true,
+      perfectPhaseWindow: 0.1, dashCharges: [0, 1], cooldown: 0.55,
+    });
+    world.spawn(kind, {
+      x: 0, y: 0, radius: 0.3, team: 2, collidable: true, ...patch,
+    });
+    const events = createEvents();
+    const summary = createCollisionSystem().resolve(
+      world,
+      { damageHull() { throw new Error(`${kind} bypassed perfect phase`); } },
+      1 / 60,
+      events,
+      { perfectFireBuffMultiplier: 0.6 },
+    );
+    const player = world.get(playerId);
+    assert.equal(summary.perfectPhases, 1, kind);
+    assert.ok(player.cooldown <= 0.55 * 0.6 + 1e-9, kind);
+    assert.equal(events.emitted.find(({ type }) => type === 'perfectPhase')?.payload.fireRateMultiplier, 0.6, kind);
+  }
+});
+
 test('normal player hits aggregate through session hull authority once per step', () => {
   const world = createEntityWorld({ capacities: { player: 1, enemyProjectile: 3 } });
   world.spawn('player', { x: 0, y: 0, radius: 0.5, team: 1, collidable: true });
@@ -202,6 +233,87 @@ test('friendly and enemy projectiles use their full fixed-step sweep without dup
   assert.equal(world.get(enemyId).hp, 3);
   assert.deepEqual(damage, [2]);
   assert.equal(summary.hits, 1);
+});
+
+test('one pierce means first hit plus one distinct traversal hit in swept order across target kinds', () => {
+  const world = createEntityWorld({
+    capacities: { bossPart: 1, enemy: 3, objective: 1, friendlyProjectile: 1 },
+  });
+  const hostileObjective = world.spawn('objective', {
+    x: 1, y: 0, hp: 20, radius: 0.2, team: 2, objective: true, collidable: true,
+  });
+  const weakEnemy = world.spawn('enemy', {
+    x: 2, y: 0, hp: 20, radius: 0.2, team: 2, weakPoint: true, collidable: true,
+  });
+  const bossPart = world.spawn('bossPart', {
+    x: 3, y: 0, hp: 20, radius: 0.2, team: 2, weakPoint: true, collidable: true,
+  });
+  const laterEnemies = [4, 5].map((x) => world.spawn('enemy', {
+    x, y: 0, hp: 20, radius: 0.2, team: 2, collidable: true,
+  }));
+  const projectileId = world.spawn('friendlyProjectile', {
+    previousX: 0, previousY: 0, x: 6, y: 0, damage: 2, radius: 0.05,
+    team: 1, collidable: true, piercing: true, pierceCount: 1,
+    hitBudgetRemaining: 2, weakPointMultiplier: 2, objectiveDamageMultiplier: 1.5,
+  });
+
+  const summary = resolveCollisions(world, null, 1 / 60, createEvents());
+
+  assert.deepEqual(summary.damageRecords.map(({ targetId }) => targetId), [hostileObjective, weakEnemy]);
+  assert.equal(world.get(hostileObjective).hp, 17);
+  assert.equal(world.get(weakEnemy).hp, 16);
+  assert.equal(world.get(bossPart).hp, 20);
+  assert.deepEqual(laterEnemies.map((id) => world.get(id).hp), [20, 20]);
+  assert.equal(world.get(projectileId), null);
+});
+
+test('piercing projectiles remember distinct targets across fixed steps and never re-hit one body', () => {
+  const world = createEntityWorld({ capacities: { enemy: 2, friendlyProjectile: 1 } });
+  const first = world.spawn('enemy', { x: 1, y: 0, hp: 5, radius: 0.3, team: 2, collidable: true });
+  const second = world.spawn('enemy', { x: 3, y: 0, hp: 5, radius: 0.3, team: 2, collidable: true });
+  const projectile = world.spawn('friendlyProjectile', {
+    previousX: 0, previousY: 0, x: 1.2, y: 0, damage: 1, radius: 0.1,
+    team: 1, collidable: true, piercing: true, pierceCount: 1, hitBudgetRemaining: 2,
+  });
+  resolveCollisions(world, null, 1 / 60, createEvents());
+  assert.equal(world.get(first).hp, 4);
+  assert.equal(world.get(projectile).hitBudgetRemaining, 1);
+
+  world.write(projectile, { previousX: 0.8, x: 3.4 });
+  const secondPass = resolveCollisions(world, null, 1 / 60, createEvents());
+  assert.deepEqual(secondPass.damageRecords.map(({ targetId }) => targetId), [second]);
+  assert.equal(world.get(first).hp, 4);
+  assert.equal(world.get(second).hp, 4);
+  assert.equal(world.get(projectile), null);
+});
+
+test('follow-up arcs preserve upgraded radius, damage and bounded target dedupe', () => {
+  const run = (chainRadius) => {
+    const world = createEntityWorld({ capacities: { enemy: 2, friendlyProjectile: 4 } });
+    const first = world.spawn('enemy', { x: 0, y: 0, hp: 10, radius: 0.3, team: 2, collidable: true });
+    const second = world.spawn('enemy', { x: 5, y: 0, hp: 10, radius: 0.3, team: 2, collidable: true });
+    world.spawn('friendlyProjectile', {
+      x: 0, y: 0, previousX: 0, previousY: 0, vx: 1, vy: 0,
+      damage: 2, radius: 0.1, team: 1, collidable: true,
+      type: 'arc-chain', weaponId: 'arc-drones', chainCount: 1,
+      chainDamageMultiplier: 0.9, chainRadius, hitBudgetRemaining: 1,
+    });
+    const summary = resolveCollisions(world, null, 1 / 60, createEvents());
+    return {
+      world,
+      first,
+      second,
+      summary,
+      chains: [...world.query('friendlyProjectile')].map((id) => world.get(id)),
+    };
+  };
+  assert.equal(run(3).summary.deferredSpawns, 0);
+  const upgraded = run(6);
+  assert.equal(upgraded.summary.deferredSpawns, 1);
+  assert.equal(upgraded.chains[0].targetId, upgraded.second);
+  assert.equal(upgraded.chains[0].damage, 1.8);
+  assert.equal(upgraded.chains[0].chainRadius, 6);
+  assert.equal(upgraded.chains[0].hitTarget0, upgraded.first);
 });
 
 test('body contact requires an explicit contact-damaging proxy contract', () => {

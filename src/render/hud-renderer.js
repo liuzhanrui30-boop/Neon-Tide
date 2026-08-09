@@ -177,7 +177,10 @@ export function createHudRenderer(options = {}) {
       button.className = 'upgrade-option';
       button.type = 'button';
       button.dataset.upgradeId = card.id;
-      button.setAttribute('aria-label', `${card.name}；${card.behavior}；层数 ${card.stackLabel}；标签 ${card.tags.join('、')}`);
+      button.setAttribute(
+        'aria-label',
+        `${card.name}；${card.behavior}；层数 ${card.stackLabel}；标签 ${card.tags.join('、')}；适配初始武器 ${card.starterWeapon}`,
+      );
       const number = root.createElement('span');
       number.className = 'upgrade-number';
       number.setAttribute('aria-hidden', 'true');

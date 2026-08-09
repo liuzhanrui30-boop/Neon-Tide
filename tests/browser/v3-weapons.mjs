@@ -72,8 +72,8 @@ async function v3WeaponsScenario() {
     assert.equal(automatic.fodderHp, 100, JSON.stringify(automatic));
     assert.equal(automatic.weapons.lastTargetId, setup.executing);
     assert.ok(automatic.weapons.shotsByWeapon['pulse-cannon'] > 0);
-    assert.ok(automatic.weapons.shotsByWeapon['arc-drones'] > 0);
-    assert.ok(automatic.weapons.shotsByWeapon['prism-missiles'] > 0);
+    assert.equal(automatic.weapons.shotsByWeapon['arc-drones'], 0);
+    assert.equal(automatic.weapons.shotsByWeapon['prism-missiles'], 0);
     assert.ok(automatic.collisions.totalHits > 0);
     assert.equal(automatic.renderer.mounted, true);
     assert.ok(automatic.renderer.pools.friendlyProjectile.count > 0);
@@ -203,6 +203,7 @@ async function v3WeaponsScenario() {
     const bossTransition = await page.gameEvaluate(`
       clearWorldEntities();
       session.completeRoom({nextMode:'upgrade',stageIndex:2});
+      session.selectUpgrade(session.snapshot().build.pendingOffer.cards[0]);
       session.startRoom({id:'v2.2-boss-compatibility',compatibility:true,chapterIndex:3});
       enterStage(3,false);
       beginBossStage();

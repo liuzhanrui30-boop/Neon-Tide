@@ -194,3 +194,16 @@ test('perfect phase immediately advances the current automatic pulse cooldown', 
   assert.ok(elapsed < AUTO_PULSE_INTERVAL, JSON.stringify({ elapsed, emitted }));
   assert.ok(elapsed < 0.8, 'the 0.8 second surge must contain an accelerated shot opportunity');
 });
+
+test('direct player-hit resolution consumes the authoritative perfect-phase multiplier', () => {
+  const player = createPlayerState({
+    perfectPhaseWindow: 0.1,
+    autoFireTimer: AUTO_PULSE_INTERVAL,
+  });
+  const emitted = [];
+  resolvePlayerHit(player, { damageHull: () => true }, {
+    emit(type, payload) { emitted.push({ type, payload }); return true; },
+  }, { perfectFireBuffMultiplier: 0.6 });
+  assert.ok(player.autoFireTimer <= AUTO_PULSE_INTERVAL * 0.6 + 1e-9);
+  assert.equal(emitted[0].payload.fireRateMultiplier, 0.6);
+});

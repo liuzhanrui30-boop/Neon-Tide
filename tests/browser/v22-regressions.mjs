@@ -347,6 +347,7 @@ async function desktopCoreScenario() {
     // callback in headless Chrome and does not represent player input.
     await page.gameEvaluate(`
       session.completeRoom({nextMode:'upgrade',stageIndex:0});
+      session.selectUpgrade(session.snapshot().build.pendingOffer.cards[0]);
       session.startRoom({id:'v2.2-browser-compatibility',compatibility:true,chapterIndex:0});
       $state.stageIndex=0;
       $state.stageQueue=[];
@@ -400,8 +401,10 @@ async function desktopCoreScenario() {
     assert.ok(checkpointSaved.saved.build.ownedUpgrades.includes('repair-swarm'));
     assert.equal(checkpointSaved.saved.hull, 4);
     assert.equal(checkpointSaved.saved.stats.score, 735);
-    assert.ok(checkpointSaved.live.session.stats.roomsStarted > checkpointSaved.saved.stats.roomsStarted,
-      'next room began before the chapter-entry checkpoint was written');
+    assert.equal(checkpointSaved.live.session.stats.roomsStarted, checkpointSaved.saved.stats.roomsStarted);
+    assert.equal(checkpointSaved.live.session.mode, 'upgrade');
+    assert.ok(checkpointSaved.saved.build.pendingOffer, 'the real chapter-boundary offer was not checkpointed');
+    assert.deepEqual(checkpointSaved.live.session.build, checkpointSaved.saved.build);
 
     let loaded = page.client.waitFor('Page.loadEventFired');
     await page.client.send('Page.navigate', { url: APP_URL });
@@ -409,13 +412,22 @@ async function desktopCoreScenario() {
     await page.waitForPage(`document.readyState === 'complete' && Boolean(globalThis.__NEON_TIDE_V3__)`);
     const restored = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
     assert.deepEqual(
-      { mode:restored.session.mode, chapterIndex:restored.session.chapterIndex, hull:restored.session.hull },
-      { mode:'briefing', chapterIndex:2, hull:checkpointSaved.saved.hull },
+      { mode:restored.session.mode, chapterIndex:restored.session.chapterIndex, hull:restored.session.hull, build:restored.session.build },
+      { mode:'briefing', chapterIndex:2, hull:checkpointSaved.saved.hull, build:checkpointSaved.saved.build },
     );
     assert.ok(restored.persistence.loads >= 1, JSON.stringify(restored.persistence));
-    await page.startGame();
+    await page.trustedClick('#primary-button');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'upgrade'`);
+    await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`);
+    const restoredOffer = await page.evaluate(`({cards:globalThis.__NEON_TIDE_V3__.session.snapshot().build.pendingOffer.cards,buttons:[...document.querySelectorAll('#upgrade-options .upgrade-option')].map((button)=>button.dataset.upgradeId)})`);
+    assert.deepEqual(restoredOffer.buttons, restoredOffer.cards);
+    await page.trustedClick(`#upgrade-options [data-upgrade-id="${restoredOffer.cards[0]}"]`);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
     const continued = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+    assert.equal(continued.session.build.pendingOffer, null);
+    assert.equal(continued.session.build.upgradeStacks[restoredOffer.cards[0]],
+      (checkpointSaved.saved.build.upgradeStacks[restoredOffer.cards[0]] ?? 0) + 1);
+    assert.ok(continued.session.chapterIndex >= checkpointSaved.saved.chapterIndex);
     assert.deepEqual(
       {
         mode: continued.session.mode,
@@ -435,15 +447,15 @@ async function desktopCoreScenario() {
       {
         mode: 'playing',
         runMode: 'standard',
-        chapterIndex: 2,
-        build: checkpointSaved.saved.build,
+        chapterIndex: continued.session.chapterIndex,
+        build: continued.session.build,
         hull: 4,
         maxHull: 4,
         legacyMode: 'playing',
-        legacyStage: 2,
+        legacyStage: continued.session.chapterIndex,
         legacyHull: 4,
         legacyMaxHull: 4,
-        legacyBuild: checkpointSaved.saved.build.ownedUpgrades,
+        legacyBuild: continued.session.build.ownedUpgrades,
         legacyScore: checkpointSaved.saved.stats.score,
         legacyCampaignStats: continued.session.stats,
       },
@@ -717,13 +729,13 @@ async function chargedLightLanceScenario() {
     assert.equal(shot.active.coreColor, 0xffffff);
     assert.ok(shot.active.coreOpacity > shot.active.laterCoreOpacity);
     assert.equal(shot.active.flash, '0');
-    assert.deepEqual(shot.capProbe.hitFlags, [true,true,true,true,true,false]);
-    assert.equal(shot.capProbe.sixthHp, 1);
+    assert.deepEqual(shot.capProbe.hitFlags, [true,true,true,true,true,true]);
+    assert.equal(shot.capProbe.sixthHp, 0);
     assert.equal(shot.capProbe.offAxisHp, 1);
-    assert.deepEqual([shot.capProbe.resolved, shot.capProbe.resolvedAgain], [5,0]);
-    assert.equal(shot.capProbe.hits, 5);
-    assert.equal(shot.capProbe.peak, 5);
-    assert.equal(shot.capProbe.feedback, 'PIERCE ×5');
+    assert.deepEqual([shot.capProbe.resolved, shot.capProbe.resolvedAgain], [6,0]);
+    assert.equal(shot.capProbe.hits, 6);
+    assert.equal(shot.capProbe.peak, 6);
+    assert.equal(shot.capProbe.feedback, 'PIERCE ×6');
     assert.deepEqual(shot.combatProbe, {
       lancerHp:1,lancerState:'recover',activeLancerHp:0,activeLancerState:'active',activeLancerAlive:true,
       bossDamage:3,bossState:'execute',bossPhaseDuringExecute:1,bossPhaseAfterExecute:2,interrupts:1,
@@ -849,8 +861,8 @@ async function lightLanceCombatContractsScenario() {
       return {damage,bossFirst,bossLast,executingBeforeTick,executingMidTick,executingAfter,interrupted,recovered,sameFrame,adjacent,chargeFirst,lowFrameActive,lowFrameDone};
     `);
     assert.deepEqual(contracts.damage, { chaser:1,swarm:1,striker:1,mine:2,lancer:2,bulwark:1,elite:1,boss:3 });
-    assert.deepEqual(contracts.bossFirst, { bossDamage:3,ordinaryHits:5,sixthHp:1 });
-    assert.deepEqual(contracts.bossLast, { bossDamage:3,ordinaryHits:5,sixthHp:1 });
+    assert.deepEqual(contracts.bossFirst, { bossDamage:3,ordinaryHits:6,sixthHp:0 });
+    assert.deepEqual(contracts.bossLast, { bossDamage:3,ordinaryHits:6,sixthHp:0 });
     assert.deepEqual(contracts.executingBeforeTick, {
       lancer:{hp:0,state:'active',alive:true,beam:true},mine:{hp:-1,state:'detonate',alive:true},hunter:{hp:0,state:'charge',alive:true},
       striker:{hp:0,state:'dash',alive:true},bulwark:{hp:0,state:'shockExecute',alive:true,wave:true},
@@ -1378,8 +1390,8 @@ async function realmHazardsAndAttackVariantsScenario() {
       clearWorldEntities();
       $state.stageIndex=0;$state.stageQueue=[];$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
       input.keys.clear();input.touch.set(0,0);$player.position.set(-7,4);$player.velocity.set(0,0);syncPlayerTransform();
-      const mine=createMine(new THREE.Vector2(-3,3));mine.stateTimer=10;mine.velocity.set(0,0);
-      const lancer=createLancer(new THREE.Vector2(-3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
+      const mine=createMine(new THREE.Vector2(-3,3));mine.hp=mine.maxHp=100;mine.stateTimer=10;mine.velocity.set(0,0);
+      const lancer=createLancer(new THREE.Vector2(-3,-3));lancer.hp=lancer.maxHp=100;setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
       const shard=spawnShard(new THREE.Vector2(-7,-4));shard.velocity.set(0,0);
       $state.environmentActive=true;$state.environmentElapsed=3.4;$state.environmentTimer=0;
       environmentFrame=getEnvironmentFrame('abyss',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);
@@ -1416,8 +1428,8 @@ async function realmHazardsAndAttackVariantsScenario() {
       clearWorldEntities();
       $state.stageIndex=2;$state.stageQueue=[];$state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
       input.keys.clear();input.touch.set(0,0);$player.position.set(7,4);$player.velocity.set(0,0);syncPlayerTransform();
-      const mine=createMine(new THREE.Vector2(3,3));mine.stateTimer=10;mine.velocity.set(0,0);
-      const lancer=createLancer(new THREE.Vector2(3,-3));setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
+      const mine=createMine(new THREE.Vector2(3,3));mine.hp=mine.maxHp=100;mine.stateTimer=10;mine.velocity.set(0,0);
+      const lancer=createLancer(new THREE.Vector2(3,-3));lancer.hp=lancer.maxHp=100;setEnemyState(lancer,'telegraph',10,10);lancer.velocity.set(0,0);
       const shard=spawnShard(new THREE.Vector2(7,-4));shard.velocity.set(0,0);
       $state.environmentActive=true;$state.environmentElapsed=3.5;$state.environmentTimer=0;
       environmentFrame=getEnvironmentFrame('star-forge',$state.environmentElapsed);updateEnvironmentVisual(environmentFrame);

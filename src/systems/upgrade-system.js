@@ -3,8 +3,11 @@ import { BOSS_CORE_UPGRADE_IDS, STARTER_WEAPON_IDS, UPGRADES } from '../content/
 const BY_ID = new Map(UPGRADES.map((entry) => [entry.id, entry]));
 const STARTERS = new Set(STARTER_WEAPON_IDS);
 const BOSS_IDS = new Set(BOSS_CORE_UPGRADE_IDS);
+const CANONICAL_BUILDS = new WeakSet();
+const DERIVED_STATS = new WeakMap();
 
 export const DEFAULT_BUILD_STATS = Object.freeze({
+  starterWeapon: 'pulse-cannon',
   weaponDamageMultiplier: 1,
   fireIntervalMultiplier: 1,
   projectileSpeedMultiplier: 1,
@@ -56,67 +59,6 @@ function isRecord(value) {
   return value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function normalizePendingOffer(value) {
-  if (value == null) return null;
-  if (!isRecord(value) || !Number.isFinite(value.seed) || !['normal', 'boss'].includes(value.rewardKind)
-    || !Array.isArray(value.cards) || value.cards.length !== 3 || new Set(value.cards).size !== 3
-    || value.cards.some((id) => !BY_ID.has(id) || (value.rewardKind === 'boss') !== BOSS_IDS.has(id))) return null;
-  return Object.freeze({ seed: value.seed, rewardKind: value.rewardKind, cards: Object.freeze([...value.cards]) });
-}
-
-export function getUpgradeById(id) {
-  return BY_ID.get(id) ?? null;
-}
-
-export function createUpgradeBuild(value = {}) {
-  if (!isRecord(value)) throw new TypeError('upgrade build must be an object');
-  const starterWeapon = value.starterWeapon ?? 'pulse-cannon';
-  if (!STARTERS.has(starterWeapon)) throw new TypeError('unknown starter weapon');
-  const sourceStacks = isRecord(value.upgradeStacks) ? value.upgradeStacks : {};
-  const legacyOwned = Array.isArray(value.ownedUpgrades) ? value.ownedUpgrades : [];
-  const upgradeStacks = {};
-  for (const id of legacyOwned) {
-    if (!BY_ID.has(id) || Object.hasOwn(upgradeStacks, id)) throw new TypeError('owned upgrades must be unique known IDs');
-    upgradeStacks[id] = 1;
-  }
-  for (const [id, rawStack] of Object.entries(sourceStacks)) {
-    const definition = BY_ID.get(id);
-    if (!definition || !Number.isInteger(rawStack) || rawStack < 1 || rawStack > definition.maxStacks) {
-      throw new TypeError(`invalid upgrade stack: ${id}`);
-    }
-    upgradeStacks[id] = rawStack;
-  }
-  const ownedUpgrades = Object.keys(upgradeStacks).sort();
-  const offerSequence = value.offerSequence ?? 0;
-  if (!Number.isInteger(offerSequence) || offerSequence < 0 || offerSequence > 1_000_000) {
-    throw new TypeError('offer sequence must be a bounded non-negative integer');
-  }
-  const pendingOffer = normalizePendingOffer(value.pendingOffer);
-  if (value.pendingOffer != null && !pendingOffer) throw new TypeError('pending upgrade offer is invalid');
-  return Object.freeze({
-    ownedUpgrades: Object.freeze(ownedUpgrades),
-    starterWeapon,
-    upgradeStacks: cloneFrozen(upgradeStacks),
-    offerSequence,
-    pendingOffer,
-  });
-}
-
-export function serializeUpgradeBuild(build) {
-  const normalized = createUpgradeBuild(build);
-  return {
-    ownedUpgrades: [...normalized.ownedUpgrades],
-    starterWeapon: normalized.starterWeapon,
-    upgradeStacks: { ...normalized.upgradeStacks },
-    offerSequence: normalized.offerSequence,
-    pendingOffer: normalized.pendingOffer ? {
-      seed: normalized.pendingOffer.seed,
-      rewardKind: normalized.pendingOffer.rewardKind,
-      cards: [...normalized.pendingOffer.cards],
-    } : null,
-  };
-}
-
 function seed32(value) {
   let seed = Math.trunc(Number(value)) >>> 0;
   seed ^= seed >>> 16;
@@ -138,27 +80,105 @@ function randomFrom(seed) {
   };
 }
 
-function offerFromPool(build, seed, count, bossCore) {
-  const normalized = createUpgradeBuild(build);
+function offerFromBase(build, seed, count, bossCore) {
   const safeCount = Math.max(1, Math.min(3, Math.trunc(Number(count) || 3)));
   const eligible = UPGRADES.filter((entry) => entry.bossCore === bossCore
-    && entry.compatibleStarterWeapons.includes(normalized.starterWeapon)
-    && (normalized.upgradeStacks[entry.id] ?? 0) < entry.maxStacks);
+    && entry.compatibleStarterWeapons.includes(build.starterWeapon)
+    && (build.upgradeStacks[entry.id] ?? 0) < entry.maxStacks);
   if (eligible.length < safeCount) throw new RangeError('not enough compatible upgrades remain for an offer');
   const random = randomFrom(seed);
-  const shuffled = eligible.map((entry) => ({ entry, order: random() }))
-    .sort((left, right) => left.order - right.order || left.entry.id.localeCompare(right.entry.id));
-  return Object.freeze(shuffled.slice(0, safeCount).map(({ entry }) => entry));
+  return eligible.map((entry) => ({ entry, order: random() }))
+    .sort((left, right) => left.order - right.order || left.entry.id.localeCompare(right.entry.id))
+    .slice(0, safeCount)
+    .map(({ entry }) => entry);
+}
+
+function normalizePendingOffer(value, base) {
+  if (value == null) return null;
+  if (!isRecord(value) || !Number.isFinite(value.seed) || !['normal', 'boss'].includes(value.rewardKind)
+    || !Array.isArray(value.cards) || value.cards.length !== 3 || new Set(value.cards).size !== 3) return null;
+  const bossCore = value.rewardKind === 'boss';
+  if (value.cards.some((id) => !BY_ID.has(id) || bossCore !== BOSS_IDS.has(id))) return null;
+  let expected;
+  try {
+    expected = offerFromBase(base, value.seed, 3, bossCore).map(({ id }) => id);
+  } catch {
+    return null;
+  }
+  if (expected.some((id, index) => value.cards[index] !== id)) return null;
+  return Object.freeze({ seed: value.seed, rewardKind: value.rewardKind, cards: Object.freeze(expected) });
+}
+
+export function getUpgradeById(id) {
+  return BY_ID.get(id) ?? null;
+}
+
+export function createUpgradeBuild(value = {}) {
+  if (CANONICAL_BUILDS.has(value)) return value;
+  if (!isRecord(value)) throw new TypeError('upgrade build must be an object');
+  const starterWeapon = value.starterWeapon ?? 'pulse-cannon';
+  if (!STARTERS.has(starterWeapon)) throw new TypeError('unknown starter weapon');
+  const sourceStacks = isRecord(value.upgradeStacks) ? value.upgradeStacks : {};
+  const legacyOwned = Array.isArray(value.ownedUpgrades) ? value.ownedUpgrades : [];
+  const upgradeStacks = {};
+  for (const id of legacyOwned) {
+    if (!BY_ID.has(id) || Object.hasOwn(upgradeStacks, id)) throw new TypeError('owned upgrades must be unique known IDs');
+    upgradeStacks[id] = 1;
+  }
+  for (const [id, rawStack] of Object.entries(sourceStacks)) {
+    const definition = BY_ID.get(id);
+    if (!definition || !Number.isInteger(rawStack) || rawStack < 1 || rawStack > definition.maxStacks) {
+      throw new TypeError(`invalid upgrade stack: ${id}`);
+    }
+    upgradeStacks[id] = rawStack;
+  }
+  for (const id of Object.keys(upgradeStacks)) {
+    if (!BY_ID.get(id).compatibleStarterWeapons.includes(starterWeapon)) {
+      throw new TypeError(`upgrade is incompatible with starter weapon: ${id}/${starterWeapon}`);
+    }
+  }
+  const ownedUpgrades = Object.keys(upgradeStacks).sort();
+  const offerSequence = value.offerSequence ?? 0;
+  if (!Number.isInteger(offerSequence) || offerSequence < 0 || offerSequence > 1_000_000) {
+    throw new TypeError('offer sequence must be a bounded non-negative integer');
+  }
+  const base = { ownedUpgrades, starterWeapon, upgradeStacks, offerSequence };
+  const pendingOffer = normalizePendingOffer(value.pendingOffer, base);
+  if (value.pendingOffer != null && !pendingOffer) throw new TypeError('pending upgrade offer is invalid');
+  const canonical = Object.freeze({
+    ownedUpgrades: Object.freeze(ownedUpgrades),
+    starterWeapon,
+    upgradeStacks: cloneFrozen(upgradeStacks),
+    offerSequence,
+    pendingOffer,
+  });
+  CANONICAL_BUILDS.add(canonical);
+  return canonical;
+}
+
+export function serializeUpgradeBuild(build) {
+  const normalized = createUpgradeBuild(build);
+  return {
+    ownedUpgrades: [...normalized.ownedUpgrades],
+    starterWeapon: normalized.starterWeapon,
+    upgradeStacks: { ...normalized.upgradeStacks },
+    offerSequence: normalized.offerSequence,
+    pendingOffer: normalized.pendingOffer ? {
+      seed: normalized.pendingOffer.seed,
+      rewardKind: normalized.pendingOffer.rewardKind,
+      cards: [...normalized.pendingOffer.cards],
+    } : null,
+  };
 }
 
 export function offerUpgrades(build, seed, count = 3) {
   if (!Number.isFinite(seed)) throw new TypeError('upgrade offer seed must be finite');
-  return offerFromPool(build, seed, count, false);
+  return Object.freeze(offerFromBase(createUpgradeBuild(build), seed, count, false));
 }
 
 export function offerBossCoreUpgrades(build, seed, count = 3) {
   if (!Number.isFinite(seed)) throw new TypeError('boss upgrade offer seed must be finite');
-  return offerFromPool(build, seed, count, true);
+  return Object.freeze(offerFromBase(createUpgradeBuild(build), seed, count, true));
 }
 
 export function attachPendingOffer(build, seed, rewardKind = 'normal') {
@@ -193,7 +213,9 @@ export function applyUpgradeChoice(build, id) {
 
 export function deriveBuildStats(build) {
   const normalized = createUpgradeBuild(build);
-  const stats = { ...DEFAULT_BUILD_STATS };
+  const cached = DERIVED_STATS.get(normalized);
+  if (cached) return cached;
+  const stats = { ...DEFAULT_BUILD_STATS, starterWeapon: normalized.starterWeapon };
   for (const id of normalized.ownedUpgrades) {
     const definition = BY_ID.get(id);
     const stacks = normalized.upgradeStacks[id] ?? 0;
@@ -203,7 +225,11 @@ export function deriveBuildStats(build) {
     }
   }
   for (const [key, value] of Object.entries(stats)) {
-    if (!Number.isFinite(value)) throw new RangeError(`derived upgrade stat is nonfinite: ${key}`);
+    if (key !== 'starterWeapon' && !Number.isFinite(value)) {
+      throw new RangeError(`derived upgrade stat is nonfinite: ${key}`);
+    }
   }
-  return Object.freeze(stats);
+  const frozen = Object.freeze(stats);
+  DERIVED_STATS.set(normalized, frozen);
+  return frozen;
 }

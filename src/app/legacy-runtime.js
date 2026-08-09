@@ -46,13 +46,11 @@ import {
 import { createPostProcessing, selectRenderQuality } from "../game/render-quality.js";
 import { createRealmBackgrounds } from "../game/realm-backgrounds.js";
 import { normalizeActionSnapshot } from "../systems/input-system.js";
-import {
-  AUTO_PULSE_BUFF_MULTIPLIER,
-  AUTO_PULSE_INTERVAL,
-} from "../systems/player-system.js";
+import { AUTO_PULSE_INTERVAL } from "../systems/player-system.js";
 import { createEntityReadTarget, ENTITY_FLAG_HIDDEN } from "../game/entity-world.js";
 import {
   TIDE_LANCE_RETARGET_SECONDS,
+  deriveTideLanceSpec,
   selectAutoTarget,
   selectTideLanceLine,
 } from "../systems/weapon-system.js";
@@ -60,7 +58,6 @@ import { UPGRADES as V3_UPGRADES } from "../content/upgrades.js";
 import {
   applyUpgradeChoice as applyProgressionChoice,
   createUpgradeBuild,
-  deriveBuildStats,
   getUpgradeById,
 } from "../systems/upgrade-system.js";
 
@@ -376,7 +373,7 @@ const input = {
 const audio = new NeonAudio();
 const laserAudio = createLaserAudioEvents(audio, {
   maxEnergy: LASER_RULES.maxEnergy,
-  maxTargets: LASER_RULES.maxTargets,
+  maxTargets: 16,
 });
 let activeDialog = null;
 let restoreFocusTarget = null;
@@ -2319,9 +2316,11 @@ function startGame() {
     resetState();
     enterStage(resumable.chapterIndex, false);
     pendingTransitionPayload = { resumedCheckpoint: true };
-    const resumed = session.startRoom(compatibilityCampaign
-      ? { id: `v2.2-compatibility-chapter-${resumable.chapterIndex}`, compatibility: true, chapterIndex: resumable.chapterIndex }
-      : { campaign: true, chapterIndex: resumable.chapterIndex });
+    const resumed = resumable.build?.pendingOffer
+      ? transitionTo("playing", { resumedCheckpoint: true })
+      : session.startRoom(compatibilityCampaign
+        ? { id: `v2.2-compatibility-chapter-${resumable.chapterIndex}`, compatibility: true, chapterIndex: resumable.chapterIndex }
+        : { campaign: true, chapterIndex: resumable.chapterIndex });
     pendingTransitionPayload = null;
     if (resumed) {
       toast("章节信号已恢复", "cyan");
@@ -2457,6 +2456,9 @@ function transitionTo(nextMode, payload = {}) {
   let changed = false;
   if (nextMode === "paused") changed = session.pause();
   else if (nextMode === "playing" && session.getMode() === "paused") changed = session.resume();
+  else if (nextMode === "playing" && session.getMode() === "briefing" && session.snapshot().build?.pendingOffer) {
+    changed = session.continuePendingOffer();
+  }
   else if (nextMode === "playing" && session.getMode() === "upgrade") {
     const completed = session.snapshot();
     const completedRooms = completed.stats.roomsStarted;
@@ -2635,15 +2637,7 @@ function finishRun(outcome, reason = outcome === "victory" ? "bossDestroyed" : "
 }
 
 function getBuildStats() {
-  let progressionBuild = state.upgradeBuild;
-  if (!progressionBuild || state.ownedUpgrades.some((id) => !progressionBuild.ownedUpgrades.includes(id))) {
-    try {
-      progressionBuild = createUpgradeBuild({ ownedUpgrades: state.ownedUpgrades });
-    } catch {
-      progressionBuild = createUpgradeBuild();
-    }
-  }
-  return deriveBuildStats(progressionBuild);
+  return session.getBuildStats();
 }
 
 function getDerivedValues() {
@@ -2662,9 +2656,14 @@ function getDerivedValues() {
 }
 
 function addWeaponEnergyFromPickup() {
-  const focused = getBuildStats().lanceEnergyGainMultiplier > 1 || state.ownedUpgrades.includes("overclock");
+  const derivedMultiplier = getBuildStats().lanceEnergyGainMultiplier;
+  const multiplier = derivedMultiplier > 1
+    ? derivedMultiplier
+    : state.ownedUpgrades.includes("overclock")
+      ? LASER_RULES.focusedPickupEnergy / LASER_RULES.pickupEnergy
+      : 1;
   const previousWeaponEnergy = state.weaponEnergy;
-  state.weaponEnergy = gainWeaponEnergy(state.weaponEnergy, focused);
+  state.weaponEnergy = gainWeaponEnergy(state.weaponEnergy, multiplier);
   laserAudio.onEnergyChange(previousWeaponEnergy, state.weaponEnergy);
   if (canFireLaser(state.weaponEnergy) && !["charge", "active"].includes(state.laserState)) {
     state.laserState = "ready";
@@ -2776,7 +2775,8 @@ function updateHighScore() {
 
 function updateAutomaticPulse(dt) {
   const buffed = state.autoFireRateBuffTimer > 0;
-  const interval = AUTO_PULSE_INTERVAL * (buffed ? AUTO_PULSE_BUFF_MULTIPLIER : 1);
+  const perfectBuffMultiplier = getBuildStats().perfectFireBuffMultiplier;
+  const interval = AUTO_PULSE_INTERVAL * (buffed ? perfectBuffMultiplier : 1);
   state.autoPulseTimer -= dt;
   let fired = 0;
   while (state.autoPulseTimer <= 1e-9 && fired < 4) {
@@ -3080,22 +3080,19 @@ function selectTideLanceLock() {
     ? [combatBridge.objective]
     : [];
   const derived = getBuildStats();
+  const lanceSpec = deriveTideLanceSpec(derived);
   const line = selectTideLanceLine({
     x: player.position.x,
     y: player.position.y,
     facing: { x: player.facing.x, y: player.facing.y },
-  }, candidates, objectives, {
-    length: derived.lanceLength,
-    halfWidth: derived.lanceHalfWidth,
-    maxTargets: derived.lanceTargetCap,
-    weakPointMultiplier: derived.lanceWeakPointMultiplier,
-  });
+  }, candidates, objectives, lanceSpec);
   const candidatesById = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   for (const objective of objectives) candidatesById.set(objective.id, objective);
   const lineCandidates = line.targetIds.map((id) => candidatesById.get(id)).filter(Boolean);
   const primary = selectAutoTarget({ x: player.position.x, y: player.position.y }, lineCandidates, {
-    range: derived.lanceLength + 1,
+    range: lanceSpec.length,
     maxCandidates: lineCandidates.length || 1,
+    weakPointPriority: lanceSpec.weakPointPriority,
   });
   const targetId = primary?.id;
   if (!Number.isSafeInteger(targetId)) return null;
@@ -3260,7 +3257,9 @@ function deferOrDestroyLaserTarget(enemy) {
 
 function resolveLaserHits() {
   if (state.laserState !== "active") return 0;
-  const remainingTargets = Math.max(0, LASER_RULES.maxTargets - state.laserSequenceTargets);
+  const lanceSpec = deriveTideLanceSpec(getBuildStats());
+  const remainingTargets = Math.max(0, lanceSpec.hitCap - state.laserSequenceTargets);
+  if (remainingTargets <= 0) return 0;
   const originX = player.position.x + state.laserDirection.x * player.radius;
   const originY = player.position.y + state.laserDirection.y * player.radius;
   const beam = {
@@ -3268,8 +3267,10 @@ function resolveLaserHits() {
     originY,
     directionX: state.laserDirection.x,
     directionY: state.laserDirection.y,
+    length: lanceSpec.length,
+    width: lanceSpec.width,
   };
-  const candidates = enemies
+  const enemyCandidates = enemies
     .filter((enemy) => enemy && !enemy.dead && !enemy.pendingLaserDeath && enemy.lastLaserSequence !== state.laserSequence)
     .filter((enemy) => laserHitsCircle(beam, {
       x: enemy.group.position.x,
@@ -3281,19 +3282,46 @@ function resolveLaserHits() {
       along: ((enemy.group.position.x - originX) * state.laserDirection.x)
         + ((enemy.group.position.y - originY) * state.laserDirection.y),
     }));
-  const ordinaryTargets = selectLaserTargets(candidates.filter(({ enemy }) => enemy.type !== "boss")).slice(0, remainingTargets);
-  const bossTargets = candidates
-    .filter(({ enemy }) => enemy.type === "boss")
-    .sort((left, right) => left.along - right.along)
-    .slice(0, 1);
-  const targets = [...ordinaryTargets, ...bossTargets].sort((left, right) => left.along - right.along);
-  for (const { enemy } of targets) {
+  const objective = combatBridge.objective;
+  const objectiveCandidate = objective && !objective.completed && objective.hp > 0
+    && objective.lastLaserSequence !== state.laserSequence
+    && laserHitsCircle(beam, objective)
+    ? [{
+      objective,
+      along: ((objective.x - originX) * state.laserDirection.x)
+        + ((objective.y - originY) * state.laserDirection.y),
+    }]
+    : [];
+  const targets = selectLaserTargets([...enemyCandidates, ...objectiveCandidate], remainingTargets);
+  const primaryOrigins = [];
+  const excludedEnemyIds = new Set();
+  let primaryHits = 0;
+  for (const target of targets) {
+    if (target.objective) {
+      const currentObjective = target.objective;
+      currentObjective.lastLaserSequence = state.laserSequence;
+      currentObjective.hp = Math.max(
+        0,
+        currentObjective.hp - 3 * lanceSpec.damageMultiplier * lanceSpec.objectiveMultiplier,
+      );
+      currentObjective.dead = currentObjective.hp <= 0;
+      currentObjective.completed = currentObjective.dead;
+      state.stats.laserHits += 1;
+      state.laserSequenceTargets += 1;
+      primaryHits += 1;
+      primaryOrigins.push({ x: currentObjective.x, y: currentObjective.y });
+      spawnParticleBurst(new THREE.Vector2(currentObjective.x, currentObjective.y), paletteState.primary.getHex(), 8, 3, 0.82);
+      continue;
+    }
+    const { enemy } = target;
     enemy.lastLaserSequence = state.laserSequence;
-    const derived = getBuildStats();
-    const weakPointMultiplier = enemy.weakPoint ? derived.lanceWeakPointMultiplier : 1;
-    enemy.hp -= (ENEMY_TYPES[enemy.type]?.laserDamage ?? 1) * derived.lanceDamageMultiplier * weakPointMultiplier;
+    excludedEnemyIds.add(enemy.sourceId);
+    const weakPointMultiplier = enemy.weakPoint ? lanceSpec.weakPointMultiplier : 1;
+    enemy.hp -= (ENEMY_TYPES[enemy.type]?.laserDamage ?? 1) * lanceSpec.damageMultiplier * weakPointMultiplier;
     state.stats.laserHits += 1;
-    if (enemy.type !== "boss") state.laserSequenceTargets += 1;
+    state.laserSequenceTargets += 1;
+    primaryHits += 1;
+    primaryOrigins.push({ x: enemy.group.position.x, y: enemy.group.position.y });
     interruptLaserTarget(enemy);
     enemy.hitReactTimer = 0.18;
     if (enemy.type === "boss") {
@@ -3309,27 +3337,46 @@ function resolveLaserHits() {
     spawnParticleBurst(hitPosition, enemy.type === "boss" ? 0xe7ffff : paletteState.primary.getHex(), enemy.type === "boss" ? 10 : 6, 3.2, 0.78);
     deferOrDestroyLaserTarget(enemy);
   }
-  let objectiveHits = 0;
-  const objective = combatBridge.objective;
-  if (objective && !objective.completed && objective.hp > 0
-    && objective.lastLaserSequence !== state.laserSequence
-    && laserHitsCircle(beam, objective)) {
-    objective.lastLaserSequence = state.laserSequence;
-    const derived = getBuildStats();
-    objective.hp = Math.max(0, objective.hp - 3 * derived.lanceDamageMultiplier * derived.objectiveDamageMultiplier);
-    objective.dead = objective.hp <= 0;
-    objective.completed = objective.dead;
-    objectiveHits = 1;
-    state.stats.laserHits += 1;
-    state.laserSequenceTargets += 1;
-    spawnParticleBurst(new THREE.Vector2(objective.x, objective.y), paletteState.primary.getHex(), 8, 3, 0.82);
+
+  let propagationHits = 0;
+  for (const origin of primaryOrigins) {
+    const nearby = enemies
+      .filter((enemy) => enemy && !enemy.dead && !enemy.pendingLaserDeath
+        && !excludedEnemyIds.has(enemy.sourceId)
+        && enemy.lastLaserSequence !== state.laserSequence)
+      .map((enemy) => ({ enemy, distance: Math.hypot(enemy.group.position.x - origin.x, enemy.group.position.y - origin.y) }))
+      .filter(({ distance }) => distance <= lanceSpec.propagationRadius)
+      .sort((left, right) => left.distance - right.distance || left.enemy.sourceId - right.enemy.sourceId)
+      .slice(0, lanceSpec.propagation);
+    for (const { enemy } of nearby) {
+      excludedEnemyIds.add(enemy.sourceId);
+      enemy.lastLaserSequence = state.laserSequence;
+      const weakPointMultiplier = enemy.weakPoint ? lanceSpec.weakPointMultiplier : 1;
+      enemy.hp -= (ENEMY_TYPES[enemy.type]?.laserDamage ?? 1)
+        * lanceSpec.damageMultiplier
+        * lanceSpec.propagationDamageMultiplier
+        * weakPointMultiplier;
+      enemy.hitReactTimer = 0.14;
+      state.stats.laserHits += 1;
+      state.stats.laserPropagationHits = (state.stats.laserPropagationHits ?? 0) + 1;
+      propagationHits += 1;
+      const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+      spawnParticleBurst(hitPosition, 0x8af7ff, 4, 2.4, 0.58);
+      deferOrDestroyLaserTarget(enemy);
+    }
   }
-  if (targets.length + objectiveHits > 0) {
+  if (propagationHits > 0) events.emit("player:tideLancePropagation", Object.freeze({
+    sequence: state.laserSequence,
+    count: propagationHits,
+    radius: lanceSpec.propagationRadius,
+    damageMultiplier: lanceSpec.propagationDamageMultiplier,
+  }));
+  if (primaryHits > 0) {
     state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
-    const feedbackPosition = player.position.clone().addScaledVector(state.laserDirection, Math.min(LASER_RULES.length, 4.2));
+    const feedbackPosition = player.position.clone().addScaledVector(state.laserDirection, Math.min(lanceSpec.length, 4.2));
     showFloatingText(`PIERCE ×${state.laserSequenceTargets}`, feedbackPosition, "cyan", "medium");
   }
-  return targets.length + objectiveHits;
+  return primaryHits + propagationHits;
 }
 
 function maybeRetargetTideLance() {
@@ -3377,18 +3424,19 @@ function updateLaser(dt) {
   syncLaserTransform();
   player.laser.group.visible = true;
   player.laser.halo.material.color.copy(paletteState.primary);
+  const lanceSpec = deriveTideLanceSpec(getBuildStats());
   if (phase === "charge") {
     const progress = THREE.MathUtils.clamp(state.laserElapsed / LASER_RULES.chargeDuration, 0, 1);
     player.laser.group.scale.set(
-      THREE.MathUtils.lerp(0.4, LASER_RULES.length, progress),
-      THREE.MathUtils.lerp(0.08, LASER_RULES.width, progress),
+      THREE.MathUtils.lerp(0.4, lanceSpec.length, progress),
+      THREE.MathUtils.lerp(0.08, lanceSpec.width, progress),
       1,
     );
     player.laser.core.material.opacity = 0.18 + progress * 0.34;
     player.velocity.clampLength(0, BASE_MAX_SPEED * getBuildStats().moveSpeedMultiplier * 0.8);
   } else {
     const activeElapsed = Math.max(0, state.laserElapsed - LASER_RULES.chargeDuration);
-    player.laser.group.scale.set(LASER_RULES.length, LASER_RULES.width, 1);
+    player.laser.group.scale.set(lanceSpec.length, lanceSpec.width, 1);
     player.laser.core.material.opacity = 0.18 + Math.max(0, 1 - activeElapsed / 0.08) * 0.82;
     laserAudio.onHits(resolveLaserHits());
   }
@@ -4266,9 +4314,10 @@ function triggerPerfectPhase(source) {
   const refundIndex = state.dashCharges[0] <= state.dashCharges[1] ? 0 : 1;
   const before = state.dashCharges[refundIndex];
   state.dashCharges[refundIndex] = Math.min(1, before + 0.35);
+  const perfectBuffMultiplier = getBuildStats().perfectFireBuffMultiplier;
   state.autoPulseTimer = Math.min(
-    state.autoPulseTimer * AUTO_PULSE_BUFF_MULTIPLIER,
-    AUTO_PULSE_INTERVAL * AUTO_PULSE_BUFF_MULTIPLIER,
+    state.autoPulseTimer * perfectBuffMultiplier,
+    AUTO_PULSE_INTERVAL * perfectBuffMultiplier,
   );
   state.autoFireRateBuffTimer = Math.max(state.autoFireRateBuffTimer, 0.8);
   source.nearMissCandidate = false;
@@ -4278,7 +4327,7 @@ function triggerPerfectPhase(source) {
   events.emit("perfectPhase", Object.freeze({
     refundIndex,
     refunded: state.dashCharges[refundIndex] - before,
-    fireRateMultiplier: 0.75,
+    fireRateMultiplier: perfectBuffMultiplier,
     duration: 0.8,
   }));
   triggerFeedback("small", {
@@ -4507,7 +4556,12 @@ function sanitizeRuntimeScalars() {
   state.weaponEnergy = clampFinite(state.weaponEnergy, 0, LASER_RULES.maxEnergy, 0);
   state.laserElapsed = Math.max(0, runtimeFinite(state.laserElapsed, 0));
   state.laserSequence = Math.max(0, Math.trunc(runtimeFinite(state.laserSequence, 0)));
-  state.laserSequenceTargets = clampFinite(state.laserSequenceTargets, 0, LASER_RULES.maxTargets, 0);
+  state.laserSequenceTargets = clampFinite(
+    state.laserSequenceTargets,
+    0,
+    deriveTideLanceSpec(getBuildStats()).hitCap,
+    0,
+  );
   state.trauma = clampFinite(state.trauma, 0, 1, 0);
   state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
   state.slowMotionTimer = Math.max(0, runtimeFinite(state.slowMotionTimer, 0));
@@ -5764,6 +5818,8 @@ function getDebugSnapshot() {
       directionY: state.laserDirection.y,
       score: state.laserLockScore,
       retargetUsed: state.laserRetargetUsed,
+      spec: deriveTideLanceSpec(getBuildStats()),
+      propagationHits: state.stats.laserPropagationHits ?? 0,
     }),
     combatBridge: Object.freeze({
       playerId: combatBridge.playerId || null,

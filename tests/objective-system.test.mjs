@@ -68,6 +68,31 @@ test('all eight objective types require their authored gameplay action', () => {
   assert.equal(crisis.status, 'completed');
 });
 
+test('Tide objective stats accelerate real proximity progress and repair an escorted target incrementally', () => {
+  const anchorsTemplate = ENCOUNTER_TEMPLATES.find(({ type }) => type === 'anchors');
+  const baselineAnchors = createObjective(anchorsTemplate, 4040);
+  const upgradedAnchors = createObjective(anchorsTemplate, 4040);
+  const baselineAnchor = baselineAnchors.anchors[0];
+  const upgradedAnchor = upgradedAnchors.anchors[0];
+  update(baselineAnchors, { ...baselineAnchor, buildStats: { objectiveProximityMultiplier: 1 } }, 0.5);
+  update(upgradedAnchors, { ...upgradedAnchor, buildStats: { objectiveProximityMultiplier: 1.6 } }, 0.5);
+  assert.ok(upgradedAnchor.charge > baselineAnchor.charge);
+  assert.ok(Math.abs(upgradedAnchor.charge / baselineAnchor.charge - 1.6) < 1e-9);
+
+  const escortTemplate = ENCOUNTER_TEMPLATES.find(({ type }) => type === 'escort');
+  const escort = createObjective(escortTemplate, 5050);
+  escort.escort.hp -= 1;
+  const beforeHp = escort.escort.hp;
+  const beforeRoute = escort.escort.routeDistance;
+  update(escort, {
+    x: escort.escort.x,
+    y: escort.escort.y,
+    buildStats: { escortRepairPerSecond: 0.24, objectiveProximityMultiplier: 1.6 },
+  }, 0.5);
+  assert.ok(Math.abs(escort.escort.hp - (beforeHp + 0.12)) < 1e-9);
+  assert.ok(escort.escort.routeDistance - beforeRoute > escort.escort.speed * 0.5);
+});
+
 test('timeouts fail unfinished objectives and terminal cleanup emits exactly once', () => {
   const template = { ...ENCOUNTER_TEMPLATES.find(({ type }) => type === 'anchors'), timeout: 2 };
   const objective = createObjective(template, 42);

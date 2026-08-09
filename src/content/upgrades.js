@@ -2,6 +2,47 @@ export const UPGRADE_TAGS = Object.freeze([
   'overload', 'rift', 'tide', 'weapon', 'phase', 'lance', 'survival', 'objective',
 ]);
 export const STARTER_WEAPON_IDS = Object.freeze(['pulse-cannon', 'arc-drones', 'prism-missiles']);
+export const UPGRADE_EFFECT_CONSUMERS = Object.freeze({
+  chainDamageMultiplier: 'collision chain and Lance propagation damage',
+  chainTargets: 'Arc Drone follow-up hit budget',
+  dashRecoveryMultiplier: 'player dash charge recovery',
+  dashSpeedMultiplier: 'player dash velocity',
+  droneArcTargets: 'Arc Drone follow-up hit budget',
+  droneCount: 'Arc Drone orbit and volley count',
+  droneObjectiveDamageMultiplier: 'Arc Drone objective damage',
+  escortRepairPerSecond: 'escort objective repair',
+  fireIntervalMultiplier: 'starter weapon cadence',
+  hullBonus: 'session run hull capacity',
+  immediateRepair: 'session upgrade selection repair',
+  lanceDamageMultiplier: 'Tide Lance primary damage',
+  lanceEnergyGainMultiplier: 'pickup Tide Lance energy gain',
+  lanceHalfWidth: 'Tide Lance selection, rendering and collision width',
+  lanceLength: 'Tide Lance selection, rendering and collision reach',
+  lancePierce: 'Tide Lance additional hit budget',
+  lancePropagation: 'Tide Lance secondary arc count',
+  lanceTargetCap: 'Tide Lance base hit budget',
+  lanceWeakPointMultiplier: 'Tide Lance weak-point damage',
+  missileImpactRadius: 'Prism Missile impact damage radius',
+  missileSplit: 'Prism Missile split projectile count',
+  moveSpeedMultiplier: 'player movement speed cap',
+  objectiveDamageMultiplier: 'projectile and Tide Lance objective damage',
+  objectiveProximityMultiplier: 'capture, escort and proximity objective progress',
+  perfectFireBuffMultiplier: 'perfect-phase starter weapon cadence',
+  perfectPhaseWindowBonus: 'player perfect-phase window',
+  phaseDurationBonus: 'player post-dash phase duration',
+  pickupAttractionSpeed: 'pickup attraction velocity',
+  pickupRadiusMultiplier: 'pickup collection and attraction radius',
+  pickupValueMultiplier: 'pickup reward value',
+  projectilePierce: 'starter projectile distinct-target hit budget',
+  projectileSpeedMultiplier: 'starter projectile speed',
+  propagationRadius: 'Arc Drone and Tide Lance secondary arc radius',
+  pulseProjectiles: 'Pulse Cannon volley count',
+  roomRepair: 'session room-completion repair',
+  steeringMultiplier: 'player steering response',
+  weakPointMultiplier: 'starter projectile weak-point damage',
+  weakPointPriority: 'automatic and Tide Lance weak-point selection priority',
+  weaponDamageMultiplier: 'starter projectile damage',
+});
 
 const TAG_SET = new Set(UPGRADE_TAGS);
 const STARTER_SET = new Set(STARTER_WEAPON_IDS);
@@ -15,6 +56,10 @@ function deepFreeze(value) {
 
 const fx = (base, perStack, min, max) => ({ base, perStack, min, max });
 const all = [...STARTER_WEAPON_IDS];
+const pulse = ['pulse-cannon'];
+const drones = ['arc-drones'];
+const prism = ['prism-missiles'];
+const pulsePrism = ['pulse-cannon', 'prism-missiles'];
 const copy = (zhName, zhBehavior, enName, enBehavior) => ({
   zhCN: { name: zhName, behavior: zhBehavior },
   en: { name: enName, behavior: enBehavior },
@@ -35,28 +80,28 @@ const definitions = [
   // Eight weapon-form upgrades.
   upgrade('overload-relay', 'weapon', ['overload', 'weapon'], 3,
     { chainTargets: fx(2, 1, 0, 6), propagationRadius: fx(6, 0.6, 0, 8) },
-    copy('过载继电', '命中会向更多邻近敌人传播电弧。', 'Overload Relay', 'Hits propagate arcs to more nearby enemies.')),
+    copy('过载继电', '命中会向更多邻近敌人传播电弧。', 'Overload Relay', 'Hits propagate arcs to more nearby enemies.'), { compatibleStarterWeapons: drones }),
   upgrade('drone-volley', 'weapon', ['overload', 'tide', 'weapon'], 2,
     { droneCount: fx(2, 1, 2, 4), droneArcTargets: fx(2, 1, 2, 6) },
-    copy('无人机齐射', '增加护航无人机，并让每次齐射跨越更多目标。', 'Drone Volley', 'Adds escort drones and lets each volley arc across more targets.'), { bossCore: true }),
+    copy('无人机齐射', '增加护航无人机，并让每次齐射跨越更多目标。', 'Drone Volley', 'Adds escort drones and lets each volley arc across more targets.'), { bossCore: true, compatibleStarterWeapons: drones }),
   upgrade('pulse-echo', 'weapon', ['overload', 'weapon'], 2,
     { pulseProjectiles: fx(1, 1, 1, 3), weaponDamageMultiplier: fx(1, 0.08, 0.5, 2.2) },
-    copy('脉冲回声', '双炮命中后复制侧向脉冲，不需要额外瞄准。', 'Pulse Echo', 'Cannon hits copy side pulses without adding aim input.')),
+    copy('脉冲回声', '自动炮击增加侧向脉冲，不需要额外瞄准。', 'Pulse Echo', 'Automatic cannon volleys add side pulses without adding aim input.'), { compatibleStarterWeapons: pulse }),
   upgrade('prism-fan', 'weapon', ['rift', 'weapon'], 2,
     { missileSplit: fx(3, 1, 3, 5), missileImpactRadius: fx(0.75, 0.15, 0.5, 1.2) },
-    copy('棱镜扇裂', '导弹命中后分裂成更宽的自动追踪扇面。', 'Prism Fan', 'Missiles split into a wider auto-tracking fan on impact.')),
+    copy('棱镜扇裂', '导弹命中后分裂成更宽的冲击扇面。', 'Prism Fan', 'Missiles split into a wider impact fan on contact.'), { compatibleStarterWeapons: prism }),
   upgrade('rift-bore', 'weapon', ['rift', 'weapon'], 3,
     { projectilePierce: fx(0, 1, 0, 4), projectileSpeedMultiplier: fx(1, 0.08, 0.5, 1.5) },
-    copy('裂隙钻芯', '主武器穿过额外目标，并保持自动锁敌。', 'Rift Bore', 'Primary shots traverse extra targets while remaining automatic.')),
+    copy('裂隙钻芯', '主武器穿过额外目标，并保持自动锁敌。', 'Rift Bore', 'Primary shots traverse extra targets while remaining automatic.'), { compatibleStarterWeapons: pulsePrism }),
   upgrade('weakpoint-prism', 'weapon', ['rift', 'weapon'], 3,
     { weakPointMultiplier: fx(1.5, 0.2, 1, 2.5), weakPointPriority: fx(1, 0.2, 1, 1.8) },
-    copy('弱点棱镜', '自动武器更偏好弱点，弱点命中造成更高伤害。', 'Weakpoint Prism', 'Automatic weapons favor weak points and deal more weak-point damage.'), { bossCore: true }),
+    copy('弱点棱镜', '自动武器更偏好弱点，弱点命中造成更高伤害。', 'Weakpoint Prism', 'Automatic weapons favor weak points and deal more weak-point damage.'), { bossCore: true, compatibleStarterWeapons: pulsePrism }),
   upgrade('chain-reactor', 'weapon', ['overload', 'weapon'], 3,
     { chainDamageMultiplier: fx(0.78, 0.08, 0.5, 1), weaponDamageMultiplier: fx(1, 0.06, 0.5, 2.2) },
-    copy('连锁反应堆', '传播电弧保留更多伤害，击破后继续寻找目标。', 'Chain Reactor', 'Propagated arcs retain more damage and continue after kills.')),
+    copy('连锁反应堆', '传播电弧保留更多伤害，并提高无人机火力。', 'Chain Reactor', 'Propagated arcs retain more damage and drone fire hits harder.'), { compatibleStarterWeapons: drones }),
   upgrade('prism-core', 'weapon', ['rift', 'weapon'], 2,
     { weaponDamageMultiplier: fx(1, 0.14, 0.5, 2.2), objectiveDamageMultiplier: fx(1, 0.12, 1, 1.8) },
-    copy('棱镜核心', '自动火力折射增幅，并对任务核心造成额外伤害。', 'Prism Core', 'Refracts automatic fire for more damage, especially against objectives.')),
+    copy('棱镜核心', '自动火力折射增幅，并对任务核心造成额外伤害。', 'Prism Core', 'Refracts automatic fire for more damage, especially against objectives.'), { compatibleStarterWeapons: pulsePrism }),
 
   // Six dash / phase upgrades.
   upgrade('echo-shield', 'phase', ['phase', 'survival'], 2,
@@ -67,13 +112,13 @@ const definitions = [
     copy('完美共振', '扩大完美相位窗口，并强化自动武器涌流。', 'Perfect Resonance', 'Widens perfect phase timing and strengthens the automatic fire surge.')),
   upgrade('phase-overclock', 'phase', ['overload', 'phase', 'weapon'], 2,
     { fireIntervalMultiplier: fx(1, -0.1, 0.55, 1) },
-    copy('相位超频', '每次相位后自动武器更快恢复射击节奏。', 'Phase Overclock', 'Automatic weapons recover their firing rhythm faster after phasing.'), { bossCore: true }),
+    copy('相位超频', '自动武器持续缩短射击间隔。', 'Phase Overclock', 'Automatic weapons sustain a shorter firing interval.'), { bossCore: true }),
   upgrade('rift-slip', 'phase', ['rift', 'phase'], 3,
     { dashRecoveryMultiplier: fx(1, -0.08, 0.65, 1), dashSpeedMultiplier: fx(1, 0.05, 1, 1.2) },
     copy('裂隙滑移', '冲刺穿越更远，且两格充能恢复更快。', 'Rift Slip', 'Dashes travel farther and both charges recover faster.')),
   upgrade('tide-wake', 'phase', ['tide', 'phase', 'objective'], 2,
     { objectiveProximityMultiplier: fx(1, 0.15, 1, 1.6), pickupRadiusMultiplier: fx(1, 0.2, 1, 3) },
-    copy('潮痕尾流', '冲刺路线吸引拾取物，并增强任务区域内的推进。', 'Tide Wake', 'Dash routes attract pickups and strengthen progress near objectives.')),
+    copy('潮痕尾流', '扩大拾取范围，并增强任务区域内的推进。', 'Tide Wake', 'Expands pickup reach and strengthens progress near objectives.')),
   upgrade('ion-drive', 'phase', ['phase', 'survival'], 3,
     { moveSpeedMultiplier: fx(1, 0.08, 1, 1.24), steeringMultiplier: fx(1, 0.06, 1, 1.2) },
     copy('离子驱动', '提高移动上限与转向响应，不增加新操作。', 'Ion Drive', 'Raises movement speed and steering response without a new input.')),
@@ -101,7 +146,7 @@ const definitions = [
     copy('磁潮力场', '远处光核会被持续吸向玩家。', 'Magnet Tide Field', 'Distant light cores are continuously pulled toward the player.')),
   upgrade('escort-repair', 'utility', ['tide', 'survival', 'objective'], 3,
     { escortRepairPerSecond: fx(0, 0.08, 0, 0.24), droneObjectiveDamageMultiplier: fx(1, 0.1, 1, 1.4) },
-    copy('护航维修群', '无人机修复护送目标，并优先压制其附近威胁。', 'Escort Repair Swarm', 'Drones repair escorts and prioritize threats near them.'), { bossCore: true }),
+    copy('护航维修群', '无人机修复护送目标，并提高对敌方任务核心的伤害。', 'Escort Repair Swarm', 'Drones repair escorts and deal more damage to hostile objective cores.'), { bossCore: true, compatibleStarterWeapons: drones }),
   upgrade('objective-halo', 'utility', ['tide', 'objective'], 3,
     { objectiveProximityMultiplier: fx(1, 0.2, 1, 1.6), objectiveDamageMultiplier: fx(1, 0.12, 1, 1.8) },
     copy('任务光环', '靠近任务目标时加快占领、护送与核心破坏。', 'Objective Halo', 'Proximity accelerates capture, escort and objective-core damage.')),
@@ -144,7 +189,8 @@ export function validateUpgrades(pool) {
     }
     if (!entry.effects || typeof entry.effects !== 'object' || Array.isArray(entry.effects)
       || Object.keys(entry.effects).length === 0) throw new TypeError(`upgrade effects are missing: ${entry.id}`);
-    for (const effect of Object.values(entry.effects)) {
+    for (const [key, effect] of Object.entries(entry.effects)) {
+      if (!Object.hasOwn(UPGRADE_EFFECT_CONSUMERS, key)) throw new TypeError(`upgrade effect has no consumer: ${entry.id}/${key}`);
       if (!effect || !['base', 'perStack', 'min', 'max'].every((key) => Number.isFinite(effect[key]))
         || effect.min > effect.max) throw new TypeError(`upgrade formula is nonfinite or unbounded: ${entry.id}`);
       const maximumStackValue = effect.base + effect.perStack * entry.maxStacks;

@@ -543,6 +543,17 @@ export class GamePage {
     assert.equal(await this.evaluate(`document.activeElement?.matches('button')`), false, `${this.name}: gameplay focus remains on a button`);
   }
 
+  async reload() {
+    const loaded = this.client.waitFor('Page.loadEventFired');
+    await this.client.send('Page.reload', { ignoreCache: true });
+    await loaded;
+    await this.waitForPage(`document.readyState === 'complete' && Boolean(document.querySelector('canvas'))`);
+    await this.evaluate(`document.fonts?.ready?.then(()=>true) ?? true`);
+    await this.waitForPage(`document.activeElement?.id === 'primary-button'`);
+    await this.#discoverGameScript();
+    return true;
+  }
+
   async assertClean() {
     await sleep(100);
     assert.deepEqual(this.consoleErrors, [], `${this.name}: console errors\n${this.consoleErrors.join('\n')}`);

@@ -6,7 +6,6 @@ const FRIENDLY_TARGET_KINDS = Object.freeze(['bossPart', 'enemy', 'objective']);
 const DEFAULT_OUTCOME_CAPACITY = 512;
 const DEFAULT_SPAWN_CAPACITY = 192;
 const PERFECT_PHASE_BUFF_SECONDS = 0.8;
-const PERFECT_PHASE_COOLDOWN = 0.55 * AUTO_PULSE_BUFF_MULTIPLIER;
 const EPSILON = 1e-9;
 
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
@@ -92,11 +91,19 @@ export function createCollisionSystem({
   const spawnTargetId = new Float64Array(spawns);
   const spawnTeam = new Uint32Array(spawns);
   const spawnChainCount = new Uint32Array(spawns);
+  const spawnChainDamageMultiplier = new Float64Array(spawns);
+  const spawnChainRadius = new Float64Array(spawns);
+  const spawnWeakPointMultiplier = new Float64Array(spawns);
+  const spawnObjectiveDamageMultiplier = new Float64Array(spawns);
+  const spawnHitTargets = Array.from({ length: 5 }, () => new Float64Array(spawns));
   const spawnColors = new Uint32Array(spawns);
   const spawnTypes = new Array(spawns).fill(null);
   const spawnWeapons = new Array(spawns).fill(null);
+  const hitCandidateIds = new Float64Array(outcomes);
+  const hitCandidateAlong = new Float64Array(outcomes);
   const projectileRead = createEntityReadTarget();
   const targetRead = createEntityReadTarget();
+  const impactRead = createEntityReadTarget();
   const targetApplyRead = createEntityReadTarget();
   const playerRead = createEntityReadTarget();
   const pickupRead = createEntityReadTarget();
@@ -122,6 +129,16 @@ export function createCollisionSystem({
     weaponId: null,
     type: null,
     chainCount: 0,
+    hitBudgetRemaining: 1,
+    chainDamageMultiplier: 0.78,
+    chainRadius: 6,
+    weakPointMultiplier: 1.5,
+    objectiveDamageMultiplier: 1,
+    hitTarget0: 0,
+    hitTarget1: 0,
+    hitTarget2: 0,
+    hitTarget3: 0,
+    hitTarget4: 0,
     splitCount: 0,
     homing: false,
     collidable: true,
@@ -167,6 +184,13 @@ export function createCollisionSystem({
     spawnTargetId[index] = data.targetId ?? 0;
     spawnTeam[index] = data.team;
     spawnChainCount[index] = data.chainCount ?? 0;
+    spawnChainDamageMultiplier[index] = finite(data.chainDamageMultiplier, 0.78);
+    spawnChainRadius[index] = finite(data.chainRadius, 6);
+    spawnWeakPointMultiplier[index] = finite(data.weakPointMultiplier, 1.5);
+    spawnObjectiveDamageMultiplier[index] = finite(data.objectiveDamageMultiplier, 1);
+    for (let hitIndex = 0; hitIndex < 5; hitIndex += 1) {
+      spawnHitTargets[hitIndex][index] = finite(data[`hitTarget${hitIndex}`], 0);
+    }
     spawnColors[index] = data.color;
     spawnTypes[index] = data.type;
     spawnWeapons[index] = data.weaponId;
@@ -174,7 +198,7 @@ export function createCollisionSystem({
     return true;
   }
 
-  function queueImpactSpawns(state, projectile, target) {
+  function queueImpactSpawns(state, projectile, target, hitTargets) {
     if (projectile.splitOnImpact && projectile.splitCount > 0) {
       const baseAngle = Math.atan2(projectile.vy, projectile.vx);
       for (let index = 0; index < projectile.splitCount; index += 1) {
@@ -194,6 +218,8 @@ export function createCollisionSystem({
           color: 0xff9f43,
           type: 'prism-shard',
           weaponId: projectile.weaponId || 'prism-missiles',
+          weakPointMultiplier: projectile.weakPointMultiplier,
+          objectiveDamageMultiplier: projectile.objectiveDamageMultiplier,
         });
       }
     }
@@ -208,9 +234,18 @@ export function createCollisionSystem({
         targetId: -target.id,
         team: projectile.team,
         chainCount: projectile.chainCount - 1,
+        chainDamageMultiplier: projectile.chainDamageMultiplier,
+        chainRadius: projectile.chainRadius,
+        weakPointMultiplier: projectile.weakPointMultiplier,
+        objectiveDamageMultiplier: projectile.objectiveDamageMultiplier,
         color: projectile.color || 0x8af7ff,
         type: 'arc-chain',
         weaponId: projectile.weaponId || 'arc-drones',
+        hitTarget0: hitTargets[0],
+        hitTarget1: hitTargets[1],
+        hitTarget2: hitTargets[2],
+        hitTarget3: hitTargets[3],
+        hitTarget4: hitTargets[4],
       });
     }
   }
@@ -222,17 +257,88 @@ export function createCollisionSystem({
     return true;
   }
 
+  function queuePrismImpactDamage(world, state, projectile, primaryTarget) {
+    if (projectile.type !== 'prism-missile') return 0;
+    const radius = clamp(finite(projectile.impactRadius, 0.75), 0.5, 1.2);
+    let queued = 0;
+    for (const kind of FRIENDLY_TARGET_KINDS) {
+      const targets = world.query(kind);
+      for (let index = 0; index < targets.length && queued < 8; index += 1) {
+        const target = world.readInto(targets.at(index), impactRead);
+        if (!target || target.id === primaryTarget.id || !targetCanTakeFriendlyHit(projectile, target)) continue;
+        if (Math.hypot(target.x - primaryTarget.x, target.y - primaryTarget.y) > radius + target.radius) continue;
+        const weakPointMultiplier = target.weakPoint
+          ? clamp(finite(projectile.weakPointMultiplier, 1.5), 1, 2.5)
+          : 1;
+        const objectiveMultiplier = target.kind === 'objective'
+          ? clamp(finite(projectile.objectiveDamageMultiplier, 1), 1, 1.8)
+          : 1;
+        if (queueDamage(
+          state,
+          projectile,
+          target,
+          projectile.damage * 0.35 * weakPointMultiplier * objectiveMultiplier,
+          target.weakPoint,
+        )) queued += 1;
+      }
+    }
+    return queued;
+  }
+
+  function projectileHitIndex(projectile, targetId) {
+    for (let index = 0; index < 5; index += 1) {
+      if (projectile[`hitTarget${index}`] === targetId) return index;
+    }
+    return -1;
+  }
+
   function collectFriendlyHits(world, state) {
     const query = world.query('friendlyProjectile');
     for (let projectileIndex = 0; projectileIndex < query.length; projectileIndex += 1) {
       const projectile = world.readInto(query.at(projectileIndex), projectileRead);
       if (!projectile || !projectile.collidable || projectile.type === 'arc-drone') continue;
-      let hit = false;
+      let candidateCount = 0;
+      const segmentX = projectile.x - projectile.previousX;
+      const segmentY = projectile.y - projectile.previousY;
+      const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
       for (const kind of FRIENDLY_TARGET_KINDS) {
         const targets = world.query(kind);
-        for (let targetIndex = 0; targetIndex < targets.length; targetIndex += 1) {
+        for (let targetIndex = 0; targetIndex < targets.length && candidateCount < outcomes; targetIndex += 1) {
           const target = world.readInto(targets.at(targetIndex), targetRead);
-          if (!target || !targetCanTakeFriendlyHit(projectile, target) || !sweptCircleHit(projectile, target)) continue;
+          if (!target || projectileHitIndex(projectile, target.id) >= 0
+            || !targetCanTakeFriendlyHit(projectile, target) || !sweptCircleHit(projectile, target)) continue;
+          const offsetX = target.x - projectile.previousX;
+          const offsetY = target.y - projectile.previousY;
+          const projection = segmentLengthSquared > EPSILON
+            ? clamp((offsetX * segmentX + offsetY * segmentY) / segmentLengthSquared, 0, 1)
+            : 0;
+          const along = projection * Math.sqrt(Math.max(0, segmentLengthSquared));
+          let insert = candidateCount;
+          while (insert > 0 && (along < hitCandidateAlong[insert - 1] - EPSILON
+            || (Math.abs(along - hitCandidateAlong[insert - 1]) <= EPSILON
+              && target.id < hitCandidateIds[insert - 1]))) {
+            hitCandidateAlong[insert] = hitCandidateAlong[insert - 1];
+            hitCandidateIds[insert] = hitCandidateIds[insert - 1];
+            insert -= 1;
+          }
+          hitCandidateAlong[insert] = along;
+          hitCandidateIds[insert] = target.id;
+          candidateCount += 1;
+        }
+      }
+      if (candidateCount === 0) continue;
+      const configuredBudget = Math.trunc(finite(projectile.hitBudgetRemaining));
+      let remaining = Math.max(1, Math.min(5, configuredBudget > 0
+        ? configuredBudget
+        : 1 + Math.max(0, Math.trunc(finite(projectile.pierceCount)))));
+      const hitTargets = [
+        projectile.hitTarget0, projectile.hitTarget1, projectile.hitTarget2, projectile.hitTarget3, projectile.hitTarget4,
+      ];
+      let historyCount = hitTargets.filter((id) => id > 0).length;
+      let acceptedHits = 0;
+      for (let candidateIndex = 0; candidateIndex < candidateCount && remaining > 0; candidateIndex += 1) {
+        const target = world.readInto(hitCandidateIds[candidateIndex], targetRead);
+        if (!target || !targetCanTakeFriendlyHit(projectile, target) || projectileHitIndex(projectile, target.id) >= 0) continue;
           const armoredBossPart = target.kind === 'bossPart' && (target.armored || !target.weakPoint);
           const armoredEnemy = target.kind === 'enemy' && target.armored && !target.weakPoint;
           if (!armoredBossPart && !armoredEnemy) {
@@ -244,28 +350,41 @@ export function createCollisionSystem({
               : 1;
             queueDamage(state, projectile, target, projectile.damage * weakPointMultiplier * objectiveMultiplier, target.weakPoint);
           }
-          queueImpactSpawns(state, projectile, target);
-          hit = true;
-          if (!projectile.piercing || projectile.pierceCount === 0) break;
-        }
-        if (hit && (!projectile.piercing || projectile.pierceCount === 0)) break;
+        if (historyCount < hitTargets.length) hitTargets[historyCount++] = target.id;
+        queuePrismImpactDamage(world, state, projectile, target);
+        queueImpactSpawns(state, projectile, target, hitTargets);
+        remaining -= 1;
+        acceptedHits += 1;
       }
-      if (hit && (!projectile.piercing || projectile.pierceCount === 0)) {
+      if (acceptedHits === 0) continue;
+      if (remaining === 0) {
         state.despawnCount = addUnique(despawnIds, state.despawnCount, projectile.id);
-      } else if (hit && projectile.pierceCount > 0) {
-        world.write(projectile.id, { pierceCount: projectile.pierceCount - 1 });
+      } else {
+        world.write(projectile.id, {
+          hitBudgetRemaining: remaining,
+          hitTarget0: hitTargets[0] || 0,
+          hitTarget1: hitTargets[1] || 0,
+          hitTarget2: hitTargets[2] || 0,
+          hitTarget3: hitTargets[3] || 0,
+          hitTarget4: hitTargets[4] || 0,
+        });
       }
     }
   }
 
-  function applyPerfectPhase(world, player, events) {
+  function applyPerfectPhase(world, player, events, buildStats = null) {
+    const fireRateMultiplier = clamp(
+      finite(buildStats?.perfectFireBuffMultiplier, AUTO_PULSE_BUFF_MULTIPLIER),
+      0.6,
+      AUTO_PULSE_BUFF_MULTIPLIER,
+    );
     const refundIndex = player.dashCharge0 <= player.dashCharge1 ? 0 : 1;
     const charges = [player.dashCharge0, player.dashCharge1];
     const before = charges[refundIndex];
     charges[refundIndex] = clamp(before + PERFECT_PHASE_REFUND, 0, 1);
     const cooldown = player.cooldown > 0
-      ? Math.min(player.cooldown * AUTO_PULSE_BUFF_MULTIPLIER, PERFECT_PHASE_COOLDOWN)
-      : PERFECT_PHASE_COOLDOWN;
+      ? Math.min(player.cooldown * fireRateMultiplier, 0.55 * fireRateMultiplier)
+      : 0.55 * fireRateMultiplier;
     world.write(player.id, {
       perfectPhaseWindow: 0,
       phaseTimer: Math.max(player.phaseTimer, 0.08),
@@ -277,12 +396,12 @@ export function createCollisionSystem({
     events?.emit?.('perfectPhase', Object.freeze({
       refundIndex,
       refunded: charges[refundIndex] - before,
-      fireRateMultiplier: AUTO_PULSE_BUFF_MULTIPLIER,
+      fireRateMultiplier,
       duration: PERFECT_PHASE_BUFF_SECONDS,
     }));
   }
 
-  function collectPlayerHits(world, state, player, events) {
+  function collectPlayerHits(world, state, player, events, buildStats = null) {
     let perfectAvailable = player.perfectPhaseWindow > 0;
     let phaseProtected = player.invulnerable;
     const projectiles = world.query('enemyProjectile');
@@ -293,7 +412,7 @@ export function createCollisionSystem({
         || !sweptCircleHit(projectile, player)) continue;
       state.despawnCount = addUnique(despawnIds, state.despawnCount, projectile.id);
       if (perfectAvailable) {
-        applyPerfectPhase(world, player, events);
+        applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;
         phaseProtected = true;
         state.perfectPhases += 1;
@@ -308,7 +427,7 @@ export function createCollisionSystem({
         || (enemy.hp <= 0 && !isEnemyExecutionProtectedContact(enemy))) continue;
       if (!overlapsWithRadius(player, enemy, getAuthoritativeContactRadius(enemy))) continue;
       if (perfectAvailable) {
-        applyPerfectPhase(world, player, events);
+        applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;
         phaseProtected = true;
         state.perfectPhases += 1;
@@ -324,7 +443,7 @@ export function createCollisionSystem({
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2) continue;
       if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
       if (perfectAvailable) {
-        applyPerfectPhase(world, player, events);
+        applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;
         phaseProtected = true;
         state.perfectPhases += 1;
@@ -339,7 +458,7 @@ export function createCollisionSystem({
       if (!hazard || !hazard.collidable || !hazard.contactDamaging || hazard.team !== 2 || hazard.hitCooldown > 0) continue;
       if (!overlapsWithRadius(player, hazard, getAuthoritativeContactRadius(hazard))) continue;
       if (perfectAvailable) {
-        applyPerfectPhase(world, player, events);
+        applyPerfectPhase(world, player, events, buildStats);
         perfectAvailable = false;
         phaseProtected = true;
         state.perfectPhases += 1;
@@ -479,17 +598,17 @@ export function createCollisionSystem({
     };
   }
 
-  function findChainTarget(world, x, y, excludedId, team) {
+  function findChainTarget(world, x, y, excludedIds, team, radius) {
     let bestId = 0;
     let bestDistance = Infinity;
     for (const kind of ['bossPart', 'enemy']) {
       const query = world.query(kind);
       for (let index = 0; index < query.length; index += 1) {
         const target = world.readInto(query.at(index), chainRead);
-        if (!target || target.id === excludedId || target.hp <= 0 || !target.collidable || target.invulnerable) continue;
+        if (!target || excludedIds.includes(target.id) || target.hp <= 0 || !target.collidable || target.invulnerable) continue;
         if (team !== 0 && target.team === team) continue;
         const distance = Math.hypot(target.x - x, target.y - y);
-        if (distance > 6 || distance > bestDistance + EPSILON) continue;
+        if (distance > radius || distance > bestDistance + EPSILON) continue;
         if (distance < bestDistance - EPSILON || target.id < bestId || bestId === 0) {
           bestId = target.id;
           bestDistance = distance;
@@ -503,7 +622,18 @@ export function createCollisionSystem({
     let spawned = 0;
     for (let index = 0; index < state.spawnCount; index += 1) {
       let targetId = spawnTargetId[index];
-      if (targetId < 0) targetId = findChainTarget(world, spawnX[index], spawnY[index], -targetId, spawnTeam[index]);
+      if (targetId < 0) {
+        const excludedIds = spawnHitTargets.map((targets) => targets[index]).filter((id) => id > 0);
+        if (!excludedIds.includes(-targetId)) excludedIds.push(-targetId);
+        targetId = findChainTarget(
+          world,
+          spawnX[index],
+          spawnY[index],
+          excludedIds,
+          spawnTeam[index],
+          clamp(spawnChainRadius[index], 0, 8),
+        );
+      }
       if (spawnTypes[index] === 'arc-chain' && targetId === 0) continue;
       let vx = spawnVx[index];
       let vy = spawnVy[index];
@@ -533,6 +663,14 @@ export function createCollisionSystem({
       spawnData.weaponId = spawnWeapons[index];
       spawnData.type = spawnTypes[index];
       spawnData.chainCount = spawnChainCount[index];
+      spawnData.hitBudgetRemaining = 1;
+      spawnData.chainDamageMultiplier = spawnChainDamageMultiplier[index];
+      spawnData.chainRadius = spawnChainRadius[index];
+      spawnData.weakPointMultiplier = spawnWeakPointMultiplier[index];
+      spawnData.objectiveDamageMultiplier = spawnObjectiveDamageMultiplier[index];
+      for (let hitIndex = 0; hitIndex < 5; hitIndex += 1) {
+        spawnData[`hitTarget${hitIndex}`] = spawnHitTargets[hitIndex][index];
+      }
       spawnData.splitCount = 0;
       spawnData.homing = spawnTypes[index] === 'arc-chain';
       spawnData.color = spawnColors[index];
@@ -563,7 +701,7 @@ export function createCollisionSystem({
     const playerId = world.query('player').at(0);
     const player = Number.isSafeInteger(playerId) ? world.readInto(playerId, playerRead) : null;
     if (player?.collidable) {
-      collectPlayerHits(world, state, player, events);
+      collectPlayerHits(world, state, player, events, buildStats);
       collectPickupsAndObjectives(world, state, player, dt, events, buildStats);
     }
     const damage = applyDamage(world, state);
@@ -632,6 +770,6 @@ export function createCollisionSystem({
 
 const defaultCollisionSystem = createCollisionSystem();
 
-export function resolveCollisions(world, session, dt, events) {
-  return defaultCollisionSystem.resolve(world, session, dt, events);
+export function resolveCollisions(world, session, dt, events, buildStats = null) {
+  return defaultCollisionSystem.resolve(world, session, dt, events, buildStats);
 }
