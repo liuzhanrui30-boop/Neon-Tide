@@ -189,11 +189,11 @@ test('pending compatibility checkpoint resumes the exact route after selecting a
   const runSave = createRunSave(storage);
   const original = createGameSession({ development: true, runSave, now: () => 777 });
   original.startRun('standard', 8181);
-  original.startRoom({ id: 'legacy-reef-stage', compatibility: true, chapterIndex: 2 });
+  original.startRoom({ id: 'legacy-reef-stage', compatibility: true, chapterIndex: 1 });
   original.completeRoom({ nextMode: 'upgrade' });
   const pendingCheckpoint = runSave.load();
   assert.deepEqual(pendingCheckpoint.route, createCompatibilityRunRoute({
-    roomIndex: 1, chapterIndex: 2, templateId: 'legacy-reef-stage',
+    roomIndex: 1, chapterIndex: 1, templateId: 'legacy-reef-stage',
   }));
 
   const choice = original.snapshot().build.pendingOffer.cards[0];

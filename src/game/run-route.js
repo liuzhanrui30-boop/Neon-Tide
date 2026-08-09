@@ -85,7 +85,7 @@ export function normalizeRunRoute(value, { seed, stats, chapterIndex } = {}) {
   if (chapterMatch && Number(chapterMatch[1]) !== value.chapterIndex) return null;
   if (value.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID
     && (value.chapterIndex !== MAX_CAMPAIGN_CHAPTER_INDEX
-      || value.roomIndex < AUTHORED_CAMPAIGN_ROOM_COUNT)) return null;
+      || value.roomIndex < MAX_CAMPAIGN_CHAPTER_INDEX)) return null;
   return createCompatibilityRunRoute(value);
 }
 

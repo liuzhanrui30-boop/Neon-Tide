@@ -44,6 +44,57 @@ async function legacyRepairSwarmMigrationScenario() {
   });
 }
 
+async function legacyBossCheckpointMigrationScenario() {
+  await withLegacyPage('legacy-boss-checkpoint-migration', {}, async (page) => {
+    await page.evaluate(`localStorage.setItem('neon-tide:v3:checkpoint', JSON.stringify({
+      version:1,
+      mode:'standard',
+      seed:909,
+      chapterIndex:3,
+      build:{ownedUpgrades:['repair-swarm']},
+      hull:4,
+      stats:{roomsStarted:4,roomsCompleted:3,damageTaken:1,score:777},
+      savedAt:10,
+    }))`);
+    await page.reload();
+    const restored = await page.evaluate(`(()=>{const debug=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();return {session:debug.session,persistence:debug.persistence,saved:JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'))};})()`);
+    assert.equal(restored.persistence.migrations, 1);
+    assert.deepEqual(restored.session.route, {
+      kind: 'compatibility', roomIndex: 3, chapterIndex: 3, realmIndex: 3,
+      templateId: 'v2.2-boss-compatibility',
+    });
+    assert.deepEqual(restored.saved.route, restored.session.route);
+
+    await page.trustedClick('#primary-button');
+    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'playing'`);
+    page.requireDev('migrated boss checkpoint completion probe');
+    const boss = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss'&&!enemy.dead);
+      return {
+        stage:$state.stageIndex,
+        bossTriggered:$state.bossTriggered,
+        bossSpawned:$state.bossSpawned,
+        bossCount:$enemies.filter((enemy)=>enemy.type==='boss'&&!enemy.dead).length,
+        bossHp:boss?.hp,
+        templateId:session.snapshot().room?.templateId,
+      };
+    `);
+    assert.deepEqual(boss, {
+      stage: 3, bossTriggered: true, bossSpawned: true, bossCount: 1, bossHp: 30,
+      templateId: 'v2.2-boss-compatibility',
+    });
+
+    const completed = await page.gameEvaluate(`
+      const boss=$enemies.find((enemy)=>enemy.type==='boss'&&!enemy.dead);
+      boss.hp=5;
+      $state.dashSequence+=1;
+      damageEnemy(boss);
+      return {mode:$state.mode,reason:$state.terminalReason,finished:$state.runFinished};
+    `);
+    assert.deepEqual(completed, { mode: 'victory', reason: 'bossDestroyed', finished: true });
+  });
+}
+
 async function desktopCoreScenario() {
   await withLegacyPage('desktop-core', {}, async (page) => {
     const load = await page.evaluate(`(()=>{
@@ -453,6 +504,8 @@ async function desktopCoreScenario() {
     assert.ok(checkpointSaved.saved.build.pendingOffer, 'the real chapter-boundary offer was not checkpointed');
     assert.deepEqual(checkpointSaved.live.session.build, checkpointSaved.saved.build);
 
+    await page.evaluate(`(()=>{const saved=JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'));saved.version=1;delete saved.route;localStorage.setItem('neon-tide:v3:checkpoint',JSON.stringify(saved));return true;})()`);
+
     let loaded = page.client.waitFor('Page.loadEventFired');
     await page.client.send('Page.navigate', { url: APP_URL });
     await loaded;
@@ -463,6 +516,7 @@ async function desktopCoreScenario() {
       { mode:'briefing', chapterIndex:2, route:checkpointSaved.saved.route, hull:checkpointSaved.saved.hull, build:checkpointSaved.saved.build },
     );
     assert.ok(restored.persistence.loads >= 1, JSON.stringify(restored.persistence));
+    assert.equal(restored.persistence.migrations, 1);
     await page.trustedClick('#primary-button');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session.mode === 'upgrade'`);
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden`);
@@ -3572,6 +3626,7 @@ async function finalRealmShiftProductionScenario() {
 
 export const v22RegressionScenarios = [
   ['legacy Repair Swarm checkpoint migration', legacyRepairSwarmMigrationScenario],
+  ['legacy chapter-three boss checkpoint migration', legacyBossCheckpointMigrationScenario],
   ['briefing and laser UI', briefingAndLaserUiScenario],
   ['desktop load, wall clock, audio, repeat and focus', desktopCoreScenario],
   ['high-pressure combat director', highPressureCombatScenario],

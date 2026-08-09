@@ -242,10 +242,13 @@ export function createGameSession(options = {}) {
       && checkpoint.mode === 'standard'
       && Number.isFinite(checkpoint.seed)
       && Number.isInteger(checkpoint.chapterIndex) && checkpoint.chapterIndex >= 0
+      && checkpoint.chapterIndex <= MAX_CAMPAIGN_CHAPTER_INDEX
       && normalizePersistedRunBuild(checkpoint.build)
       && Number.isFinite(checkpoint.hull) && checkpoint.hull > 0
       && isSessionStats(checkpoint.stats)
       && checkpoint.stats.roomsStarted === checkpoint.stats.roomsCompleted
+      && checkpoint.stats.roomsCompleted >= 1
+      && checkpoint.chapterIndex <= checkpoint.stats.roomsCompleted
       && isRunBuildProgressionConsistent(checkpoint.build, checkpoint.stats, checkpoint.seed)
       && normalizeRunRoute(checkpoint.route, {
         seed: checkpoint.seed,
@@ -484,7 +487,7 @@ export function createGameSession(options = {}) {
           : completedRoute.chapterIndex;
         const templateId = nextChapter === completedRoute.chapterIndex
           ? completedRoute.templateId
-          : nextChapter === 3 && completedRoute.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID
+          : nextChapter === 3
             ? COMPATIBILITY_BOSS_TEMPLATE_ID
             : `v2.2-compatibility-chapter-${nextChapter}`;
         state.route = createCompatibilityRunRoute({

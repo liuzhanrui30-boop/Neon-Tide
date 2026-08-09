@@ -140,11 +140,15 @@ export const v3UpgradeScenarios = [
       assert.match(skip.message, /upgrade -> playing/);
       assert.deepEqual(skip.session.build, pendingBuild);
 
+      await page.evaluate(`(()=>{const saved=JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'));saved.version=1;delete saved.route;localStorage.setItem('neon-tide:v3:checkpoint',JSON.stringify(saved));return true;})()`);
+
       await page.reload();
-      const restoredPending = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session`);
+      const restoredPendingDebug = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+      const restoredPending = restoredPendingDebug.session;
       assert.equal(restoredPending.mode, 'briefing');
       assert.deepEqual(restoredPending.build, pendingBuild);
       assert.deepEqual(restoredPending.route, skip.session.route);
+      assert.equal(restoredPendingDebug.persistence.migrations, 1);
       await page.trustedClick('#primary-button');
       const continued = await readOffer(page);
       assert.equal(continued.mode, 'upgrade');
@@ -163,12 +167,15 @@ export const v3UpgradeScenarios = [
       assert.equal(selected.events.dropped, 0);
 
       const selectedBuild = selected.build;
+      await page.evaluate(`(()=>{const saved=JSON.parse(localStorage.getItem('neon-tide:v3:checkpoint'));saved.version=1;delete saved.route;localStorage.setItem('neon-tide:v3:checkpoint',JSON.stringify(saved));return true;})()`);
       await page.reload();
-      const restoredSelected = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().session`);
+      const restoredSelectedDebug = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+      const restoredSelected = restoredSelectedDebug.session;
       assert.equal(restoredSelected.mode, 'briefing');
       assert.deepEqual(restoredSelected.build, selectedBuild);
       assert.deepEqual(restoredSelected.route, selected.nextRoom.route);
       assert.equal(restoredSelected.build.pendingOffer, null);
+      assert.equal(restoredSelectedDebug.persistence.migrations, 1);
       await page.startGame();
       await page.waitForPage(`(()=>{const debug=globalThis.__NEON_TIDE_V3__?.getDebugSnapshot?.();return debug?.session?.mode==='playing'&&debug.session.room?.templateId&&Number.isFinite(debug.player?.position?.x)&&debug.weapons?.lastBuildStats;})()`);
       const resumed = await page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);

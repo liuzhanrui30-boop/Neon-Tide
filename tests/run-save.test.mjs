@@ -8,6 +8,7 @@ import {
 import {
   attachPendingOffer,
   createUpgradeBuild,
+  deriveUpgradeOfferSeed,
   serializeUpgradeBuild,
 } from '../src/systems/upgrade-system.js';
 
@@ -132,6 +133,24 @@ test('malicious full-build and progression matrices are rejected and cleared', (
     { ...exact, route: { ...exact.route, kind: 'authored' } },
     { ...exact, route: { ...exact.route, chapterIndex: 2 } },
     { ...exact, route: { ...exact.route, templateId: 'moving-sanctum' } },
+    {
+      ...exact,
+      chapterIndex: 3,
+      route: createCompatibilityRunRoute({
+        roomIndex: 0, chapterIndex: 3, templateId: 'impossible-empty-boss',
+      }),
+      build: serializeUpgradeBuild(createUpgradeBuild()),
+      hull: 3,
+      stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 },
+    },
+    {
+      ...exact,
+      chapterIndex: 1,
+      route: createNextStandardRunRoute(1, 42),
+      build: serializeUpgradeBuild(createUpgradeBuild()),
+      hull: 999,
+      stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 },
+    },
   ];
   for (const payload of payloads) {
     const storage = new MemoryStorage();
@@ -203,6 +222,108 @@ test('failed legacy replacement leaves the original v1 checkpoint intact for an 
   assert.equal(save.getStatus().migrations, 1);
 });
 
+test('immediate-predecessor canonical v1 selected and pending builds migrate without loss', () => {
+  const selected = {
+    version: 1, mode: 'standard', seed: 42, chapterIndex: 1,
+    build: serializeUpgradeBuild(createUpgradeBuild({
+      ownedUpgrades: ['ion-drive'], offerSequence: 1,
+    })),
+    hull: 3,
+    stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 20 },
+    savedAt: 10,
+  };
+  const pendingBuild = attachPendingOffer(
+    createUpgradeBuild(),
+    deriveUpgradeOfferSeed(42, 1, 0),
+  );
+  const pending = {
+    ...selected,
+    build: serializeUpgradeBuild(pendingBuild),
+    savedAt: 11,
+  };
+  const repairSelected = {
+    ...selected,
+    build: serializeUpgradeBuild(createUpgradeBuild({
+      ownedUpgrades: ['repair-swarm'], offerSequence: 1,
+    })),
+    hull: 4,
+    savedAt: 12,
+  };
+
+  for (const [legacy, expectedBuild] of [
+    [selected, selected.build],
+    [pending, pending.build],
+    [repairSelected, repairSelected.build],
+  ]) {
+    const storage = new MemoryStorage();
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(legacy));
+    const save = createRunSave(storage);
+    const migrated = save.load();
+    assert.equal(migrated.version, 2);
+    assert.deepEqual(migrated.route, createNextStandardRunRoute(1, 42));
+    assert.deepEqual(migrated.build, expectedBuild);
+    assert.deepEqual(JSON.parse(storage.getItem('neon-tide:v3:checkpoint')), migrated);
+    assert.deepEqual(save.load(), migrated);
+    assert.equal(save.getStatus().migrations, 1);
+  }
+});
+
+test('one-field legacy chapters zero through two map to their exact compatibility stage nodes', () => {
+  for (const chapterIndex of [0, 1, 2]) {
+    const roomsCompleted = Math.max(1, chapterIndex);
+    const storage = new MemoryStorage();
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify({
+      version: 1, mode: 'standard', seed: 5, chapterIndex,
+      build: { ownedUpgrades: [] }, hull: 3,
+      stats: { roomsStarted: roomsCompleted, roomsCompleted, damageTaken: 0, score: 0 }, savedAt: 1,
+    }));
+    const migrated = createRunSave(storage).load();
+    assert.deepEqual(migrated.route, createCompatibilityRunRoute({
+      roomIndex: roomsCompleted,
+      chapterIndex,
+      templateId: `v2.2-compatibility-chapter-${chapterIndex}`,
+    }));
+  }
+});
+
+test('canonical compatibility pending migration preserves its stage node and chapter-three legacy uses the boss node', () => {
+  const seed = 19;
+  const selectedBuild = createUpgradeBuild({ ownedUpgrades: ['ion-drive'], offerSequence: 1 });
+  const pendingBuild = attachPendingOffer(selectedBuild, deriveUpgradeOfferSeed(seed, 4, 1));
+  const compatibilityPending = {
+    version: 1, mode: 'standard', seed, chapterIndex: 2,
+    build: serializeUpgradeBuild(pendingBuild), hull: 3,
+    stats: { roomsStarted: 4, roomsCompleted: 4, damageTaken: 0, score: 40 }, savedAt: 12,
+  };
+  const bossLegacy = {
+    version: 1, mode: 'standard', seed, chapterIndex: 3,
+    build: { ownedUpgrades: ['repair-swarm'] }, hull: 4,
+    stats: { roomsStarted: 3, roomsCompleted: 3, damageTaken: 1, score: 80 }, savedAt: 13,
+  };
+  const canonicalBoss = {
+    version: 1, mode: 'standard', seed, chapterIndex: 3,
+    build: serializeUpgradeBuild(selectedBuild), hull: 3,
+    stats: { roomsStarted: 5, roomsCompleted: 5, damageTaken: 0, score: 120 }, savedAt: 14,
+  };
+
+  for (const [legacy, expectedRoute] of [
+    [compatibilityPending, createCompatibilityRunRoute({
+      roomIndex: 4, chapterIndex: 2, templateId: 'v2.2-compatibility-chapter-2',
+    })],
+    [bossLegacy, createCompatibilityRunRoute({
+      roomIndex: 3, chapterIndex: 3, templateId: 'v2.2-boss-compatibility',
+    })],
+    [canonicalBoss, createCompatibilityRunRoute({
+      roomIndex: 5, chapterIndex: 3, templateId: 'v2.2-boss-compatibility',
+    })],
+  ]) {
+    const storage = new MemoryStorage();
+    storage.setItem('neon-tide:v3:checkpoint', JSON.stringify(legacy));
+    const migrated = createRunSave(storage).load();
+    assert.deepEqual(migrated.route, expectedRoute);
+  }
+});
+
 test('unknown and malformed legacy v1 checkpoints are cleared instead of migrated', () => {
   for (const build of [
     { ownedUpgrades: ['unknown-upgrade'] },
@@ -233,8 +354,13 @@ test('unknown and malformed legacy v1 checkpoints are cleared instead of migrate
       stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, savedAt: 1,
     },
     {
-      version: 1, mode: 'standard', seed: 1, chapterIndex: 1,
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 3,
       build: serializeUpgradeBuild(createUpgradeBuild()), hull: 3,
+      stats: { roomsStarted: 0, roomsCompleted: 0, damageTaken: 0, score: 0 }, savedAt: 1,
+    },
+    {
+      version: 1, mode: 'standard', seed: 1, chapterIndex: 1,
+      build: serializeUpgradeBuild(createUpgradeBuild()), hull: 999,
       stats: { roomsStarted: 1, roomsCompleted: 1, damageTaken: 0, score: 0 }, savedAt: 1,
     },
   ]) {

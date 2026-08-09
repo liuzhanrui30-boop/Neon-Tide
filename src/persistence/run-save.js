@@ -1,10 +1,14 @@
 import {
   isRunBuildProgressionConsistent,
+  maxHullForRunBuild,
   migrateLegacyRunBuild,
   normalizePersistedRunBuild,
 } from '../game/run-build.js';
 import {
+  AUTHORED_CAMPAIGN_ROOM_COUNT,
+  COMPATIBILITY_BOSS_TEMPLATE_ID,
   MAX_CAMPAIGN_CHAPTER_INDEX,
+  createNextStandardRunRoute,
   createCompatibilityRunRoute,
   normalizeRunRoute,
 } from '../game/run-route.js';
@@ -31,6 +35,28 @@ function isFiniteNonNegativeInteger(value) {
 }
 
 const MAX_CHECKPOINT_STAT = 1_000_000_000;
+const BASE_RUN_MAX_HULL = 3;
+
+function isSemanticallyPossibleProgress(chapterIndex, stats) {
+  return stats.roomsStarted === stats.roomsCompleted
+    && stats.roomsCompleted >= 1
+    && chapterIndex <= Math.min(MAX_CAMPAIGN_CHAPTER_INDEX, stats.roomsCompleted);
+}
+
+function hullMatchesBuild(hull, build) {
+  const maxHull = maxHullForRunBuild(build, BASE_RUN_MAX_HULL);
+  return Number.isFinite(maxHull) && hull <= maxHull;
+}
+
+function createHistoricalCompatibilityRoute(roomIndex, chapterIndex) {
+  return createCompatibilityRunRoute({
+    roomIndex,
+    chapterIndex,
+    templateId: chapterIndex === MAX_CAMPAIGN_CHAPTER_INDEX
+      ? COMPATIBILITY_BOSS_TEMPLATE_ID
+      : `v2.2-compatibility-chapter-${chapterIndex}`,
+  });
+}
 
 export function isCheckpointStats(value) {
   const keys = ['roomsStarted', 'roomsCompleted', 'damageTaken', 'score'];
@@ -58,8 +84,9 @@ export function isRunCheckpoint(value) {
     || !normalizePersistedRunBuild(value.build)
     || !Number.isFinite(value.hull) || value.hull <= 0
     || !isCheckpointStats(value.stats)
-    || value.stats.roomsStarted !== value.stats.roomsCompleted
+    || !isSemanticallyPossibleProgress(value.chapterIndex, value.stats)
     || !isRunBuildProgressionConsistent(value.build, value.stats, value.seed)
+    || !hullMatchesBuild(value.hull, value.build)
     || !normalizeRunRoute(value.route, {
       seed: value.seed,
       stats: value.stats,
@@ -84,23 +111,34 @@ export function migrateV1Checkpoint(value) {
     || !isCheckpointStats(value.stats)
     || !Number.isFinite(value.savedAt) || value.savedAt < 0) return null;
 
-  const stats = {
-    ...clone(value.stats),
-    // A checkpoint is a committed boundary. Any permissive v1 started-room
-    // surplus was uncommitted live state and rolls back to completed progress.
-    roomsStarted: value.stats.roomsCompleted,
-  };
   const legacyBuildShape = isRecord(value.build)
     && Object.keys(value.build).length === 1
     && Object.hasOwn(value.build, 'ownedUpgrades');
-  if (!legacyBuildShape) return null;
-  const build = migrateLegacyRunBuild(value.build, stats.roomsCompleted);
-  if (!build) return null;
-  const route = createCompatibilityRunRoute({
-    roomIndex: stats.roomsStarted,
-    chapterIndex: value.chapterIndex,
-    templateId: `v2.2-compatibility-chapter-${value.chapterIndex}`,
-  });
+  const canonicalBuild = legacyBuildShape ? null : normalizePersistedRunBuild(value.build);
+  const stats = legacyBuildShape
+    ? {
+      ...clone(value.stats),
+      // The one-field schema allowed an uncommitted started-room surplus.
+      roomsStarted: value.stats.roomsCompleted,
+    }
+    : clone(value.stats);
+  if (!isSemanticallyPossibleProgress(value.chapterIndex, stats)) return null;
+  const build = legacyBuildShape
+    ? migrateLegacyRunBuild(value.build, stats.roomsCompleted)
+    : canonicalBuild;
+  if (!build
+    || (!legacyBuildShape && !isRunBuildProgressionConsistent(build, stats, value.seed))
+    || !hullMatchesBuild(value.hull, build)) return null;
+
+  let route;
+  if (legacyBuildShape) {
+    route = createHistoricalCompatibilityRoute(stats.roomsStarted, value.chapterIndex);
+  } else if (stats.roomsStarted < AUTHORED_CAMPAIGN_ROOM_COUNT
+    && value.chapterIndex === Math.min(MAX_CAMPAIGN_CHAPTER_INDEX, stats.roomsStarted)) {
+    route = createNextStandardRunRoute(stats.roomsStarted, value.seed);
+  } else {
+    route = createHistoricalCompatibilityRoute(stats.roomsStarted, value.chapterIndex);
+  }
   const migrated = {
     version: CURRENT_VERSION,
     mode: 'standard',

@@ -2324,7 +2324,10 @@ function startGame() {
       : session.startRoom(roomRequestForRunRoute(resumable.route));
     pendingTransitionPayload = null;
     if (resumed) {
-      if (resumable.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) beginBossStage();
+      if (resumable.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) {
+        state.bossTriggered = true;
+        beginBossStage();
+      }
       toast("章节信号已恢复", "cyan");
       audio.event("start");
     }
@@ -2464,7 +2467,10 @@ function transitionTo(nextMode, payload = {}) {
   else if (nextMode === "playing" && session.getMode() === "upgrade") {
     const completed = session.snapshot();
     changed = session.startRoom(roomRequestForRunRoute(completed.route));
-    if (changed && completed.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) beginBossStage();
+    if (changed && completed.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) {
+      state.bossTriggered = true;
+      beginBossStage();
+    }
   } else if (nextMode === "upgrade") changed = session.completeRoom({ nextMode: "upgrade", stageIndex: payload.stageIndex });
   else if (nextMode === "gameover") changed = session.completeRoom({ outcome: "defeat", reason: state.terminalReason });
   else if (nextMode === "victory") changed = session.completeRoom({ outcome: "victory", reason: state.terminalReason });
