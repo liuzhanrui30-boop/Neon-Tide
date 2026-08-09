@@ -232,7 +232,7 @@ export class GamePage {
     // scoped to each scenario's initial document while allowing a scenario to
     // verify its own reload/resume path below.
     const checkpointCleanup = await this.client.send('Page.addScriptToEvaluateOnNewDocument', {
-      source: `try { localStorage.removeItem('neon-tide:v3:checkpoint'); } catch {}`,
+      source: `try { localStorage.removeItem('neon-tide:v3:checkpoint'); localStorage.removeItem('neon-tide:v3:mode-preference'); } catch {}`,
     });
     const loaded = this.client.waitFor('Page.loadEventFired');
     await this.client.send('Page.navigate', { url: this.options.appUrl ?? APP_URL });

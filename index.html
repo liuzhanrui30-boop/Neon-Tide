@@ -99,7 +99,19 @@
           <p id="overlay-copy">
             只需移动、相位冲刺与潮汐光矛，在深渊潮界中突破编队、光束与雷墙。<br />武器自动锁定威胁；你的任务是读懂潮流并把握 0.12 秒完美相位。
           </p>
-          <ol id="journey-strip" class="journey-strip" aria-label="潮汐旅程"></ol>
+          <fieldset id="mode-selection" class="mode-selection" aria-describedby="mode-explanation">
+            <legend>选择远征规则</legend>
+            <label class="mode-option">
+              <input type="radio" name="run-mode" value="standard" checked />
+              <span><strong>标准远征</strong><small>章节检查点 · 阵亡后从当前章节入口继续</small></span>
+            </label>
+            <label class="mode-option danger">
+              <input type="radio" name="run-mode" value="abyss" />
+              <span><strong>深渊模式</strong><small>压力 +22% · Boss 强化 · 阵亡后整局重开</small></span>
+            </label>
+          </fieldset>
+          <p id="mode-explanation" class="mode-explanation">模式偏好会保留，但游戏只会在你按下出航后开始。</p>
+          <ol id="journey-strip" class="journey-strip" aria-label="四章远征地图"></ol>
           <div id="briefing-grid" class="briefing-grid">
             <article class="mechanic-card"><span>01</span><h2>Move</h2><p><kbd>WASD</kbd> / 方向键穿行潮流。</p></article>
             <article class="mechanic-card"><span>02</span><h2>Phase Dash</h2><p><kbd>空格</kbd> 冲刺进入短暂相位状态。</p></article>

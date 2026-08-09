@@ -55,6 +55,7 @@ import {
   selectTideLanceLine,
 } from "../systems/weapon-system.js";
 import { UPGRADES as V3_UPGRADES } from "../content/upgrades.js";
+import { CAMPAIGN_CHAPTERS } from "../content/realms.js";
 import {
   COMPATIBILITY_BOSS_TEMPLATE_ID,
   roomRequestForRunRoute,
@@ -73,7 +74,9 @@ export function createLegacyRuntime({
   hudRenderer = null,
   entityRenderer = null,
   compatibilityCampaign = false,
+  campaignRouting = false,
   campaignSeed = null,
+  runModePreference = null,
 }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
@@ -84,6 +87,7 @@ let renderCalls = 0;
 let lastSimulationSeconds = 0;
 let projectedHull = null;
 let projectedMaxHull = null;
+let journeyRenderKey = null;
 const SESSION_TO_LEGACY_MODE = Object.freeze({
   menu: "menu",
   briefing: "menu",
@@ -213,6 +217,9 @@ const dom = {
   dashRing: document.querySelector("#dash-ring"),
   laserButton: document.querySelector("#laser-button"),
   journeyStrip: document.querySelector("#journey-strip"),
+  modeSelection: document.querySelector("#mode-selection"),
+  modeExplanation: document.querySelector("#mode-explanation"),
+  modeInputs: Array.from(document.querySelectorAll('input[name="run-mode"]')),
 };
 
 dom.floatingLayer = document.createElement("div");
@@ -2312,38 +2319,60 @@ function resetState() {
   requestRuntimeAudit("reset");
 }
 
-function startGame() {
+async function startGame() {
   audio.unlock();
-  const resumable = session.snapshot();
-  if (resumable.mode === "briefing" && resumable.runMode) {
-    resetState();
-    enterStage(resumable.route?.realmIndex ?? resumable.chapterIndex, false);
-    pendingTransitionPayload = { resumedCheckpoint: true };
-    const resumed = resumable.build?.pendingOffer
-      ? transitionTo("playing", { resumedCheckpoint: true })
-      : session.startRoom(roomRequestForRunRoute(resumable.route));
+  const selectedMode = dom.modeInputs.find((input) => input.checked)?.value ?? runModePreference?.load?.() ?? "standard";
+  runModePreference?.save?.(selectedMode);
+  let resumable = session.snapshot();
+
+  if (resumable.mode === "chapterComplete") {
+    pendingTransitionPayload = { campaignAdvanced: true };
+    const advanced = session.startRoom(roomRequestForRunRoute(resumable.route));
     pendingTransitionPayload = null;
-    if (resumed) {
-      if (resumable.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) {
-        state.bossTriggered = true;
-        beginBossStage();
-      }
-      toast("章节信号已恢复", "cyan");
-      audio.event("start");
-    }
-    return resumed;
+    if (advanced) audio.event("start");
+    return advanced;
   }
+
+  if (resumable.mode === "briefing" && resumable.runMode) {
+    if (selectedMode !== resumable.runMode) {
+      session.reset();
+      resumable = session.snapshot();
+    } else {
+      resetState();
+      enterStage(resumable.route?.realmIndex ?? resumable.chapterIndex, false);
+      pendingTransitionPayload = { resumedCheckpoint: resumable.runMode === "standard" };
+      const resumed = resumable.build?.pendingOffer
+        ? transitionTo("playing", { resumedCheckpoint: true })
+        : session.startRoom(roomRequestForRunRoute(resumable.route));
+      pendingTransitionPayload = null;
+      if (resumed) {
+        if (resumable.route?.templateId === COMPATIBILITY_BOSS_TEMPLATE_ID) {
+          state.bossTriggered = true;
+          beginBossStage();
+        }
+        toast(resumable.runMode === "standard" ? "章节信号已恢复" : "深渊远征重新开始", "cyan");
+        audio.event("start");
+      }
+      return resumed;
+    }
+  }
+
   resetState();
   pendingTransitionPayload = { newRun: true };
-  session.startRun("standard", Number.isFinite(campaignSeed)
+  const seed = Number.isFinite(campaignSeed)
     ? campaignSeed
-    : Math.floor(performance.timeOrigin + performance.now()));
+    : Math.floor(performance.timeOrigin + performance.now());
+  session.startRun(selectedMode, seed);
+  const route = session.snapshot().route;
   session.startRoom(compatibilityCampaign
     ? { id: "v2.2-compatibility-chapter-0", compatibility: true, chapterIndex: 0 }
-    : { campaign: true, chapterIndex: 0 });
+    : campaignRouting
+      ? roomRequestForRunRoute(route)
+      : { campaign: true, chapterIndex: 0 });
   pendingTransitionPayload = null;
-  toast("潮汐已接入", "cyan");
+  toast(selectedMode === "abyss" ? "深渊压力已接入" : "标准远征已接入", selectedMode === "abyss" ? "danger" : "cyan");
   audio.event("start");
+  return true;
 }
 
 function pauseGame() {
@@ -2503,6 +2532,8 @@ function applySessionStats(stats) {
 
 function applySession(snapshot) {
   const nextMode = SESSION_TO_LEGACY_MODE[snapshot.mode];
+  renderJourneyStrip(snapshot);
+  syncModeControls(snapshot);
   if (!nextMode) return false;
   state.health = snapshot.hull;
   state.maxHealth = snapshot.maxHull;
@@ -2538,6 +2569,9 @@ function applySession(snapshot) {
 function renderMode(mode, previousMode, payload = {}) {
   dom.pauseButton.textContent = mode === "paused" ? "▶" : "Ⅱ";
   dom.pauseButton.style.visibility = ["menu", "gameover", "victory"].includes(mode) ? "hidden" : "visible";
+  const showModeSelection = ["menu", "briefing", "victory", "defeat"].includes(session.getMode());
+  dom.modeSelection.hidden = !showModeSelection;
+  dom.modeExplanation.hidden = !showModeSelection;
   if (mode === "playing") {
     closeDialogs({ restoreFocus: previousMode !== "menu" || payload.newRun });
     queueMicrotask(focusGameplaySurface);
@@ -2550,12 +2584,25 @@ function renderMode(mode, previousMode, payload = {}) {
     return;
   }
   if (mode === "menu") {
+    const campaignState = session.snapshot();
+    const standardContinue = campaignState.mode === "briefing" && campaignState.runMode === "standard"
+      && campaignState.stats.roomsCompleted > 0;
+    const abyssRestart = campaignState.mode === "briefing" && campaignState.runMode === "abyss";
+    const nodeComplete = campaignState.mode === "chapterComplete";
+    const chapter = CAMPAIGN_CHAPTERS[campaignState.chapterIndex] ?? CAMPAIGN_CHAPTERS[0];
     showOverlay(
-      "ARCADE SURVIVAL // THREE.JS",
+      standardContinue ? "STANDARD CHECKPOINT // CHAPTER ENTRY" : abyssRestart ? "ABYSS // FULL RESTART" : nodeComplete ? "NODE CLEAR // ROUTE OPEN" : "NO-AIM ROGUELITE // FOUR CHAPTERS",
       "NEON<br /><em>TIDE</em>",
-      `在失控的数字海域中收集光核，为潮汐光矛充能并躲开追猎信号。<br />坚持 ${GAME.bossStart} 秒定位深潮主脑，并在 ${GAME.bossWindow} 秒内将其摧毁。`,
-      "进入潮汐"
+      standardContinue
+        ? `标准远征检查点位于<strong>${chapter.label}</strong>入口；构筑、船体与章节奖励已经保留。`
+        : abyssRestart
+          ? "深渊模式不提供中途继续；本次将从幽光深渊第一节点重新开始。"
+          : nodeComplete
+            ? `当前任务已完成，下一条航线位于<strong>${chapter.label}</strong>。自动武器将在进入节点后继续锁定威胁。`
+            : "移动、相位冲刺、满能释放自动选线光矛。突破四个画风与机制完全不同的章节；不需要瞄准，也没有主动射击键。",
+      standardContinue ? `从${chapter.shortLabel}继续` : abyssRestart ? "重新坠入深渊" : nodeComplete ? "进入下一节点" : "开始远征"
     );
+    syncModeControls(campaignState);
   } else if (mode === "paused") {
     showOverlay(
       "SIGNAL HOLD // PAUSED",
@@ -4906,15 +4953,51 @@ function updateLaserHUD() {
   dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
 }
 
-function renderJourneyStrip() {
-  const items = REALMS.map((realm) => {
+function renderJourneyStrip(snapshot = session.snapshot()) {
+  const routeIndex = Number.isInteger(snapshot.route?.roomIndex) ? snapshot.route.roomIndex : 0;
+  const renderKey = `${snapshot.runMode ?? "none"}:${snapshot.route?.kind ?? "none"}:${routeIndex}:${snapshot.mode}`;
+  if (renderKey === journeyRenderKey) return false;
+  journeyRenderKey = renderKey;
+  let chapterStart = 0;
+  const items = CAMPAIGN_CHAPTERS.map((chapter) => {
+    const nodeCount = chapter.normalRoomCount + 1;
+    const chapterEnd = chapterStart + nodeCount;
     const item = document.createElement("li");
-    item.dataset.realm = realm.id;
-    const name = realm.id.replaceAll("-", " ").toUpperCase();
-    item.innerHTML = `<span>${String(realm.index + 1).padStart(2, "0")}</span><strong>${name}</strong><small>${realm.start}–${realm.end} 秒</small>`;
+    item.dataset.realm = chapter.id;
+    const stateName = snapshot.runMode && routeIndex >= chapterEnd
+      ? "completed"
+      : snapshot.runMode && routeIndex >= chapterStart && routeIndex < chapterEnd
+        ? "current"
+        : "upcoming";
+    item.dataset.state = stateName;
+    if (stateName === "current") item.setAttribute("aria-current", "step");
+    const activeLocalIndex = Math.max(0, Math.min(nodeCount - 1, routeIndex - chapterStart));
+    const nodes = Array.from({ length: nodeCount }, (_, index) => {
+      const classes = [index === nodeCount - 1 ? "boss" : ""];
+      if (stateName === "completed" || (stateName === "current" && index < activeLocalIndex)) classes.push("done");
+      if (stateName === "current" && index === activeLocalIndex) classes.push("current");
+      return `<i class="${classes.filter(Boolean).join(" ")}" aria-hidden="true"></i>`;
+    }).join("");
+    item.innerHTML = `<span>${String(chapter.index + 1).padStart(2, "0")}</span><strong>${chapter.label}</strong><small>${chapter.normalRoomCount} 任务 + ${chapter.bossLabel}</small><span class="chapter-nodes">${nodes}</span>`;
+    chapterStart = chapterEnd;
     return item;
   });
   dom.journeyStrip.replaceChildren(...items);
+  return true;
+}
+
+function syncModeControls(snapshot = session.snapshot()) {
+  if (!["menu", "briefing", "chapterComplete", "victory", "defeat"].includes(snapshot.mode)) return false;
+  const activeMode = snapshot.mode === "briefing" && snapshot.runMode
+    ? snapshot.runMode
+    : runModePreference?.load?.() ?? "standard";
+  for (const input of dom.modeInputs) input.checked = input.value === activeMode;
+  const isStandardCheckpoint = snapshot.mode === "briefing" && snapshot.runMode === "standard"
+    && snapshot.stats.roomsCompleted > 0;
+  dom.modeExplanation.textContent = isStandardCheckpoint
+    ? `检测到第 ${snapshot.chapterIndex + 1} 章入口检查点；保持标准远征即可继续，也可改选深渊并从头开始。`
+    : "模式偏好会保留，但游戏只会在你按下出航后开始。";
+  return true;
 }
 
 function updateHUD(dt) {
@@ -5177,6 +5260,11 @@ function setupInput() {
   });
   bindInputListener(window, "pagehide", () => {
     if (state.mode === "playing") pauseGame();
+  });
+  bindInputListener(dom.modeSelection, "change", (event) => {
+    const input = event.target.closest('input[name="run-mode"]');
+    if (!input) return;
+    runModePreference?.save?.(input.value);
   });
   bindInputListener(dom.primaryButton, "click", () => {
     audio.unlock();
@@ -5735,8 +5823,9 @@ function start() {
   updateBounds();
   refreshRenderQuality();
   resetState();
-  applySession(session.snapshot());
-  renderMode("menu", null);
+  const initialSnapshot = session.snapshot();
+  applySession(initialSnapshot);
+  renderMode(SESSION_TO_LEGACY_MODE[initialSnapshot.mode] ?? "menu", null);
   window.addEventListener("resize", resize);
   reducedMotionPreference?.addEventListener?.("change", onReducedMotionChange);
   return true;
@@ -5751,10 +5840,12 @@ function render(alpha) {
 function reset(snapshot = session.snapshot()) {
   if (disposed) return false;
   resetState();
+  journeyRenderKey = null;
   simulationSteps = 0;
   renderCalls = 0;
   lastSimulationSeconds = 0;
   applySession(snapshot);
+  renderMode(SESSION_TO_LEGACY_MODE[snapshot.mode] ?? "menu", null);
   return true;
 }
 

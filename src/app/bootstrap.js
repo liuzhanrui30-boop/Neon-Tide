@@ -5,7 +5,8 @@ import { createFixedLoop } from '../game/fixed-loop.js';
 import { createGameSession } from '../game/session.js';
 import { selectRenderQuality } from '../game/render-quality.js';
 import { createEntityRenderer } from '../render/entity-renderer.js';
-import { createRunSave } from '../persistence/run-save.js';
+import { createRunModePreference, createRunSave } from '../persistence/run-save.js';
+import { CAMPAIGN_CHAPTERS, getChapterContentLoadState, loadChapterContent } from '../content/realms.js';
 import { createLegacyRuntime } from './legacy-runtime.js';
 import { createInputSystem } from '../systems/input-system.js';
 import { createHudObjectiveViewModel, createHudRenderer } from '../render/hud-renderer.js';
@@ -29,7 +30,18 @@ function getBrowserStorage() {
 
 export function bootstrapNeonTide(options = {}) {
   const events = createEventQueue(256);
-  const runSave = createRunSave(options.storage ?? getBrowserStorage());
+  const storage = options.storage ?? getBrowserStorage();
+  const runSave = createRunSave(storage);
+  const runModePreference = createRunModePreference(storage);
+  const chapterContentErrors = new Map();
+  function ensureChapterContent(chapterIndex) {
+    const chapter = CAMPAIGN_CHAPTERS[chapterIndex];
+    if (!chapter || chapter.index === 0) return Promise.resolve(chapter ?? null);
+    return loadChapterContent(chapter.id).catch((error) => {
+      chapterContentErrors.set(chapter.id, error instanceof Error ? error.message : String(error));
+      return null;
+    });
+  }
   const coarsePointer = options.coarsePointer
     ?? (globalThis.matchMedia?.('(pointer: coarse)').matches ?? false);
   const entityQuality = options.entityQuality ?? selectRenderQuality({
@@ -47,6 +59,7 @@ export function bootstrapNeonTide(options = {}) {
   const searchParams = new URLSearchParams(globalThis.location?.search ?? '');
   const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
   const compatibilityTestMode = import.meta.env.DEV && searchParams.has('compatibility-test');
+  const campaignRouting = import.meta.env.PROD || searchParams.has('campaign-test');
   const requestedCampaignSeed = Number(searchParams.get('objective-seed'));
   const campaignSeed = import.meta.env.DEV && Number.isFinite(requestedCampaignSeed)
     ? requestedCampaignSeed
@@ -105,6 +118,12 @@ export function bootstrapNeonTide(options = {}) {
   const presentationEvents = createPresentationEventConsumer({
     capacity: 64,
     onEvent(event) {
+      const transitionChapter = event.type === 'session:transition'
+        ? event.payload?.current?.chapterIndex
+        : null;
+      if (event.payload?.current?.route?.kind === 'campaign' && transitionChapter > 0) {
+        ensureChapterContent(transitionChapter);
+      }
       objectiveBridge.consume(event);
       runtime?.consumePresentationEvent?.(event);
     },
@@ -119,6 +138,9 @@ export function bootstrapNeonTide(options = {}) {
     objectiveAuthority,
     onChange({ previous, current, detail }) {
       const nowMs = performance.now();
+      if (current.route?.kind === 'campaign' && current.chapterIndex > 0) {
+        ensureChapterContent(current.chapterIndex);
+      }
       const startsNewAttempt = current.mode === 'briefing'
         && (detail?.checkpointRestored
           || (detail?.runMode && ['menu', 'victory', 'defeat'].includes(previous.mode)));
@@ -148,7 +170,8 @@ export function bootstrapNeonTide(options = {}) {
       }
       if (current.mode === 'paused') loop?.pause(nowMs);
       else if (previous.mode === 'paused') loop?.resume(nowMs);
-      else if (current.mode === 'chapterComplete' && previous.mode === 'playing') {
+      else if (current.mode === 'chapterComplete' && previous.mode === 'playing'
+        && current.route?.kind !== 'campaign') {
         // The compatibility campaign immediately starts the next authoritative
         // room after its checkpoint commit. Keep the legacy projection alive
         // during that synchronous handoff rather than suspending/restarting
@@ -162,7 +185,6 @@ export function bootstrapNeonTide(options = {}) {
         // Preserve the inherited defeat dialog until the player explicitly
         // continues a Standard checkpoint. `startGame()` performs the runtime
         // reset immediately before it opens the restored room.
-        if (current.runMode === 'standard' && detail?.checkpointRestored) return;
         runtime?.reset(current);
         return;
       } else if (current.mode === 'briefing' && ['menu', 'victory'].includes(previous.mode)) loop?.reset(nowMs);
@@ -269,7 +291,9 @@ export function bootstrapNeonTide(options = {}) {
     hudRenderer,
     entityRenderer,
     compatibilityCampaign: compatibilityTestMode,
+    campaignRouting,
     campaignSeed,
+    runModePreference,
   });
   runtime.start();
   loop.reset(performance.now());
@@ -302,6 +326,10 @@ export function bootstrapNeonTide(options = {}) {
       }),
       hud: hudRenderer.getDebugSnapshot(),
       persistence: runSave.getStatus(),
+      campaignContent: Object.freeze({
+        loads: getChapterContentLoadState(),
+        errors: Object.freeze(Object.fromEntries(chapterContentErrors)),
+      }),
       disposed,
     });
   }
@@ -328,6 +356,8 @@ export function bootstrapNeonTide(options = {}) {
     loop,
     events,
     runSave,
+    runModePreference,
+    ensureChapterContent,
     world,
     entityRenderer,
     inputSystem,

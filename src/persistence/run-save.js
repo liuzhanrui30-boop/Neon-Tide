@@ -16,6 +16,7 @@ import { serializeUpgradeBuild } from '../systems/upgrade-system.js';
 
 const CURRENT_VERSION = 2;
 const DEFAULT_KEY = 'neon-tide:v3:checkpoint';
+const MODE_PREFERENCE_KEY = 'neon-tide:v3:mode-preference';
 const V1_CHECKPOINT_KEYS = new Set(['version', 'mode', 'seed', 'chapterIndex', 'build', 'hull', 'stats', 'savedAt']);
 const V2_CHECKPOINT_KEYS = new Set([...V1_CHECKPOINT_KEYS, 'route']);
 
@@ -153,6 +154,35 @@ export function migrateV1Checkpoint(value) {
   return isRunCheckpoint(migrated) ? migrated : null;
 }
 
+
+export function createRunModePreference(storage, key = MODE_PREFERENCE_KEY) {
+  const usable = storage
+    && typeof storage.getItem === 'function'
+    && typeof storage.setItem === 'function';
+
+  function load() {
+    if (!usable) return 'standard';
+    try {
+      const value = storage.getItem(key);
+      return value === 'abyss' ? 'abyss' : 'standard';
+    } catch {
+      return 'standard';
+    }
+  }
+
+  function save(mode) {
+    if (!['standard', 'abyss'].includes(mode) || !usable) return false;
+    try {
+      storage.setItem(key, mode);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  return Object.freeze({ load, save, key });
+}
+
 /**
  * Small, versioned boundary around browser storage. The game owns checkpoint
  * timing; this module only validates and atomically serializes a checkpoint.
@@ -277,4 +307,8 @@ export function createRunSave(storage, key = DEFAULT_KEY) {
   return Object.freeze({ save, load, clear, getStatus });
 }
 
-export { CURRENT_VERSION as RUN_SAVE_VERSION, DEFAULT_KEY as RUN_SAVE_KEY };
+export {
+  CURRENT_VERSION as RUN_SAVE_VERSION,
+  DEFAULT_KEY as RUN_SAVE_KEY,
+  MODE_PREFERENCE_KEY as RUN_MODE_PREFERENCE_KEY,
+};
