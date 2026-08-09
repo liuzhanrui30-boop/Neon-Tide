@@ -11,6 +11,7 @@ await withPage('production-release-probe', { appUrl: APP_URL }, async (page) => 
     disposed: false,
   });
   assert.equal(await page.evaluate(`'campaignTest' in globalThis.__NEON_TIDE_V3__`), false);
+  assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
   const resources = await page.evaluate(`performance.getEntriesByType('resource').map((entry)=>entry.name)`);
   assert.ok(resources.some((url) => url.includes('runtime-legacy-')));
   assert.ok(resources.some((url) => url.includes('gameplay-core-')));

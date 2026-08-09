@@ -618,7 +618,11 @@ async function briefingAndLaserUiScenario() {
     assert.deepEqual(briefing.liveRegions, ['polite','polite','polite']);
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
     await page.pressKey('Tab', 'Tab');
-    assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
+    assert.deepEqual(await page.evaluate(`({
+      tag:document.activeElement?.tagName,
+      type:document.activeElement?.type,
+      value:document.activeElement?.value,
+    })`), { tag:'INPUT',type:'radio',value:'standard' });
     await page.pressKey('Tab', 'Tab', { modifiers: 8 });
     assert.equal(await page.evaluate('document.activeElement?.id'), 'primary-button');
   });
@@ -848,7 +852,7 @@ async function chargedLightLanceScenario() {
     assert.deepEqual(shot.upgradeCleanup, { mode:'upgrade', energy:42, state:'idle', visible:false });
     assert.equal(shot.pauseCleanup.mode, 'paused');
     assert.deepEqual(shot.pauseCleanup.after, shot.pauseCleanup.before, 'pause cleared an active light lance');
-    assert.deepEqual(shot.terminalCleanup, { mode:'gameover', state:'idle', visible:false });
+    assert.deepEqual(shot.terminalCleanup, { mode:'menu', state:'idle', visible:false });
     await page.click('#primary-button');
     await page.waitForPage(`!document.querySelector('#overlay').classList.contains('visible')`);
     const restart = await page.gameEvaluate(`return {
@@ -2837,18 +2841,18 @@ async function victoryScenario() {
       laserVisible:settled.laserVisible,environmentVisuals:settled.environmentVisuals,
     }, { enemies:0,projectiles:0,hazards:0,laserVisible:false,environmentVisuals:0 });
     await page.waitForPage(`document.querySelector('#overlay').classList.contains('visible')`);
-    // The terminal dialog has one action. Tabbing must deterministically enter
-    // and remain inside that trap even if the browser deferred auto-focus.
+    // The terminal dialog keeps the two mode choices and its primary action
+    // inside one deterministic trap, even if the browser deferred auto-focus.
     const firstTab=await page.gameEvaluate(`
       const event=new KeyboardEvent('keydown',{key:'Tab',code:'Tab',bubbles:true,cancelable:true});
-      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.id)};
+      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.value||element.id)};
     `);
-    assert.deepEqual(firstTab, { trapped:true,dialog:true,focusable:['primary-button'] });
+    assert.deepEqual(firstTab, { trapped:true,dialog:true,focusable:['standard','abyss','primary-button'] });
     const secondTab=await page.gameEvaluate(`
       const event=new KeyboardEvent('keydown',{key:'Tab',code:'Tab',bubbles:true,cancelable:true});
-      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.id)};
+      return {trapped:trapDialogFocus(event),dialog:activeDialog===dom.overlay,focusable:getDialogFocusable(dom.overlay).map((element)=>element.value||element.id)};
     `);
-    assert.deepEqual(secondTab, { trapped:true,dialog:true,focusable:['primary-button'] });
+    assert.deepEqual(secondTab, { trapped:true,dialog:true,focusable:['standard','abyss','primary-button'] });
     const copy = await page.evaluate(`({kicker:document.querySelector('#overlay-kicker').textContent,copy:document.querySelector('#overlay-copy').textContent})`);
     assert.match(copy.kicker, /SIGNAL CLEAR/);
     assert.match(copy.copy, /深潮主脑已被摧毁/);

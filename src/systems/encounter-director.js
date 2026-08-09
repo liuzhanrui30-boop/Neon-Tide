@@ -1,6 +1,8 @@
 import { getEncounterTemplate, getThreatBudget } from '../content/encounters.js';
 import {
+  commitObjectiveShift,
   completeObjectiveForDeterministicTest,
+  createObjectiveShiftPlan,
   createObjective,
   getObjectiveSnapshot,
   updateObjective,
@@ -12,6 +14,9 @@ import {
   estimateCampaignObjectiveSeconds,
   tuneCampaignObjectiveTemplate,
 } from '../game/campaign-pacing.js';
+import { getAbyssRoomDefinition } from '../content/chapters/abyss.js';
+import { ABYSS_MAW } from '../content/bosses/abyss-maw.js';
+import { createBossSystem } from './boss-system.js';
 
 
 const THREAT_LIMITS = Object.freeze({
@@ -384,12 +389,15 @@ export function createEncounterDirector({
   let antiOrbitDirector = createAntiOrbitDirector({ seed });
   let threatRandom = createThreatRandom(seed);
   let bossContract = null;
+  let abyssRoomDefinition = null;
+  let bossSystem = null;
+  let bossWorld = null;
   const runtimeThreatLimits = getThreatLimits({ mode, quality });
   const enemySystem = createEnemySystem({
     random: () => threatRandom(),
     enemyCap: runtimeThreatLimits.activeEnemyCap,
     projectileCap: runtimeThreatLimits.projectileCap,
-    warningCap: runtimeThreatLimits.simultaneousWarningCap,
+    warningCap: () => abyssRoomDefinition?.warningCap ?? runtimeThreatLimits.simultaneousWarningCap,
     speedMultiplier: pressureContract.enemySpeed,
     telegraphFloorSeconds: () => bossContract?.telegraphFloorSeconds
       ?? pressureContract.telegraphFloorSeconds,
@@ -410,6 +418,9 @@ export function createEncounterDirector({
   let bossCurrentVariantIndex = null;
   let bossAttacksSelected = 0;
   const bossVariantsSeen = new Set();
+  let chapterBeatIndex = 0;
+  let chapterRouteChangesCommitted = 0;
+  const chapterRolesIntroduced = new Set();
 
   function bossRecoverySeconds() {
     return pressureContract.waveIntervalSeconds * (bossContract?.recoveryMultiplier ?? 1);
@@ -417,14 +428,17 @@ export function createEncounterDirector({
 
   function bossBehaviorSnapshot() {
     if (!bossContract) return null;
-    return Object.freeze({
+    const generic = {
       recoverySeconds: bossRecoverySeconds(),
       variantCount: bossContract.variantCount,
       currentVariantIndex: bossCurrentVariantIndex,
       variantsSeen: Object.freeze([...bossVariantsSeen]),
       attacksSelected: bossAttacksSelected,
       telegraphFloorSeconds: bossContract.telegraphFloorSeconds,
-    });
+    };
+    return bossSystem
+      ? Object.freeze({ ...generic, ...bossSystem.getSnapshot() })
+      : Object.freeze(generic);
   }
   if (objectiveAuthority) {
     Object.defineProperty(objectiveAuthority, 'visit', {
@@ -465,6 +479,14 @@ export function createEncounterDirector({
         timing: timingContract ? cloneFrozen(timingContract) : null,
         boss: bossContract ? cloneFrozen(bossContract) : null,
         bossBehavior: bossBehaviorSnapshot(),
+        chapterPacing: abyssRoomDefinition ? Object.freeze({
+          chapterId: 'abyss',
+          roomId: abyssRoomDefinition.id,
+          warningCap: abyssRoomDefinition.warningCap,
+          nextBeatIndex: chapterBeatIndex,
+          routeChangesCommitted: chapterRouteChangesCommitted,
+          rolesIntroduced: Object.freeze([...chapterRolesIntroduced]),
+        }) : null,
         threatState: Object.freeze({
           chapterIndex, waveIndex, wavesSelected, wavesSpawned, enemiesDestroyed,
           roomElapsed, untouchedSeconds, rolesSeen: Object.freeze([...rolesSeen]),
@@ -491,7 +513,20 @@ export function createEncounterDirector({
     if (!template) throw new TypeError('startRoom requires a known encounter template');
     const currentIndex = roomIndex;
     const selectedRoomSeed = roomSeed(seed, currentIndex, template.id);
-    objective = createObjective(template, selectedRoomSeed);
+    abyssRoomDefinition = context?.campaign?.chapterId === 'abyss'
+      && context?.timing?.kind !== 'boss'
+      ? getAbyssRoomDefinition(template.id)
+      : null;
+    const startsAbyssBoss = context?.campaign?.chapterId === 'abyss'
+      && context?.timing?.kind === 'boss'
+      && context?.boss?.id === ABYSS_MAW.id;
+    bossSystem = startsAbyssBoss ? createBossSystem({ seed: selectedRoomSeed, mode }) : null;
+    objective = bossSystem
+      ? bossSystem.start(ABYSS_MAW, {
+        targetDurationSeconds: (authoredTargetDurationSeconds ?? 100) * durationScale,
+      })
+      : createObjective(template, selectedRoomSeed);
+    bossWorld = null;
     antiOrbitDirector = createAntiOrbitDirector({ seed: selectedRoomSeed });
     threatRandom = createThreatRandom(selectedRoomSeed);
     chapterIndex = Math.max(0, Math.trunc(finite(context.chapterIndex, context.chapter ?? currentIndex)));
@@ -500,6 +535,10 @@ export function createEncounterDirector({
     untouchedSeconds = 0;
     lastHull = null;
     objectiveTargetsSpawned = false;
+    chapterBeatIndex = 0;
+    chapterRouteChangesCommitted = 0;
+    chapterRolesIntroduced.clear();
+    for (const role of abyssRoomDefinition?.inheritedRoles ?? []) chapterRolesIntroduced.add(role);
     lastWave = null;
     const baseThreatBudget = getThreatBudget(template, {
       mode: usesCampaignPressure ? 'standard' : mode,
@@ -540,6 +579,71 @@ export function createEncounterDirector({
     return getSnapshot();
   }
 
+  function spawnAbyssIntroduction(world, beat, events) {
+    if (!ENEMY_ROLES[beat.role]) return 0;
+    const count = Math.max(1, Math.min(8, Math.trunc(finite(beat.count, 1))));
+    const roles = Array.from({ length: count }, () => beat.role);
+    const ids = enemySystem.spawnWave(world, roles, { arena: objective.arena, events });
+    if (ids.length > 0) {
+      chapterRolesIntroduced.add(beat.role);
+      ids.forEach((id) => {
+        const role = world.get(id)?.role;
+        if (role) rolesSeen.add(role);
+      });
+      emit(events, 'chapter:enemy-introduced', {
+        chapterId: 'abyss', roomId: abyssRoomDefinition.id, role: beat.role, count: ids.length,
+      });
+    }
+    return ids.length;
+  }
+
+  function commitAbyssRouteChange(world, beat, events) {
+    const plan = createObjectiveShiftPlan(objective, {
+      pathNodes: 7,
+      variant: chapterRouteChangesCommitted,
+    });
+    const shifted = plan ? commitObjectiveShift(objective, plan) : false;
+    chapterRouteChangesCommitted += 1;
+    // Purge has no shiftable target, so materialize a harmless current/gate
+    // pair. It is still real pooled world geometry and is removed with the room.
+    if (!shifted && world?.spawn) {
+      const direction = chapterRouteChangesCommitted % 2 ? 1 : -1;
+      for (let index = 0; index < 2; index += 1) world.spawn('enemyHazard', {
+        x: direction * (3.6 + index * 1.5),
+        y: (index ? -1 : 1) * 2.2,
+        radius: 0.7,
+        scaleX: 2.4,
+        scaleY: 0.5,
+        team: 2,
+        ownerKind: 'chapter',
+        attackKind: 'abyss-route-current',
+        state: 'route-change',
+        contactDamaging: false,
+        collidable: false,
+        opacity: 0.64,
+        color: 0x13d9ce,
+      });
+    }
+    emit(events, 'chapter:route-changed', {
+      chapterId: 'abyss', roomId: abyssRoomDefinition.id, route: beat.route,
+      shifted, routeChangesCommitted: chapterRouteChangesCommitted,
+      destination: plan?.destination ?? null,
+    });
+  }
+
+  function applyAbyssChapterBeats(context, events) {
+    if (!abyssRoomDefinition || !context.world) return;
+    const beats = abyssRoomDefinition.beats;
+    while (chapterBeatIndex < beats.length && beats[chapterBeatIndex].at <= roomElapsed + 1e-9) {
+      const beat = beats[chapterBeatIndex++];
+      if (beat.kind === 'enemy-introduction') spawnAbyssIntroduction(context.world, beat, events);
+      else if (beat.kind === 'route-change') commitAbyssRouteChange(context.world, beat, events);
+      else emit(events, 'chapter:beat', {
+        chapterId: 'abyss', roomId: abyssRoomDefinition.id, ...beat,
+      });
+    }
+  }
+
   function spawnObjectiveTargets(world, events) {
     if (objectiveTargetsSpawned || !world?.spawn || objective?.type !== 'elite-hunt') return 0;
     objectiveTargetsSpawned = true;
@@ -561,6 +665,7 @@ export function createEncounterDirector({
     if (!world?.query || !player || objective?.status !== 'active') return null;
     spawnObjectiveTargets(world, events);
     roomElapsed += dt;
+    applyAbyssChapterBeats(context, events);
     const hull = finite(player.hp ?? player.hull, 1);
     const maxHull = Math.max(1, finite(player.maxHp ?? player.maxHull, hull));
     if (lastHull === null || hull >= lastHull - 1e-9) untouchedSeconds += dt;
@@ -578,13 +683,38 @@ export function createEncounterDirector({
       count: bossContract.variantCount,
     } : null;
     const selectionWaveIndex = bossVariant ? waveIndex + bossVariant.index * 2 : waveIndex;
-    const wave = selectThreatWave({
+    let wave = selectThreatWave({
       mode, quality, chapter: chapterIndex, waveIndex: selectionWaveIndex, ...scanned,
       objectiveBurden: objectiveBurdenFor(objective),
       playerHealthRatio: hull / maxHull,
       clearRate: roomElapsed > 0 ? enemiesDestroyed / roomElapsed : 0,
       untouchedSeconds, totalBudget: threatBudget?.total ?? 30,
     }, threatRandom);
+    if (abyssRoomDefinition) {
+      const reservedIntroductions = abyssRoomDefinition.beats
+        .slice(chapterBeatIndex)
+        .filter(({ kind }) => kind === 'enemy-introduction')
+        .reduce((sum, beat) => sum + Math.max(1, Math.trunc(finite(beat.count, 1))), 0);
+      const tutorialSlots = Math.max(
+        0,
+        abyssRoomDefinition.activeEnemyCap - reservedIntroductions - scanned.activeEnemies,
+      );
+      const admissionCharges = wave.admissionCharges
+        .filter(({ role }) => chapterRolesIntroduced.has(role))
+        .slice(0, tutorialSlots);
+      const roles = admissionCharges.map(({ role }) => role);
+      wave = Object.freeze({
+        ...wave,
+        roles: Object.freeze(roles),
+        admissionCharges: Object.freeze(admissionCharges),
+        cost: admissionCharges.reduce((sum, charge) => sum + charge.chargedCost, 0),
+        projectileCost: admissionCharges.reduce((sum, charge) => sum + ENEMY_ROLES[charge.role].projectileCost, 0),
+        blockedAreaCost: admissionCharges.reduce((sum, charge) => sum + ENEMY_ROLES[charge.role].blockedAreaCost, 0),
+        highDamageWarnings: admissionCharges.reduce((sum, charge) => (
+          sum + (ENEMY_ROLES[charge.role].highDamage ? 1 : 0)
+        ), 0),
+      });
+    }
     waveIndex += 1;
     wavesSelected += 1;
     const materializedRoles = [];
@@ -642,10 +772,20 @@ export function createEncounterDirector({
     const previousProgressBucket = Math.floor((objective?.progressRatio ?? 0) * 20);
     let enteredDraining = false;
     if (phase === 'active') {
-      updateObjective(objective, context.world ?? null, context.player ?? null, dt, events);
+      if (bossSystem) {
+        bossWorld = context.world ?? bossWorld;
+        bossSystem.update({
+          world: context.world,
+          player: context.player,
+          damageRecords: context.damageRecords ?? [],
+          applyPlayerForce: context.applyPlayerForce,
+        }, dt, events);
+      } else updateObjective(objective, context.world ?? null, context.player ?? null, dt, events);
       if (objective.status === 'active') {
-        antiOrbitDirector.update({ player: context.player ?? null, objective }, dt, events);
-        selectAndSpawnThreat(context, Math.max(0, finite(dt)), events);
+        if (!bossSystem) {
+          antiOrbitDirector.update({ player: context.player ?? null, objective }, dt, events);
+          selectAndSpawnThreat(context, Math.max(0, finite(dt)), events);
+        }
       } else {
         antiOrbitDirector.reset({ seed: objective.seed, objectiveId: objective.id });
         if (objective.antiOrbit) objective.antiOrbit.activeCounter = null;
@@ -654,12 +794,22 @@ export function createEncounterDirector({
         phase = 'draining';
         enteredDraining = true;
         combatFrozen = true;
-        if (context.world) enemySystem.cleanup(context.world);
+        const cleanupWorld = context.world ?? bossWorld;
+        if (cleanupWorld) {
+          enemySystem.cleanup(cleanupWorld);
+          cleanupChapterEntities(cleanupWorld);
+          bossSystem?.cleanup(cleanupWorld, events, 'victory');
+        }
         emit(events, 'encounter:combat-frozen', { templateId, objective: getObjectiveSnapshot(objective) });
       } else if (objective.status === 'failed') {
         phase = 'failed';
         combatFrozen = true;
-        if (context.world) enemySystem.cleanup(context.world);
+        const cleanupWorld = context.world ?? bossWorld;
+        if (cleanupWorld) {
+          enemySystem.cleanup(cleanupWorld);
+          cleanupChapterEntities(cleanupWorld);
+          bossSystem?.cleanup(cleanupWorld, events, objective.failureReason ?? 'failed');
+        }
         emit(events, 'encounter:failed', { templateId, objective: getObjectiveSnapshot(objective) });
       }
     }
@@ -681,13 +831,29 @@ export function createEncounterDirector({
     });
   }
 
+  function cleanupChapterEntities(world) {
+    if (!world?.query) return 0;
+    let removed = 0;
+    for (const kind of ['enemyHazard', 'warning']) {
+      const ids = [];
+      const query = world.query(kind);
+      for (let index = 0; index < query.length; index += 1) {
+        const entity = world.get(query.at(index));
+        if (entity?.ownerKind === 'chapter') ids.push(entity.id);
+      }
+      for (const id of ids) if (world.despawn(id)) removed += 1;
+    }
+    return removed;
+  }
+
   function completeRoom() {
     if (phase !== 'complete' || completionAcknowledged) return false;
     completionAcknowledged = true;
     return true;
   }
 
-  function reset() {
+  function reset(events = null) {
+    bossSystem?.cleanup(bossWorld, events, 'reset');
     roomIndex = initialRoomIndex;
     phase = 'idle';
     objective = null;
@@ -695,6 +861,9 @@ export function createEncounterDirector({
     threatBudget = null;
     timingContract = null;
     bossContract = null;
+    bossSystem = null;
+    bossWorld = null;
+    abyssRoomDefinition = null;
     bossCurrentVariantIndex = null;
     bossAttacksSelected = 0;
     bossVariantsSeen.clear();
@@ -716,6 +885,9 @@ export function createEncounterDirector({
     objectiveTargetsSpawned = false;
     rolesSeen.clear();
     lastWave = null;
+    chapterBeatIndex = 0;
+    chapterRouteChangesCommitted = 0;
+    chapterRolesIntroduced.clear();
     updateRevision += 1;
     return getSnapshot();
   }

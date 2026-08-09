@@ -728,3 +728,10 @@ export function getObjectiveSnapshot(objective) {
   }
   return Object.freeze(snapshot);
 }
+
+// Boss objectives are projections owned and mutated by BossSystem. Keeping the
+// discriminator here lets HUD, tests, and future objective bridges consume the
+// same snapshot contract without giving ObjectiveSystem a second Boss writer.
+export function isBossObjective(objective) {
+  return Boolean(objective && objective.type === 'boss' && typeof objective.bossId === 'string');
+}

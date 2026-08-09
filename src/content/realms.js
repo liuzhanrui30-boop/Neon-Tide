@@ -1,3 +1,5 @@
+import { ABYSS_CHAPTER } from './chapters/abyss.js';
+
 function deepFreeze(value) {
   if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const entry of Object.values(value)) deepFreeze(entry);
@@ -6,11 +8,16 @@ function deepFreeze(value) {
 
 const chapters = [
   {
-    id: 'abyss', index: 0, label: '幽光深渊', shortLabel: '深渊', cssTheme: 'abyss',
-    normalRoomCount: 3, bossId: 'abyss-maw', bossLabel: '深渊巨口', targetDurationSeconds: 285,
+    id: ABYSS_CHAPTER.id, index: 0, label: ABYSS_CHAPTER.label, shortLabel: '深渊', cssTheme: 'abyss',
+    normalRoomCount: ABYSS_CHAPTER.rooms.length,
+    bossId: ABYSS_CHAPTER.boss.id,
+    bossLabel: ABYSS_CHAPTER.boss.label,
+    targetDurationSeconds: ABYSS_CHAPTER.rooms.reduce((sum, room) => sum + room.targetDurationSeconds, 0)
+      + ABYSS_CHAPTER.boss.targetDurationSeconds,
     palette: ['#07172f', '#13d9ce', '#7df6ff', '#d9ff61', '#ffc857'],
-    objectiveTemplates: ['purge-tide', 'moving-sanctum', 'anchor-break'],
-    roomDurations: [58, 62, 65], bossDuration: 100,
+    objectiveTemplates: ABYSS_CHAPTER.rooms.map(({ objectiveTemplate }) => objectiveTemplate),
+    roomDurations: ABYSS_CHAPTER.rooms.map(({ targetDurationSeconds }) => targetDurationSeconds),
+    bossDuration: ABYSS_CHAPTER.boss.targetDurationSeconds,
     landmarks: ['珊瑚峡谷', '沉没舰骸', '远海巨眼'],
   },
   {

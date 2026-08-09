@@ -16,6 +16,7 @@ import { v3AntiOrbitScenarios } from './browser/v3-anti-orbit.mjs';
 import { v3EnemyScenarios } from './browser/v3-enemies.mjs';
 import { v3UpgradeScenarios } from './browser/v3-upgrades.mjs';
 import { v3CampaignScenarios } from './browser/v3-campaign.mjs';
+import { v3AbyssScenarios } from './browser/v3-abyss.mjs';
 
 const browserScenarios = [
   ...v3FoundationScenarios,
@@ -26,6 +27,7 @@ const browserScenarios = [
   ...v3EnemyScenarios,
   ...v3UpgradeScenarios,
   ...v3CampaignScenarios,
+  ...v3AbyssScenarios,
   ...v22RegressionScenarios,
 ];
 const selectedScenarios = BROWSER_MATRIX_SCENARIO

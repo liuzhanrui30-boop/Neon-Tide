@@ -339,6 +339,7 @@ export function createGameSession(options = {}) {
     state.stats = cloneValue(checkpoint.stats);
     state.terminalReason = null;
     campaignCompletionGrant = null;
+    encounterDirector.reset(events);
     encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: checkpoint.seed, roomIndex: checkpoint.stats.roomsStarted,
       durationScale: encounterDurationScale,
@@ -366,7 +367,17 @@ export function createGameSession(options = {}) {
   }
 
   function applyDefeatRule() {
-    if (state.runMode === 'standard') return restoreCheckpoint();
+    if (state.runMode === 'standard') {
+      if (restoreCheckpoint()) return true;
+      // Chapter zero intentionally has no persistent checkpoint. Its legal
+      // entry state is the selected starter with no chapter-earned upgrades,
+      // so Standard retries reconstruct that exact entry instead of inventing
+      // a midpoint save or leaving the player stranded on Defeat.
+      if (state.route?.kind === 'campaign' && state.chapterIndex === 0) {
+        return startRun('standard', state.seed);
+      }
+      return false;
+    }
     if (state.runMode === 'abyss') return restartAbyssAfterDefeat();
     return false;
   }
@@ -396,6 +407,7 @@ export function createGameSession(options = {}) {
     state.stats = createStats();
     state.terminalReason = null;
     campaignCompletionGrant = null;
+    encounterDirector.reset(events);
     encounterDirector = createDirector({
       mode: runMode, quality: encounterQuality, seed, durationScale: encounterDurationScale,
       pressure: state.route.kind === 'campaign' ? activeCampaign.pressure : null,
@@ -427,7 +439,8 @@ export function createGameSession(options = {}) {
         : legacyAuthored
           ? 'authored'
           : null;
-    if (requestKind !== state.route?.kind) {
+    const authoredCompatibilityHandoff = requestKind === 'compatibility' && state.route?.kind === 'authored';
+    if (requestKind !== state.route?.kind && !authoredCompatibilityHandoff) {
       throw new TypeError(`room request type does not match authoritative ${state.route?.kind ?? 'missing'} route`);
     }
     let campaignNode = null;
@@ -488,6 +501,13 @@ export function createGameSession(options = {}) {
       chapterIndex: encounterChapterIndex,
       timing,
       boss,
+      campaign: campaignNode ? {
+        chapterId: campaignNode.chapterId,
+        nodeId: campaignNode.id,
+        roomIndex: campaignNode.roomIndex,
+        routeIndex: campaignNode.routeIndex,
+        kind: campaignNode.kind,
+      } : null,
     });
     campaignCompletionGrant = null;
     state.route = campaignRequest
@@ -859,6 +879,7 @@ export function createGameSession(options = {}) {
     buildRevision += 1;
     activeCampaign = createCampaign(0, 'standard');
     campaignCompletionGrant = null;
+    encounterDirector.reset(events);
     encounterDirector = createDirector({
       mode: 'standard', quality: encounterQuality, seed: 0, durationScale: encounterDurationScale,
     });

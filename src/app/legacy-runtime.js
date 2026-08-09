@@ -2599,7 +2599,7 @@ function renderMode(mode, previousMode, payload = {}) {
           ? "深渊模式不提供中途继续；本次将从幽光深渊第一节点重新开始。"
           : nodeComplete
             ? `当前任务已完成，下一条航线位于<strong>${chapter.label}</strong>。自动武器将在进入节点后继续锁定威胁。`
-            : "移动、相位冲刺、满能释放自动选线光矛。突破四个画风与机制完全不同的章节；不需要瞄准，也没有主动射击键。",
+            : "移动、相位冲刺、满能释放自动选线潮汐光矛。先坚持 100 秒突破幽光深渊，再穿越四个画风与机制完全不同的章节；不需要瞄准，也没有主动射击键。",
       standardContinue ? `从${chapter.shortLabel}继续` : abyssRestart ? "重新坠入深渊" : nodeComplete ? "进入下一节点" : "开始远征"
     );
     syncModeControls(campaignState);
@@ -5694,6 +5694,16 @@ function consumePresentationEvent(event) {
   return true;
 }
 
+function applyExternalForce(x, y) {
+  const forceX = Number(x);
+  const forceY = Number(y);
+  if (!Number.isFinite(forceX) || !Number.isFinite(forceY)) return false;
+  player.velocity.x += forceX;
+  player.velocity.y += forceY;
+  player.velocity.clampLength(0, BASE_MAX_SPEED * getBuildStats().moveSpeedMultiplier * 1.35);
+  return true;
+}
+
 function resize() {
   renderer.setSize(window.innerWidth, window.innerHeight);
   refreshRenderQuality();
@@ -5931,6 +5941,7 @@ return Object.freeze({
   applySession,
   syncCombatWorld,
   applyCombatSummary,
+  applyExternalForce,
   consumePresentationEvent,
   reset,
   dispose,

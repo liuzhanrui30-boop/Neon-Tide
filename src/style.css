@@ -1810,6 +1810,7 @@ kbd {
   }
 
   .briefing-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 4px;
     margin-bottom: 14px;
   }
@@ -1873,8 +1874,8 @@ kbd {
   }
 
   .laser-button {
-    right: max(98px, calc(env(safe-area-inset-right) + 98px));
-    bottom: max(114px, calc(env(safe-area-inset-bottom) + 114px));
+    right: max(116px, calc(env(safe-area-inset-right) + 116px));
+    bottom: max(30px, calc(env(safe-area-inset-bottom) + 30px));
     width: 66px;
     height: 66px;
   }
