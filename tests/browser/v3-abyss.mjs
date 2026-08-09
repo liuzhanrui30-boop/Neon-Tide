@@ -43,6 +43,10 @@ async function holdAxisUntil(page, axis, target, start, tolerance) {
           const id=app.world.query('player').at(0);
           const player=id?app.world.get(id):null;
           const mode=app.session.getMode();
+          if(mode==='upgrade'){
+            resolve({x:player?.x??0,y:player?.y??0,mode,frames:app.getDebugSnapshot().encounter.elapsed});
+            return;
+          }
           if(!player||mode!=='playing'){
             reject(new Error('movement interrupted in '+mode));
             return;
@@ -75,9 +79,11 @@ async function driveTo(page, targetX, targetY, { tolerance = 0.42 } = {}) {
   if (Math.abs(targetX - player.x) > tolerance) {
     player = await holdAxisUntil(page, 'x', targetX, player.x, tolerance);
   }
+  if (player.mode === 'upgrade') return player;
   if (Math.abs(targetY - player.y) > tolerance) {
     player = await holdAxisUntil(page, 'y', targetY, player.y, tolerance);
   }
+  if (player.mode === 'upgrade') return player;
 
   if (Math.hypot(targetX - player.x, targetY - player.y) <= tolerance * 2.8) return player;
   throw new Error(`keyboard route failed to reach ${targetX},${targetY}: ${JSON.stringify(player)}`);
@@ -147,7 +153,12 @@ async function completeOrdinaryNode(page) {
   const mode = await page.evaluate(`globalThis.__NEON_TIDE_V3__.session.getMode()`);
   if (mode === 'upgrade') {
     await page.waitForPage(`!document.querySelector('#upgrade-panel').hidden&&Boolean(document.querySelector('#upgrade-options .upgrade-option'))`);
-    await page.trustedClick('#upgrade-options .upgrade-option');
+    const upgradeId = await page.evaluate(`(()=>{
+      const cards=globalThis.__NEON_TIDE_V3__.session.snapshot().build.pendingOffer.cards;
+      const preferred=['repair-swarm','phase-overclock','pulse-echo','prism-core','overclock','ion-drive'];
+      return preferred.find((id)=>cards.includes(id))??cards[0];
+    })()`);
+    await page.trustedClick(`#upgrade-options .upgrade-option[data-upgrade-id="${upgradeId}"]`);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='playing'`);
   } else if (mode === 'chapterComplete') {
     await page.trustedClick('#primary-button');
@@ -195,6 +206,50 @@ async function performNaturalRouteBreaks(page) {
   await driveTo(page, shiftedCenter.x, shiftedCenter.y, { tolerance: 0.3 });
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.parts.organs.every((organ)=>organ.weakPoint&&!organ.invulnerable)`, 4000);
   return snapshot(page);
+}
+
+async function repairHull(page) {
+  return page.evaluate(`(()=>{
+    const session=globalThis.__NEON_TIDE_V3__.session;
+    const before={hull:session.getHull(),maxHull:session.getMaxHull(),mode:session.getMode()};
+    const applied=session.upgradeHullCapacity(session.getMaxHull(),{repair:session.getMaxHull()});
+    return {before,applied,after:{hull:session.getHull(),maxHull:session.getMaxHull(),mode:session.getMode()}};
+  })()`);
+}
+
+async function fightMawWithEvasion(page, center, target, timeoutMs = 30000) {
+  const repair = await repairHull(page);
+  assert.equal(repair.before.mode, 'playing', JSON.stringify(repair));
+  assert.equal(repair.applied, true, JSON.stringify(repair));
+  assert.equal(repair.after.hull, repair.after.maxHull, JSON.stringify(repair));
+  const waypoints = [
+    [center.x - 2.8, center.y - 1.9],
+    [center.x + 2.8, center.y - 1.9],
+    [center.x + 2.8, center.y + 1.9],
+    [center.x - 2.8, center.y + 1.9],
+  ];
+  const deadline = Date.now() + timeoutMs;
+  let index = 0;
+  while (Date.now() < deadline) {
+    const current = await snapshot(page);
+    if (target === 'upgrade' ? current.session.mode === 'upgrade' : current.encounter.bossBehavior.phase === target) {
+      return current;
+    }
+    if (current.session.mode !== 'playing') {
+      throw new Error(`Maw fight left playing before ${target}: ${JSON.stringify({
+        mode: current.session.mode,
+        hull: current.session.hull,
+        phase: current.encounter.bossBehavior?.phase,
+        damageTaken: current.session.stats.damageTaken,
+      })}`);
+    }
+    await page.pressKey(' ', 'Space');
+    const [x, y] = waypoints[index % waypoints.length];
+    const moved = await driveTo(page, x, y, { tolerance: 0.48 });
+    if (moved.mode === 'upgrade' && target === 'upgrade') return snapshot(page);
+    index += 1;
+  }
+  throw new Error(`Maw fight timed out before ${target}`);
 }
 
 export const v3AbyssScenarios = [
@@ -281,14 +336,10 @@ export const v3AbyssScenarios = [
       assert.ok(beforeLance.player.facing.x * aim.directionX + beforeLance.player.facing.y * aim.directionY < 0.8,
         'authoritative Boss aim differs from unrelated player facing');
       await page.waitForPage(`(globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.damageByWeapon['tide-lance']??0)>0`, 6000);
-      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='enraged'`, 30000);
-      const enraged = await snapshot(page);
+      const enraged = await fightMawWithEvasion(page, center, 'enraged');
       assert.equal(enraged.encounter.bossBehavior.destroyedOrgans, 3);
       assert.ok(enraged.encounter.bossBehavior.damageByWeapon['pulse-cannon'] > 0);
-      await driveTo(page, enraged.encounter.bossBehavior.arenaCenter.x, enraged.encounter.bossBehavior.arenaCenter.y);
-      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`, 30000);
-
-      const victory = await snapshot(page);
+      const victory = await fightMawWithEvasion(page, enraged.encounter.bossBehavior.arenaCenter, 'upgrade');
       assert.equal(victory.session.route.roomIndex, 4);
       assert.equal(victory.session.stats.roomsCompleted, 4);
       assert.equal(victory.world.pools.bossPart.count, 0);

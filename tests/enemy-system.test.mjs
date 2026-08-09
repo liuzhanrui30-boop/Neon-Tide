@@ -16,6 +16,7 @@ import {
   predictHunterTarget,
   selectInterceptorCut,
 } from '../src/systems/enemy-system.js';
+import { createWeaponSystem } from '../src/systems/weapon-system.js';
 
 const STEP = 1 / 60;
 
@@ -350,11 +351,44 @@ test('Bulwark armor accepts one dash/Tide Lance counter token per attack and giv
   const first = setup.world.get(id);
   assert.equal(first.state, 'counter-telegraph');
   assert.equal(first.counterToken, 7);
+  assert.equal(first.hp, 6);
+  assert.equal(first.armored, false);
+  assert.equal(first.weakPoint, true);
   assert.ok(first.telegraphTimer >= getEnemyRole('bulwark').telegraphSeconds - STEP - 1e-9);
   const hpAfterFirst = first.hp;
   system.update(setup.world, setup.player(), null, STEP, setup.events);
   assert.equal(setup.world.get(id).hp, hpAfterFirst);
   assert.ok(entities(setup.world, 'warning').some(({ ownerId, opacity }) => ownerId === id && opacity > 0));
+});
+
+test('Bulwark Tide Lance armor break delegates the only HP write to CollisionSystem', () => {
+  const setup = fixture();
+  setup.world.write(setup.playerId, {
+    x: 0, y: 0, previousX: 0, previousY: 0, vx: 0, vy: 0,
+    attackKind: 'tide-lance', sequence: 41, directionX: 1, directionY: 0,
+  });
+  const enemySystem = createEnemySystem({ random: () => 0.5 });
+  const weaponSystem = createWeaponSystem();
+  const collisionSystem = createCollisionSystem();
+  const id = enemySystem.spawnRole(setup.world, 'bulwark', { x: 3, y: 0, hp: 20, maxHp: 20 });
+
+  enemySystem.update(setup.world, setup.player(), null, STEP, setup.events);
+  const broken = setup.world.get(id);
+  assert.equal(broken.hp, 20);
+  assert.equal(broken.armored, false);
+  assert.equal(broken.weakPoint, true);
+  assert.equal(broken.state, 'counter-telegraph');
+
+  weaponSystem.update(setup.world, setup.playerId, STEP, setup.events, {});
+  const summary = collisionSystem.resolve(setup.world, { damageHull() {} }, STEP, setup.events, {});
+  const records = summary.damageRecords.filter((record) => record.targetId === id);
+  assert.equal(records.length, 1, JSON.stringify(summary.damageRecords));
+  assert.equal(records[0].weaponId, 'tide-lance');
+  assert.equal(records[0].hpBefore, 20);
+  assert.equal(records[0].hpAfter, 16.8);
+  assert.equal(setup.world.get(id).hp, 16.8);
+  assert.equal(setup.world.get(id).armored, false);
+  assert.equal(setup.world.get(id).weakPoint, true);
 });
 
 test('Bulwark ignores fresh dash and Tide Lance tokens until the current counter wave resolves', () => {

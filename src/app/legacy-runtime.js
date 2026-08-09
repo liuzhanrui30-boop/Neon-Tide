@@ -442,6 +442,11 @@ const combatBridge = {
   suppressedFeedback: 0,
   pendingFeedback: null,
   consumedWeaponEvents: 0,
+  tideLanceDamageRecords: 0,
+  tideLanceAudioCues: 0,
+  tideLanceFeedbackEvents: 0,
+  lastTideLanceDamageRecords: Object.freeze([]),
+  lastTideLanceFeedbackText: null,
   entityWorld: null,
   lanceAim: null,
 };
@@ -2270,6 +2275,11 @@ function resetState() {
   combatBridge.suppressedFeedback = 0;
   combatBridge.pendingFeedback = null;
   combatBridge.consumedWeaponEvents = 0;
+  combatBridge.tideLanceDamageRecords = 0;
+  combatBridge.tideLanceAudioCues = 0;
+  combatBridge.tideLanceFeedbackEvents = 0;
+  combatBridge.lastTideLanceDamageRecords = Object.freeze([]);
+  combatBridge.lastTideLanceFeedbackText = null;
   combatBridge.entityWorld = null;
   combatBridge.lanceAim = null;
   state.stats.projectilePeak = 0;
@@ -5460,6 +5470,8 @@ function syncCombatWorld(entityWorld) {
 
   for (const enemy of enemies) {
     if (!enemy || enemy.dead || enemy.pendingLaserDeath) continue;
+    const v3Role = String(ENEMY_TYPES[enemy.type]?.role ?? enemy.type).toLowerCase();
+    const v3Bulwark = v3Role === 'bulwark';
     let entityId = enemy.v3EntityId;
     if (!entityId || !entityWorld.readInto(entityId, combatBridge.readTarget)) {
       entityId = entityWorld.spawn("enemy", {
@@ -5471,13 +5483,22 @@ function syncCombatWorld(entityWorld) {
         team: 2,
         flags: ENTITY_FLAG_HIDDEN,
         sourceId: enemy.sourceId,
-        role: enemy.type,
+        role: v3Role,
         type: enemy.type,
+        state: v3Bulwark ? 'chase' : enemy.state,
+        armored: v3Bulwark,
+        weakPoint: false,
         collidable: true,
       });
       enemy.v3EntityId = entityId ?? 0;
     }
     if (!entityId) continue;
+    // The ECS EnemySystem owns Bulwark armor/counter state after the legacy
+    // visual actor has been mirrored. Do not overwrite that authoritative
+    // state on the next compatibility sync frame.
+    const v3BulwarkState = v3Bulwark
+      ? entityWorld.readInto(entityId, combatBridge.readTarget)
+      : null;
     entityWorld.write(entityId, {
       previousX: enemy.group.position.x,
       previousY: enemy.group.position.y,
@@ -5490,16 +5511,17 @@ function syncCombatWorld(entityWorld) {
       team: 2,
       flags: ENTITY_FLAG_HIDDEN,
       sourceId: enemy.sourceId,
-      role: enemy.type,
+      role: v3Role,
       type: enemy.type,
       threat: (ENEMY_TYPES[enemy.type]?.threatCost ?? 0) + (enemy.priority ?? 0),
-      executingTelegraph: isEnemyAttackExecuting(enemy),
-      weakPoint: enemy.type !== "boss" && Boolean(enemy.weakPoint),
+      executingTelegraph: v3BulwarkState?.executingTelegraph ?? isEnemyAttackExecuting(enemy),
+      weakPoint: v3BulwarkState?.weakPoint ?? (enemy.type !== "boss" && Boolean(enemy.weakPoint)),
+      armored: v3BulwarkState?.armored ?? false,
       collidable: true,
       contactDamaging: legacyBodyContactDamaging(enemy),
       contactRadius: enemy.type === "boss" ? 2.25 : enemy.radius,
       invulnerable: enemy.type === "boss" || Boolean(enemy.invulnerable),
-      state: enemy.state,
+      state: v3BulwarkState?.state ?? enemy.state,
     });
     combatBridge.enemiesById.set(entityId, enemy);
     combatBridge.enemiesBySourceId.set(enemy.sourceId, enemy);
@@ -5573,10 +5595,13 @@ function syncCombatWorld(entityWorld) {
 function applyCombatSummary(entityWorld, summary) {
   if (!summary || !Array.isArray(summary.damageRecords)) return false;
   let firstHitPosition = null;
+  let firstTideLancePosition = null;
   let destroyedThisStep = 0;
-  let tideLanceHits = 0;
+  let tideLanceDestroyedThisStep = 0;
+  const tideLanceRecords = [];
   for (const record of summary.damageRecords) {
-    if (record.weaponId === 'tide-lance') tideLanceHits += 1;
+    const tideLanceHit = record.weaponId === 'tide-lance';
+    if (tideLanceHit) tideLanceRecords.push(record);
     if (record.targetKind === "objective"
       && (record.targetId === combatBridge.objectiveEntityId
         || record.targetSourceId === combatBridge.objective?.sourceId)) {
@@ -5584,10 +5609,13 @@ function applyCombatSummary(entityWorld, summary) {
       objective.hp = Math.max(0, record.hpAfter);
       objective.dead = objective.hp <= 0;
       objective.completed = objective.dead;
-      firstHitPosition ??= new THREE.Vector2(objective.x, objective.y);
+      const hitPosition = new THREE.Vector2(objective.x, objective.y);
+      firstHitPosition ??= hitPosition;
+      if (tideLanceHit) firstTideLancePosition ??= hitPosition;
       if (objective.completed) {
         combatBridge.objectiveEntityId = 0;
         destroyedThisStep += 1;
+        if (tideLanceHit) tideLanceDestroyedThisStep += 1;
       }
       continue;
     }
@@ -5597,7 +5625,9 @@ function applyCombatSummary(entityWorld, summary) {
     if (!enemy || enemy.dead) continue;
     enemy.hp = Math.max(0, record.hpAfter);
     enemy.hitReactTimer = Math.max(runtimeFinite(enemy.hitReactTimer, 0), 0.12);
-    firstHitPosition ??= new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+    const hitPosition = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+    firstHitPosition ??= hitPosition;
+    if (tideLanceHit) firstTideLancePosition ??= hitPosition;
     if (enemy.type === "boss") {
       syncBossProgress(enemy);
       if (enemy.hp > 0) enterBossPhaseTwo(enemy);
@@ -5605,21 +5635,35 @@ function applyCombatSummary(entityWorld, summary) {
     if (record.destroyed || enemy.hp <= 0) {
       combatBridge.enemiesById.delete(record.targetId);
       combatBridge.bossPartsById.delete(record.targetId);
-      if (destroyEnemy(enemy, "v3Weapon")) destroyedThisStep += 1;
+      if (destroyEnemy(enemy, "v3Weapon")) {
+        destroyedThisStep += 1;
+        if (tideLanceHit) tideLanceDestroyedThisStep += 1;
+      }
     }
   }
   combatBridge.hits += summary.hits;
   combatBridge.damage += summary.damage;
   combatBridge.destroyed += destroyedThisStep;
-  combatBridge.pendingFeedback = firstHitPosition && summary.weaponHitEventEmitted
-    ? Object.freeze({ position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep })
+  const tideLanceHits = tideLanceRecords.length;
+  combatBridge.pendingFeedback = (firstTideLancePosition ?? firstHitPosition) && summary.weaponHitEventEmitted
+    ? Object.freeze(tideLanceHits > 0
+      ? {
+        kind: 'tide-lance',
+        position: firstTideLancePosition ?? firstHitPosition,
+        hits: tideLanceHits,
+        destroyed: tideLanceDestroyedThisStep,
+        sourceId: tideLanceRecords[0].sourceId,
+      }
+      : { kind: 'automatic', position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep })
     : null;
   if (tideLanceHits > 0) {
     const hitCap = deriveTideLanceSpec(getBuildStats()).hitCap;
     state.stats.laserHits += tideLanceHits;
     state.laserSequenceTargets = Math.min(hitCap, state.laserSequenceTargets + tideLanceHits);
     state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
-    laserAudio.onHits(tideLanceHits);
+    combatBridge.tideLanceDamageRecords += tideLanceHits;
+    combatBridge.lastTideLanceDamageRecords = Object.freeze([...tideLanceRecords]);
+    if (laserAudio.onHits(tideLanceHits)) combatBridge.tideLanceAudioCues += 1;
   }
   if (summary.perfectPhases > 0 && combatBridge.playerId) {
     const entityPlayer = entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget);
@@ -5678,20 +5722,27 @@ function consumePresentationEvent(event) {
   if (event.type !== "weaponHit" || !combatBridge.pendingFeedback) return true;
   const feedback = combatBridge.pendingFeedback;
   combatBridge.pendingFeedback = null;
-  if (state.elapsed + 1e-9 >= combatBridge.nextFeedbackAt) {
-    if (feedback.destroyed === 0) {
-      triggerFeedback("small", {
-        position: feedback.position,
-        color: paletteState.primary.getHex(),
-        particles: Math.min(8, 3 + feedback.hits),
-        speed: 2.5,
-        size: 0.65,
-        rippleScale: 0.62,
-        text: `AUTO ×${feedback.hits}`,
-        tone: "cyan",
-      });
+  const isTideLance = feedback.kind === 'tide-lance';
+  if (isTideLance || state.elapsed + 1e-9 >= combatBridge.nextFeedbackAt) {
+    const feedbackText = isTideLance ? `光矛贯穿 ×${feedback.hits}` : `AUTO ×${feedback.hits}`;
+    triggerFeedback("small", {
+      position: feedback.position,
+      color: isTideLance ? 0xe7ffff : paletteState.primary.getHex(),
+      particles: Math.min(10, 3 + feedback.hits),
+      speed: isTideLance ? 3.1 : 2.5,
+      size: isTideLance ? 0.78 : 0.65,
+      rippleScale: isTideLance ? 0.82 : 0.62,
+      text: feedbackText,
+      tone: "cyan",
+    });
+    // Tide Lance hit audio is owned by createLaserAudioEvents.onHits(), which
+    // deduplicates the cue per charged shot. Automatic weapons keep this path.
+    if (!isTideLance) {
+      audio.event(feedback.destroyed > 0 ? "break" : "laserHit", Math.min(1, 0.18 + feedback.hits * 0.08));
+    } else {
+      combatBridge.tideLanceFeedbackEvents += 1;
+      combatBridge.lastTideLanceFeedbackText = feedbackText;
     }
-    audio.event(feedback.destroyed > 0 ? "break" : "laserHit", Math.min(1, 0.18 + feedback.hits * 0.08));
     combatBridge.nextFeedbackAt = state.elapsed + V3_WEAPON_FEEDBACK_INTERVAL;
     combatBridge.feedbackEvents += 1;
   } else {
@@ -5953,6 +6004,11 @@ function getDebugSnapshot() {
       feedbackEvents: combatBridge.feedbackEvents,
       suppressedFeedback: combatBridge.suppressedFeedback,
       consumedWeaponEvents: combatBridge.consumedWeaponEvents,
+      tideLanceDamageRecords: combatBridge.tideLanceDamageRecords,
+      tideLanceAudioCues: combatBridge.tideLanceAudioCues,
+      tideLanceFeedbackEvents: combatBridge.tideLanceFeedbackEvents,
+      lastTideLanceDamageRecords: combatBridge.lastTideLanceDamageRecords,
+      lastTideLanceFeedbackText: combatBridge.lastTideLanceFeedbackText,
       damageAuthority: selectTideLanceDamageAuthority({ ecsCombatAuthority: Boolean(combatBridge.entityWorld) }),
     }),
   });

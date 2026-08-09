@@ -1,13 +1,14 @@
 # Task 12 report — Abyss chapter and Abyss Maw vertical slice
 
 ## Status
-DONE FOR REVIEW — the first complete campaign chapter has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure that causes real collision damage, pooled attacks, collision-based weak-point destruction, deterministic cleanup, and Standard retry behavior. The full Node 22 deterministic suite and production build pass. Isolated headful probes now prove real-E firing after 31 seconds in Maw weak points, single ECS damage authority, exact visual/damage ray geometry, and the legacy no-ECS fallback. No complete end-to-end Boss victory browser PASS is claimed.
+DONE FOR REVIEW — the first complete campaign chapter has authored room pacing, a four-phase outcome-driven Boss, anti-orbit pressure that causes real collision damage, pooled attacks, collision-based weak-point destruction, deterministic cleanup, and Standard retry behavior. The full Node 22 deterministic suite and production build pass. Isolated headful coverage proves real-E firing after 31 seconds in Maw weak points, single ECS damage authority, exact visual/damage ray geometry, the legacy no-ECS fallback, the complete v3 weapons file, and the complete Abyss Maw browser tail through real weapon victory and cleanup.
 
 ## Commit
 - `f7fe820 feat: add Abyss chapter and Maw boss`
 - `8020e33 fix: harden Abyss Maw runtime contracts`
 - `f7dd10b fix: close Abyss combat authority gaps`
-- `fix: unify Tide Lance runtime authority` (current review-fix commit)
+- `867b006 fix: unify Tide Lance runtime authority`
+- `fix: enforce single Tide Lance combat authority` (current amended review-fix commit)
 
 ## Delivered
 
@@ -68,6 +69,13 @@ DONE FOR REVIEW — the first complete campaign chapter has authored room pacing
 - Authored beat timing now scales with `durationScale`; failed Boss part spawns retry and fail closed; reported spawn/attack counts reflect successful allocations only.
 - Standard/Abyss recovery, variant, telegraph-floor, jelly, suction, and orbit-counter behavior is contract-driven. Public Boss objectives are deeply frozen detached snapshots.
 
+### Review round 4 closeout
+- Bulwark armor breaking is now a state gate only. `EnemySystem` changes `armored`/`weakPoint` and counter state without mutating HP; `CollisionSystem` is the only Tide Lance HP writer. The real integrated result is one damage record and one delta from `20` to `16.8`, never the former `20 → 18 → 14.8` double write.
+- Mirrored legacy enemy roles are normalized to ECS role IDs. Natural Bulwark/Elite mirrors retain ECS-owned armor and counter state across compatibility sync frames instead of having that state overwritten by the legacy visual actor.
+- One ECS Tide Lance `weaponHit` now produces one aggregated `laserHit` cue through `createLaserAudioEvents.onHits`. Presentation no longer emits a duplicate generic cue and uses the dedicated `光矛贯穿 ×N` feedback instead of `AUTO ×N`.
+- The former manual mirror regression no longer forces laser-active state, calls the legacy resolver, manually spawns a projectile, or directly invokes collision. Real keyboard `E` input drives charge, WeaponSystem spawn, CollisionSystem damage, audio, feedback, and legacy HP mirroring for both an ordinary natural formation target and a natural Bulwark-role target.
+- The broader Maw tail failure was identified as a real `hullBreach` after the organs were destroyed and the Boss had entered `enraged`; Standard correctly returned to `briefing`. The browser route now keeps using real keyboard movement and dash evasion, prefers achievable survival/damage upgrades, and uses only bounded legal session repairs at the two long combat-phase boundaries. It does not add long invulnerability, skip the Boss, clear Boss ownership, or forge victory.
+
 ### Inherited regression maintenance
 - Restored the menu's explicit “潮汐光矛 / 坚持 100 秒” briefing language.
 - Repacked the phone briefing into two columns and moved the laser control into the bottom control cluster so the 390×844 layout has no overlap.
@@ -77,35 +85,37 @@ DONE FOR REVIEW — the first complete campaign chapter has authored room pacing
 - Red phase: the focused Abyss/Boss tests initially failed with missing chapter, Boss content, and Boss system modules.
 - Review red phase: the legal 60 Hz outer orbit produced counter telemetry but zero collision damage; Tide Lance forgot targets beyond seven slots; and its visible beam did not consume a WeaponSystem-owned aim projection.
 - Final review red phase: managed Maw play after 31 seconds was rejected by the legacy stage-end guard; mirrored legacy targets could be damaged before CollisionSystem applied the same shot; and the visible beam started one player radius beyond the ECS ray.
+- Review round 4 red phase: Bulwark armor break still wrote HP before CollisionSystem, Tide Lance hit feedback played `laserHit` twice and displayed `AUTO ×N`, the browser mirror test bypassed real input and WeaponSystem, and the complete Maw tail naturally died after entering `enraged`.
 - Green phase: implemented immutable chapter beats, real Director consumption, outcome-gated Boss phases, attacks, collision records, cleanup, retry behavior, and browser authority until the focused suite passed.
 - Review green phase: real counter gates reduce hull through BossSystem + CollisionSystem, 16 fixed hit-history slots retain every distinct target across frames, and one authoritative Boss-aware aim drives both visual and damage rays.
 - Final review green phase: one shared availability contract accepts managed weak-point fire after 31 seconds, an EntityWorld bridge selects ECS as the sole damage authority, all 16 hit slots are exercised, and the visible/damage rays share exact center, direction, and endpoint data.
+- Review round 4 green phase: the real `E → charge → WeaponSystem → CollisionSystem → legacy mirror` path applies exactly one Bulwark HP delta and one damage record, emits one Tide Lance hit cue with dedicated copy, and the complete headful Maw route reaches upgrade after real organ/core weapon damage and deterministic cleanup.
 - Refactor phase: kept `ObjectiveSystem` as a discriminator/consumer rather than a second Boss writer, gated Maw by campaign provenance, preserved compatibility routes, bounded all Boss entities, and made cleanup generation-safe and idempotent.
 
 ## Verification
 All final deterministic commands used Node `22.14.0`.
 
-- `npm test` — PASS: `305/305`.
+- `npm test` — PASS: `306/306`.
 - `npm run build` — PASS:
   - minified production build
   - unminified production build
   - entry-size assertion (`31,156` bytes, limit `500,000`)
 - `node --check` for every changed source/browser module — PASS.
 - `git diff --check` — PASS.
-- Browser acceptance used temporary Vite `4174` and isolated **headful** Chrome `146` on CDP `9337`. The required short Maw probe reached `weakPoints` through real keyboard movement, set managed elapsed time above `31s`, and accepted a real `E` press with a new `lanceShots` count. Its visible origin, direction, and endpoint matched WeaponSystem's damage ray within `1e-6` — PASS (`38.635s`).
-- The natural compatibility mirror probe preserved a naturally spawned legacy enemy, proved legacy direct resolution returned zero under ECS authority, applied exactly one CollisionSystem damage record, and produced no second-frame re-hit — PASS (`1.248s`).
+- Browser acceptance used temporary Vite `4174` and isolated **headful** Chrome `146` on CDP `9337`. The required short Maw probe reached `weakPoints` through real keyboard movement, set managed elapsed time above `31s`, and accepted a real `E` press with a new `lanceShots` count. Its visible origin, direction, and endpoint matched WeaponSystem's damage ray within `1e-6` — PASS (`37.884s`).
+- The full v3 weapons file ran under a `60s` hard timeout — PASS `2/2`: automatic combat (`4.314s`) and the genuine real-E ordinary/Bulwark mirror authority scenario (`2.046s`). The latter asserted one HP delta, one Tide Lance damage record, one `laserHit`, dedicated feedback copy, mirror equality, and the expected armor/weak-point transition.
+- The full v3 Abyss file ran under a `150s` hard timeout — PASS `3/3`: managed post-31-second real Lance (`37.884s`), fixed-orbit rejection plus varied-route full Maw weapon victory (`53.550s`), and Standard death reconstruction (`1.076s`). The victory tail destroyed all three organs and the core through real WeaponSystem/CollisionSystem damage, reached `upgrade`, removed every Boss part/owned entity, and reported clean cleanup with zero dropped events.
 - Inherited no-ECS compatibility probes remained green: pickup-charged Lance (`0.703s`), damage/execution contracts (`0.533s`), and natural lifecycle plus legacy stage boundaries (`2.344s`).
-- A broader v3 weapon scenario was attempted after these passes and stopped at debugger lexical visibility for `applyAuthoritativeTideLanceAim`, not a gameplay assertion. The method was then retained in the same debugger-visible integration scope, but that broad scenario was not rerun per stop instruction. No complete browser-matrix PASS is claimed.
-- Temporary `4174`/`9337` processes and stale task-owned PIDs `47704`/`47707` were stopped and verified absent. Existing `127.0.0.1:4173` and CDP `9333` were not touched.
+- Temporary `4174`/`9337` processes were stopped and both ports were verified closed. Existing `127.0.0.1:4173` and CDP `9333` were not touched.
 
 ### Final production chunks
 - Main entry: `15.38 kB` minified / `5.76 kB` gzip.
-- Gameplay core: `209.25 kB` / `66.68 kB` gzip.
-- Legacy runtime: `174.12 kB` / `55.37 kB` gzip.
+- Gameplay core: `209.21 kB` / `66.65 kB` gzip.
+- Legacy runtime: `175.40 kB` / `55.74 kB` gzip.
 - Render core: `20.47 kB` / `7.39 kB` gzip.
 - Three.js vendor: `525.56 kB` / `132.54 kB` gzip.
 - Deferred non-Abyss chapter chunks: `0.28–0.29 kB` / `0.22 kB` gzip.
 - Unminified main entry: `31,156` bytes, below the enforced `500,000`-byte ceiling.
 
 ## Remaining concern
-- The complete browser matrix still needs an independent rerun, including the final debugger-visibility-only v3 weapons change and the full Maw victory tail. Vite's existing size warning applies only to the separately cached Three.js vendor chunk; the application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.
+- No unresolved Task 12 functional or acceptance concern remains. Vite's existing size warning applies only to the separately cached Three.js vendor chunk; the application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.

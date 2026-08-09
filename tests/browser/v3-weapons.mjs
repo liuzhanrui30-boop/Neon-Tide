@@ -1,7 +1,5 @@
 import assert from 'node:assert/strict';
-import { APP_URL, withPage } from './harness.mjs';
-
-const COMPATIBILITY_URL = new URL('?compatibility-test&objective-seed=1', APP_URL).href;
+import { withPage } from './harness.mjs';
 
 async function v3WeaponsScenario() {
   await withPage('v3-weapons-no-input', {}, async (page) => {
@@ -263,53 +261,149 @@ async function v3WeaponsScenario() {
 }
 
 async function v3TideLanceSingleAuthorityScenario() {
-  await withPage('v3-tide-lance-single-damage-authority', { appUrl: COMPATIBILITY_URL, reducedMotion: true }, async (page) => {
+  await withPage('v3-tide-lance-single-damage-authority', { reducedMotion: true }, async (page) => {
     await page.startGame();
-    await page.waitForGame(`return $enemies.some((enemy)=>enemy&&!enemy.dead&&enemy.type!=='boss')`, Boolean, 8000);
-    await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge.enemies>0`, 8000);
-    const probe = await page.gameEvaluate(`
-      const api=globalThis.__NEON_TIDE_V3__;
-      $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
-      const target=$enemies.find((enemy)=>enemy&&!enemy.dead&&enemy.type!=='boss');
-      for(let index=$enemies.length-1;index>=0;index-=1){if($enemies[index]!==target)removeEnemy(index);}
-      $player.position.set(0,0);$player.velocity.set(0,0);$player.facing.set(1,0);syncPlayerTransform();
-      target.group.position.set(3,0,2);target.hp=50;target.maxHp=50;target.dead=false;target.pendingLaserDeath=false;
-      setEnemyState(target,'recover',10,0);
-      for(const id of [...api.world.query('friendlyProjectile')])api.world.despawn(id);
-      syncCombatWorld(api.world);
-      const mirrorId=target.v3EntityId;
-      const mirrorBefore=api.world.get(mirrorId)?.hp;
-      $state.laserState='active';$state.laserElapsed=LASER_RULES.chargeDuration;
-      $state.laserSequence+=1;$state.laserSequenceTargets=0;$state.laserDirection.set(1,0);
-      const legacyBefore=target.hp;
-      const legacyResolved=resolveLaserHits();
-      const legacyAfterDirect=target.hp;
-      syncCombatWorld(api.world);
-      const projectile=api.world.spawn('friendlyProjectile',{
-        previousX:0,previousY:0,x:LASER_RULES.length,y:0,damage:3.2,radius:LASER_RULES.width/2,
-        team:1,collidable:true,piercing:true,pierceCount:15,hitBudgetRemaining:16,
-        type:'tide-lance',weaponId:'tide-lance',sequence:$state.laserSequence,
-      });
-      const first=api.collisionSystem.resolve(api.world,api.session,1/60,api.events,api.session.getBuildStats());
-      applyCombatSummary(api.world,first);
-      const second=api.collisionSystem.resolve(api.world,api.session,1/60,api.events,api.session.getBuildStats());
-      applyCombatSummary(api.world,second);
-      return {
-        sourceId:target.sourceId,mirrorId,projectile,legacyBefore,mirrorBefore,legacyResolved,legacyAfterDirect,
-        first:first.damageRecords,second:second.damageRecords,legacyAfter:target.hp,mirrorAfter:api.world.get(mirrorId)?.hp,
-        authority:api.getDebugSnapshot().legacy.combatBridge.damageAuthority,
-      };
-    `);
-    assert.ok(probe.sourceId > 0 && probe.mirrorId > 0, JSON.stringify(probe));
-    assert.equal(probe.authority, 'ecs');
-    assert.equal(probe.legacyResolved, 0);
-    assert.equal(probe.legacyAfterDirect, probe.legacyBefore);
-    assert.equal(probe.first.length, 1, JSON.stringify(probe));
-    assert.equal(probe.first[0].targetId, probe.mirrorId);
-    assert.equal(probe.first[0].weaponId, 'tide-lance');
-    assert.deepEqual(probe.second, []);
-    assert.ok(Math.abs((probe.legacyBefore - probe.legacyAfter) - probe.first[0].amount) < 1e-9, JSON.stringify(probe));
-    assert.equal(probe.legacyAfter, probe.mirrorAfter);
+    await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
+    page.requireDev('real input Tide Lance mirror pipeline');
+
+    async function prepareNaturalMirror({ bulwark = false } = {}) {
+      const source = await page.gameEvaluate(`
+        const api=globalThis.__NEON_TIDE_V3__;
+        clearWorldEntities();
+        for(const id of [...api.world.query('enemy')]) api.world.despawn(id);
+        for(const id of [...api.world.query('friendlyProjectile')]) api.world.despawn(id);
+        $state.enemySpawnTimer=Infinity;$state.formationTimer=Infinity;$state.shardSpawnTimer=Infinity;
+        $state.stageIndex=${bulwark ? 2 : 0};
+        $state.elapsed=${bulwark ? 64.4 : 4.4};
+        $state.lastFormation=null;$state.lastFormationAt=-Infinity;
+        $state.stats.formationCount=0;$state.stats.formationLog=[];
+        for(let attempt=0;attempt<${bulwark ? 32 : 1};attempt+=1){
+          spawnFormation();
+          if($enemies.some((enemy)=>${bulwark
+    ? `ENEMY_TYPES[enemy.type]?.role==='Bulwark'`
+    : `enemy.type!=='boss'&&enemy.type!=='bulwark'&&enemy.type!=='mine'`})) break;
+          for(let index=$enemies.length-1;index>=0;index-=1) removeEnemy(index);
+          $state.lastFormation=null;$state.lastFormationAt=-Infinity;
+        }
+        const target=$enemies.find((enemy)=>enemy&&!enemy.dead&&${bulwark
+    ? `ENEMY_TYPES[enemy.type]?.role==='Bulwark'`
+    : `enemy.type!=='boss'&&enemy.type!=='bulwark'&&enemy.type!=='mine'`});
+        if(!target) throw new Error('authored formation did not create ${bulwark ? 'Bulwark' : 'ordinary'} mirror target');
+        for(let index=$enemies.length-1;index>=0;index-=1){if($enemies[index]!==target)removeEnemy(index);}
+        const objective=combatBridge.objective;
+        let directionX=-(objective?.x??0),directionY=-(objective?.y??0);
+        const directionLength=Math.hypot(directionX,directionY);
+        if(directionLength<.01){directionX=1;directionY=0;}else{directionX/=directionLength;directionY/=directionLength;}
+        const playerX=directionX*2.35,playerY=directionY*2.35;
+        $player.position.set(playerX,playerY);$player.velocity.set(0,0);$player.facing.set(directionX,directionY);syncPlayerTransform();
+        target.group.position.set(playerX+directionX*3,playerY+directionY*3,2);
+        target.velocity.set(0,0);target.hp=20;target.maxHp=20;target.dead=false;target.pendingLaserDeath=false;
+        target.priority=100;target.weakPoint=${bulwark ? 'false' : 'true'};
+        setEnemyState(target,'recover',10,0);
+        $state.weaponEnergy=100;input.laserBuffer=0;$state.dashTimer=0;$state.dashInvulnTimer=0;
+        if(!globalThis.__V3_TIDE_AUDIO_ORIGINAL__){
+          globalThis.__V3_TIDE_AUDIO_ORIGINAL__=$audio.event.bind($audio);
+          $audio.event=(name,...args)=>{
+            const probe=globalThis.__V3_TIDE_AUDIO_PROBE__;
+            if(probe) probe[name]=(probe[name]??0)+1;
+            return globalThis.__V3_TIDE_AUDIO_ORIGINAL__(name,...args);
+          };
+        }
+        globalThis.__V3_TIDE_AUDIO_PROBE__={};
+        return {sourceId:target.sourceId,directionX,directionY,type:target.type};
+      `);
+      await page.waitForPage(`(()=>{
+        const api=globalThis.__NEON_TIDE_V3__;
+        return [...api.world.query('enemy')].map(id=>api.world.get(id))
+          .some((enemy)=>enemy?.sourceId===${source.sourceId});
+      })()`);
+      return page.evaluate(`(()=>{
+        const api=globalThis.__NEON_TIDE_V3__,world=api.world;
+        const targetId=[...world.query('enemy')].find(id=>world.get(id)?.sourceId===${source.sourceId});
+        const target=world.get(targetId);
+        for(const id of [...world.query('friendlyProjectile')]) world.despawn(id);
+        const decoy=world.spawn('enemy',{
+          x:target.x-${source.directionY}*12,y:target.y+${source.directionX}*12,
+          hp:10000,maxHp:10000,radius:.5,team:2,role:'audio-decoy',type:'audio-decoy',
+          threat:100,executingTelegraph:true,collidable:true,contactDamaging:false,
+          armored:true,weakPoint:false,
+        });
+        globalThis.__V3_TIDE_AUDIO_PROBE__={};
+        const debug=api.getDebugSnapshot();
+        return {source:${JSON.stringify(source)},targetId,decoy,target,
+          before:{weapons:debug.weapons.lanceShots,records:debug.legacy.combatBridge.tideLanceDamageRecords,
+            audio:debug.legacy.combatBridge.tideLanceAudioCues,feedback:debug.legacy.combatBridge.tideLanceFeedbackEvents,
+            hp:target.hp}};
+      })()`);
+    }
+
+    async function fireRealTideLance(probe) {
+      await page.dispatchKey('rawKeyDown', 'e', 'KeyE');
+      try {
+        await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().weapons.lanceShots>${probe.before.weapons}`, 3500);
+        await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge.tideLanceDamageRecords>${probe.before.records}`, 3500);
+      } finally {
+        await page.dispatchKey('keyUp', 'e', 'KeyE');
+      }
+      const result = await page.evaluate(`(()=>{
+        const api=globalThis.__NEON_TIDE_V3__,debug=api.getDebugSnapshot();
+        const target=api.world.get(${probe.targetId});
+        return {debug,target,audio:globalThis.__V3_TIDE_AUDIO_PROBE__};
+      })()`);
+      result.legacy = await page.gameEvaluate(`
+        const target=$enemies.find((enemy)=>enemy?.sourceId===${probe.source.sourceId});
+        return target?{hp:target.hp,dead:target.dead,type:target.type}:null;
+      `);
+      return result;
+    }
+
+    const ordinaryProbe = await prepareNaturalMirror();
+    assert.equal(ordinaryProbe.target.armored, false, JSON.stringify(ordinaryProbe));
+    const ordinary = await fireRealTideLance(ordinaryProbe);
+    const ordinaryBridge = ordinary.debug.legacy.combatBridge;
+    assert.equal(ordinaryBridge.damageAuthority, 'ecs');
+    assert.equal(ordinaryBridge.tideLanceDamageRecords - ordinaryProbe.before.records, 1, JSON.stringify(ordinary));
+    assert.equal(ordinaryBridge.tideLanceAudioCues - ordinaryProbe.before.audio, 1, JSON.stringify(ordinary));
+    assert.equal(ordinaryBridge.tideLanceFeedbackEvents - ordinaryProbe.before.feedback, 1, JSON.stringify(ordinary));
+    assert.equal(ordinary.audio.laserHit, 1, JSON.stringify(ordinary));
+    assert.match(ordinaryBridge.lastTideLanceFeedbackText, /^光矛贯穿 ×1$/);
+    assert.equal(ordinaryBridge.lastTideLanceDamageRecords.length, 1, JSON.stringify(ordinary));
+    const ordinaryRecord = ordinaryBridge.lastTideLanceDamageRecords[0];
+    assert.equal(ordinaryRecord.targetId, ordinaryProbe.targetId);
+    assert.equal(ordinaryRecord.weaponId, 'tide-lance');
+    assert.equal(ordinaryRecord.hpBefore, ordinaryProbe.before.hp);
+    assert.ok(Math.abs((ordinaryRecord.hpBefore - ordinaryRecord.hpAfter) - ordinaryRecord.amount) < 1e-9);
+    assert.equal(ordinary.target.hp, ordinaryRecord.hpAfter);
+    assert.equal(ordinary.legacy.hp, ordinaryRecord.hpAfter);
+
+    await page.waitForGame(`return $state.laserState==='idle'`, Boolean, 3000);
+    const bulwarkProbe = await prepareNaturalMirror({ bulwark: true });
+    assert.ok(['bulwark', 'elite'].includes(bulwarkProbe.source.type));
+    assert.equal(bulwarkProbe.target.hp, 20);
+    assert.equal(bulwarkProbe.target.armored, true, JSON.stringify(bulwarkProbe));
+    assert.equal(bulwarkProbe.target.weakPoint, false, JSON.stringify(bulwarkProbe));
+    const bulwark = await fireRealTideLance(bulwarkProbe);
+    const bulwarkBridge = bulwark.debug.legacy.combatBridge;
+    assert.equal(bulwarkBridge.tideLanceDamageRecords - bulwarkProbe.before.records, 1, JSON.stringify(bulwark));
+    assert.equal(bulwarkBridge.tideLanceAudioCues - bulwarkProbe.before.audio, 1, JSON.stringify(bulwark));
+    assert.equal(bulwarkBridge.tideLanceFeedbackEvents - bulwarkProbe.before.feedback, 1, JSON.stringify(bulwark));
+    assert.equal(bulwark.audio.laserHit, 1, JSON.stringify(bulwark));
+    assert.equal(bulwarkBridge.lastTideLanceDamageRecords.length, 1, JSON.stringify(bulwark));
+    const bulwarkRecord = bulwarkBridge.lastTideLanceDamageRecords[0];
+    assert.equal(bulwarkRecord.targetId, bulwarkProbe.targetId);
+    assert.equal(bulwarkRecord.hpBefore, 20);
+    assert.equal(bulwarkRecord.hpAfter, 16.8);
+    assert.equal(bulwarkRecord.amount, 3.2);
+    assert.equal(bulwark.target.hp, 16.8);
+    assert.equal(bulwark.legacy.hp, 16.8);
+    assert.equal(bulwark.target.armored, false, JSON.stringify(bulwark));
+    assert.equal(bulwark.target.weakPoint, true, JSON.stringify(bulwark));
+
+    const fallback = await page.evaluate(`(async()=>{
+      const {selectTideLanceDamageAuthority}=await import('/src/game/skill.js');
+      return selectTideLanceDamageAuthority({ecsCombatAuthority:false});
+    })()`);
+    assert.equal(fallback, 'legacy');
   });
 }
 
