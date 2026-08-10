@@ -26,6 +26,9 @@ export function createHudObjectiveViewModel(objective) {
     progress: Number.isFinite(progress) ? progress : 0,
     target: Number.isFinite(target) ? target : 0,
     progressRatio: clamp01(objective.progressRatio),
+    presentation: objective.presentation && typeof objective.presentation === 'object'
+      ? Object.freeze({ ...objective.presentation })
+      : null,
   });
   objectiveViewModels.add(viewModel);
   return viewModel;
@@ -146,19 +149,35 @@ export function createHudRenderer(options = {}) {
       const label = String(objective.label ?? objective.type ?? '当前任务');
       const progress = formatObjectiveUnit(objective.progress);
       const target = formatObjectiveUnit(objective.target);
-      const text = `${label} · ${progress} / ${target}`;
+      const prompt = String(objective.presentation?.prompt ?? '').trim();
+      const text = `${label} · ${progress} / ${target}${prompt ? ` · ${prompt}` : ''}`;
       if (missionObjective.textContent !== text) missionObjective.textContent = text;
       missionObjective.dataset.state = String(objective.status ?? 'active');
       missionObjective.setAttribute('aria-live', 'off');
-      const announcementKey = `${objective.status ?? 'active'}:${Math.floor(clamp01(objective.progressRatio) * 10)}`;
+      const announcementKey = `${objective.status ?? 'active'}:${Math.floor(clamp01(objective.progressRatio) * 10)}:${objective.presentation?.sequence ?? ''}:${objective.presentation?.routeRevision ?? ''}:${prompt}`;
       if (announcementKey !== lastObjectiveAnnouncementKey) {
-        const announcement = `当前任务：${label}；进度 ${progress} / ${target}`;
+        const announcement = `当前任务：${label}；进度 ${progress} / ${target}${prompt ? `；${prompt}` : ''}`;
         if (objectiveStatus) objectiveStatus.textContent = announcement;
         missionPanel?.setAttribute('aria-label', announcement);
         lastObjectiveAnnouncementKey = announcementKey;
       }
       missionPanel?.setAttribute('data-objective-type', String(objective.type ?? 'unknown'));
       missionPanel?.setAttribute('data-objective-state', String(objective.status ?? 'active'));
+      if (objective.presentation?.kind) {
+        missionPanel?.setAttribute('data-presentation-kind', String(objective.presentation.kind));
+        missionPanel?.setAttribute('data-presentation-sequence', String(objective.presentation.sequence ?? ''));
+        missionPanel?.setAttribute('data-presentation-shape', String(objective.presentation.shape ?? ''));
+        missionPanel?.setAttribute('data-presentation-radius-band', String(objective.presentation.radiusBand ?? ''));
+        missionPanel?.setAttribute('data-presentation-x-sign', String(objective.presentation.xSign ?? ''));
+        missionPanel?.setAttribute('data-presentation-y-sign', String(objective.presentation.ySign ?? ''));
+        missionPanel?.setAttribute('data-presentation-route-revision', String(objective.presentation.routeRevision ?? '0'));
+      } else {
+        for (const attribute of [
+          'data-presentation-kind', 'data-presentation-sequence', 'data-presentation-shape',
+          'data-presentation-radius-band', 'data-presentation-x-sign', 'data-presentation-y-sign',
+          'data-presentation-route-revision',
+        ]) missionPanel?.removeAttribute?.(attribute);
+      }
     }
     lastSnapshot = Object.freeze({ ...merged, dashCharges: Object.freeze(charges) });
     renders += 1;

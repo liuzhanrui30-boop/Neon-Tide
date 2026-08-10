@@ -25,6 +25,18 @@ const AUTO_TARGET_RANGE = 30;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
 const approachZero = (value) => Math.max(0, value);
 
+export function advanceDashCharges(charges, dt, {
+  cooldownDurationMultiplier = 1,
+  recoveryRateMultiplier = 1,
+} = {}) {
+  if (!Array.isArray(charges) || charges.length !== 2) throw new TypeError('dash charges must contain two values');
+  const seconds = Number(dt);
+  if (!Number.isFinite(seconds) || seconds < 0) throw new TypeError('dash recovery dt must be non-negative finite');
+  const duration = DASH_RECOVERY * clamp(Number(cooldownDurationMultiplier) || 1, 0.65, 1);
+  const rate = clamp(Number(recoveryRateMultiplier) || 1, 0.5, 1);
+  return charges.map((charge) => clamp(Number(charge) + (seconds * rate) / duration, 0, 1));
+}
+
 function vector(value, fallbackX = 0, fallbackY = 0) {
   return {
     x: Number.isFinite(value?.x) ? value.x : fallbackX,
@@ -143,7 +155,8 @@ function updateMovement(player, input, dt, buildStats = null) {
   const hasDirection = magnitude > 0.01;
 
   if (hasDirection) {
-    const steeringMultiplier = clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2);
+    const steeringMultiplier = clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2)
+      * clamp(Number(buildStats?.steeringRateMultiplier) || 1, 0.5, 1);
     const facingBlend = 1 - Math.exp(-TURN_ACCELERATION * 0.5 * steeringMultiplier * dt);
     player.facing.x += (requested.x - player.facing.x) * facingBlend;
     player.facing.y += (requested.y - player.facing.y) * facingBlend;
@@ -165,7 +178,10 @@ function updateMovement(player, input, dt, buildStats = null) {
     let steeringX = requested.x * speed - player.velocity.x;
     let steeringY = requested.y * speed - player.velocity.y;
     const steeringLength = Math.hypot(steeringX, steeringY);
-    const maxSteering = TURN_ACCELERATION * clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2) * dt;
+    const maxSteering = TURN_ACCELERATION
+      * clamp(Number(buildStats?.steeringMultiplier) || 1, 1, 1.2)
+      * clamp(Number(buildStats?.steeringRateMultiplier) || 1, 0.5, 1)
+      * dt;
     if (steeringLength > maxSteering) {
       steeringX = (steeringX / steeringLength) * maxSteering;
       steeringY = (steeringY / steeringLength) * maxSteering;
@@ -245,10 +261,10 @@ export function updatePlayerState(player, input, dt, events = null, buildStats =
   player.perfectPhaseWindow = approachZero(player.perfectPhaseWindow - dt);
   updateAutomaticPulse(player, dt, events, buildStats);
   player.autoFireRateBuffTimer = approachZero(player.autoFireRateBuffTimer - dt);
-  for (let index = 0; index < 2; index += 1) {
-    const recovery = DASH_RECOVERY * clamp(Number(buildStats?.dashRecoveryMultiplier) || 1, 0.65, 1);
-    player.dashCharges[index] = clamp(player.dashCharges[index] + dt / recovery, 0, 1);
-  }
+  player.dashCharges = advanceDashCharges(player.dashCharges, dt, {
+    cooldownDurationMultiplier: buildStats?.dashRecoveryMultiplier,
+    recoveryRateMultiplier: buildStats?.dashRecoveryRateMultiplier,
+  });
 
   startDash(player, input, events, buildStats);
   updateMovement(player, input, dt, buildStats);

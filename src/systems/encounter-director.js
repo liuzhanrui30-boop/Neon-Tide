@@ -1,9 +1,11 @@
 import { getEncounterTemplate, getThreatBudget } from '../content/encounters.js';
 import {
+  applyAuthoredChapterBeat,
   commitObjectiveShift,
   completeObjectiveForDeterministicTest,
   createObjectiveShiftPlan,
   createObjective,
+  getDataLaneEffect,
   getObjectiveSnapshot,
   updateObjective,
 } from './objective-system.js';
@@ -626,6 +628,27 @@ export function createEncounterDirector({
   }
 
   function commitChapterRouteChange(world, definition, chapterId, beat, events) {
+    if (chapterId === 'data-city') {
+      const applied = applyAuthoredChapterBeat(objective, beat);
+      chapterRouteChangesCommitted += 1;
+      if (applied && beat.kind === 'route-change' && objective.type === 'storm-corridor') {
+        const destination = objective.nextSafeZone ?? objective.safeZone;
+        world.spawn('warning', {
+          x: destination.x, y: destination.y, radius: destination.radius ?? objective.corridor.width,
+          scaleX: destination.radius ?? objective.corridor.width,
+          scaleY: destination.radius ?? objective.corridor.width,
+          duration: 0.9, lifetime: 0.9, age: 0, ownerKind: 'chapter', ownerId: objective.seed,
+          attackKind: 'data-city-route-change', state: 'telegraph', variant: 'corridor-gap',
+          contactDamaging: false, collidable: false, opacity: 0.86, color: 0x27e5ff,
+        });
+      }
+      emit(events, beat.kind === 'data-lane' ? 'chapter:data-lane' : 'chapter:route-changed', {
+        chapterId, roomId: definition.id, kind: beat.kind, route: beat.route ?? null,
+        lane: beat.lane ?? null, applied, routeChangesCommitted: chapterRouteChangesCommitted,
+        objectiveType: objective.type,
+      });
+      return applied;
+    }
     const plan = createObjectiveShiftPlan(objective, {
       pathNodes: 7,
       variant: chapterRouteChangesCommitted,
@@ -932,5 +955,11 @@ export function createEncounterDirector({
 
   return Object.freeze({
     startRoom, update, completeRoom, reset, getSnapshot,
+    getAuthoredDataLaneEffect: (environmentFrame, point) => getDataLaneEffect(
+      objective?.dataLane && environmentFrame?.type === 'data-lane'
+        ? { ...objective.dataLane, phase: environmentFrame.phase }
+        : environmentFrame,
+      point,
+    ),
   });
 }

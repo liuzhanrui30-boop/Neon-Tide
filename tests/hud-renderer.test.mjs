@@ -90,7 +90,7 @@ test('HUD stores and exposes only a detached immutable objective view model', ()
   const objective = renderer.getDebugSnapshot().lastSnapshot.objective;
   assert.notEqual(objective, authoritative);
   assert.equal(Object.isFrozen(objective), true);
-  assert.deepEqual(Object.keys(objective).sort(), ['label', 'progress', 'progressRatio', 'status', 'target', 'type']);
+  assert.deepEqual(Object.keys(objective).sort(), ['label', 'presentation', 'progress', 'progressRatio', 'status', 'target', 'type']);
   assert.equal('anchors' in objective, false);
   authoritative.progress = 2;
   authoritative.anchors[0].x = 999;

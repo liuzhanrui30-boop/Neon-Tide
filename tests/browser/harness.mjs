@@ -231,8 +231,11 @@ export class GamePage {
     // Browser scenarios share one Chrome profile. Keep v3 checkpoint state
     // scoped to each scenario's initial document while allowing a scenario to
     // verify its own reload/resume path below.
+    const initialCheckpoint = this.options.initialCheckpoint ?? null;
     const checkpointCleanup = await this.client.send('Page.addScriptToEvaluateOnNewDocument', {
-      source: `try { localStorage.removeItem('neon-tide:v3:checkpoint'); localStorage.removeItem('neon-tide:v3:mode-preference'); } catch {}`,
+      source: initialCheckpoint
+        ? `try { localStorage.setItem('neon-tide:v3:checkpoint', ${JSON.stringify(JSON.stringify(initialCheckpoint))}); localStorage.setItem('neon-tide:v3:mode-preference','standard'); } catch {}`
+        : `try { localStorage.removeItem('neon-tide:v3:checkpoint'); localStorage.removeItem('neon-tide:v3:mode-preference'); } catch {}`,
     });
     const loaded = this.client.waitFor('Page.loadEventFired');
     await this.client.send('Page.navigate', { url: this.options.appUrl ?? APP_URL });
@@ -286,7 +289,7 @@ export class GamePage {
       apiVersion: 1,
       runtimeReady: true,
       frameScheduled: true,
-      routeKind: null,
+      routeKind: this.options.expectedReleaseRouteKind ?? null,
       disposed: false,
     }, `${this.name}: stable production release probe is unavailable`);
     this.breakpointLocation = null;

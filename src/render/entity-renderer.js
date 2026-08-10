@@ -321,6 +321,9 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
   let maxSimultaneousWarningOwners = 0;
   let maxIndependentWarningProgress = 0;
   let maxHiddenActiveWarnings = 0;
+  let protocolFirewallMarkersRendered = 0;
+  let protocolRhythmEntitiesRendered = 0;
+  let protocolRhythmActiveRendered = 0;
 
   function previewSlot(ownerId, create = false) {
     for (let index = 0; index < previewOwners.length; index += 1) {
@@ -404,9 +407,12 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         : pool.kind === 'enemyHazard' ? hazardFootprint : entity.scaleY;
       const renderedScaleX = clampFinite(authoritativeScaleX, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
       const renderedScaleY = clampFinite(authoritativeScaleY, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize;
+      const protocolRhythm = entity.type === 'protocol-safe-cell';
+      const rhythmActive = protocolRhythm && entity.phase === entity.sequence;
+      const rhythmScale = protocolRhythm ? (rhythmActive ? 1.18 : 0.78) : 1;
       scratch.scale.set(
-        renderedScaleX,
-        renderedScaleY,
+        renderedScaleX * rhythmScale,
+        renderedScaleY * rhythmScale,
         clampFinite(entity.scaleZ, 0, RENDER_SCALE_LIMIT, 1) * scale * baseSize,
       );
       scratch.updateMatrix();
@@ -414,6 +420,11 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
       color.setHex(Number.isFinite(entity.color) ? entity.color : DEFAULT_COLORS[pool.kind]);
       setColorComponents(object.instanceColor.array, count * 3, color);
       if (pool.kind === 'enemy' && entity.role) observedEnemyRoles.add(entity.role);
+      if (entity.type === 'protocol-firewall-marker') protocolFirewallMarkersRendered += 1;
+      if (protocolRhythm) {
+        protocolRhythmEntitiesRendered += 1;
+        if (rhythmActive) protocolRhythmActiveRendered += 1;
+      }
       if (pool.kind === 'enemyHazard' && !orientedBox) {
         if (entity.type === 'lancer-beam-node') recordLancerNode(entity, renderedScaleX);
         if (entity.role === 'warden-gap') wardenGapRenderedRadius = Math.max(wardenGapRenderedRadius, renderedScaleX);
@@ -729,6 +740,9 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
     maxSimultaneousWarningOwners = 0;
     maxIndependentWarningProgress = 0;
     maxHiddenActiveWarnings = 0;
+    protocolFirewallMarkersRendered = 0;
+    protocolRhythmEntitiesRendered = 0;
+    protocolRhythmActiveRendered = 0;
     resets += 1;
     return true;
   }
@@ -803,6 +817,9 @@ export function createEntityRenderer({ scene, quality = { tier: 'desktop' }, cap
         maxSimultaneousWarningOwners,
         maxIndependentWarningProgress,
         maxHiddenActiveWarnings,
+        protocolFirewallMarkersRendered,
+        protocolRhythmEntitiesRendered,
+        protocolRhythmActiveRendered,
       }),
       ownership: Object.freeze({
         objects: renderPools.length + 1 + (pools.warning?.capacity ?? 0),

@@ -271,11 +271,64 @@ export function getDataLaneEffect(lane = {}, player = {}) {
   return Object.freeze({
     active,
     steeringMultiplier: active ? Math.max(0.5, Math.min(1, finite(lane.steeringMultiplier, 0.78))) : 1,
-    dashRecoveryMultiplier: active
-      ? Math.max(0.5, Math.min(1, finite(lane.dashRecoveryMultiplier, 0.65)))
+    dashRecoveryRateMultiplier: active
+      ? Math.max(0.5, Math.min(1, finite(lane.dashRecoveryRateMultiplier, 0.65)))
       : 1,
     directDamage: 0,
   });
+}
+
+export function applyAuthoredChapterBeat(objective, beat = {}) {
+  if (!objective || objective.status !== 'active' || !beat || typeof beat !== 'object') return false;
+  if (beat.kind === 'data-lane') {
+    objective.dataLane = Object.freeze({
+      type: 'data-lane', phase: 'active', lane: String(beat.lane ?? 'data-lane'),
+      laneCenter: finite(beat.laneCenter), laneHalfWidth: positive(beat.laneHalfWidth, 1),
+      steeringMultiplier: Math.max(0.5, Math.min(1, finite(beat.steeringMultiplier, 0.78))),
+      dashRecoveryRateMultiplier: Math.max(0.5, Math.min(1, finite(beat.dashRecoveryRateMultiplier, 0.65))),
+      directDamage: 0,
+    });
+    return true;
+  }
+  if (objective.type === 'escort' && beat.kind === 'safe-route' && Array.isArray(beat.routePoints)) {
+    const remaining = Math.max(0, objective.target - objective.progress);
+    const points = [point(objective.escort.x, objective.escort.y), ...beat.routePoints.map((entry) => point(entry.x, entry.y))];
+    objective.escort.route = routeFromPoints(points);
+    objective.escort.routeProgressOffset = objective.progress;
+    objective.escort.routeDistance = 0;
+    objective.escort.routeLength = remaining;
+    objective.escort.authoredRoute = String(beat.route ?? 'escort-route');
+    return true;
+  }
+  if (objective.type === 'storm-corridor'
+    && ['safe-route', 'route-change'].includes(beat.kind) && Array.isArray(beat.corridor) && beat.corridor.length >= 2) {
+    const segments = beat.corridor.map((entry, index) => ({
+      id: `${beat.route ?? 'storm-route'}-${index + 1}`, x: finite(entry.x), y: finite(entry.y),
+      width: objective.corridor.width,
+    }));
+    objective.corridor.segments = segments;
+    objective.corridor.direction = beat.kind === 'route-change' ? -objective.corridor.direction : objective.corridor.direction;
+    const normalized = Math.min(0.999999, objective.progress / Math.max(EPSILON, objective.target));
+    const logical = Math.floor(normalized * segments.length);
+    const index = objective.corridor.direction > 0 ? logical : segments.length - 1 - logical;
+    objective.corridor.activeSegment = index;
+    Object.assign(objective.safeZone, segments[index]);
+    const next = Math.max(0, Math.min(segments.length - 1, index + objective.corridor.direction));
+    Object.assign(objective.nextSafeZone, segments[next]);
+    objective.corridor.authoredRoute = String(beat.route ?? 'storm-route');
+    return true;
+  }
+  if (objective.type === 'dual-crisis' && ['safe-route', 'route-change'].includes(beat.kind)) {
+    const radius = positive(beat.crosslink?.reachableRadius, objective.crises[0]?.radius ?? 1.7);
+    for (const crisis of objective.crises) crisis.radius = radius;
+    objective.crosslink = {
+      route: String(beat.route ?? 'crisis-crosslink'),
+      priority: String(beat.crosslink?.priority ?? 'balanced'),
+      reachableRadius: radius,
+    };
+    return true;
+  }
+  return false;
 }
 
 function eventInput(events) {
@@ -562,7 +615,7 @@ function updateEscort(objective, player, dt, events) {
   const proximity = Math.max(1, Math.min(1.6, Number(stats.objectiveProximityMultiplier) || 1));
   objective.escort.routeDistance = Math.min(objective.escort.routeLength, objective.escort.routeDistance + objective.escort.speed * dt * proximity);
   Object.assign(objective.escort, interpolateRoute(objective.escort.route, objective.escort.routeDistance));
-  objective.progress = objective.escort.routeDistance;
+  objective.progress = finite(objective.escort.routeProgressOffset) + objective.escort.routeDistance;
   objective.escort.completed = objective.progress >= objective.target - EPSILON;
   return null;
 }

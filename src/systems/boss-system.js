@@ -176,7 +176,7 @@ function createAbyssMawBossSystem({ seed = 0, mode = 'standard' } = {}) {
   }
 
   function spawnOwned(world, kind, data, { reserve = false } = {}) {
-    if (!reserve && ownedCount() >= MAX_OWNED_ENTITIES) {
+    if (ownedCount() >= MAX_OWNED_ENTITIES) {
       spawnFailures += 1;
       return 0;
     }
@@ -1136,6 +1136,60 @@ const PROTOCOL_NODE_POSITIONS = Object.freeze([
   Object.freeze({ x: 4.6, y: -2.8 }),
   Object.freeze({ x: 0, y: 3.6 }),
 ]);
+const PROTOCOL_FIREWALL_ORDER = Object.freeze([0, 2, 1, 3]);
+const PROTOCOL_FIREWALL_KINDS = Object.freeze(['objective', 'enemy', 'bossPart', 'enemy']);
+const PROTOCOL_PRESENTATION_RETRY_SECONDS = 2.5;
+
+export function protocolOrientedBoxesLeaveReachableLane(boxes, arena = { halfWidth: 10.5, halfHeight: 7.2 }, playerRadius = 0.4) {
+  const candidates = Array.isArray(boxes) ? boxes : [];
+  const halfWidth = Math.max(1, finite(arena?.halfWidth, 10.5));
+  const halfHeight = Math.max(1, finite(arena?.halfHeight, 7.2));
+  const radius = Math.max(0, finite(playerRadius, 0.4));
+  const step = 0.35;
+  const columns = Math.max(3, Math.floor((halfWidth * 2 - radius * 2) / step) + 1);
+  const rows = Math.max(3, Math.floor((halfHeight * 2 - radius * 2) / step) + 1);
+  const blocked = new Uint8Array(columns * rows);
+  const indexOf = (x, y) => y * columns + x;
+  for (let row = 0; row < rows; row += 1) {
+    const y = -halfHeight + radius + row * step;
+    for (let column = 0; column < columns; column += 1) {
+      const x = -halfWidth + radius + column * step;
+      blocked[indexOf(column, row)] = candidates.some((box) => {
+        const rotation = finite(box?.rotation);
+        const dx = x - finite(box?.x);
+        const dy = y - finite(box?.y);
+        const along = dx * Math.cos(rotation) + dy * Math.sin(rotation);
+        const across = -dx * Math.sin(rotation) + dy * Math.cos(rotation);
+        return Math.abs(along) <= Math.max(0, finite(box?.scaleX)) * 0.5 + radius
+          && Math.abs(across) <= Math.max(0, finite(box?.scaleY)) * 0.5 + radius;
+      }) ? 1 : 0;
+    }
+  }
+  const queue = new Int32Array(columns * rows);
+  const seen = new Uint8Array(columns * rows);
+  let head = 0;
+  let tail = 0;
+  for (let column = 0; column < columns; column += 1) {
+    const index = indexOf(column, 0);
+    if (!blocked[index]) { seen[index] = 1; queue[tail++] = index; }
+  }
+  while (head < tail) {
+    const index = queue[head++];
+    const row = Math.floor(index / columns);
+    const column = index - row * columns;
+    if (row === rows - 1) return true;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nextColumn = column + dx;
+      const nextRow = row + dy;
+      if (nextColumn < 0 || nextColumn >= columns || nextRow < 0 || nextRow >= rows) continue;
+      const next = indexOf(nextColumn, nextRow);
+      if (seen[next] || blocked[next]) continue;
+      seen[next] = 1;
+      queue[tail++] = next;
+    }
+  }
+  return false;
+}
 
 function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   let definition = null;
@@ -1150,6 +1204,11 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   let attackCursor = 0;
   let firewallIndex = 0;
   let firewallClears = 0;
+  let firewallMarkerId = 0;
+  let firewallMarkerKind = null;
+  let firewallAwaitingCenter = true;
+  let firewallStepElapsed = 0;
+  let firewallRouteChanges = 0;
   let safeCellIndex = 0;
   let safeCellHold = 0;
   let safeCellClears = 0;
@@ -1161,6 +1220,8 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   let maxOwnedEntityCount = 0;
   let maxSimultaneousWarnings = 0;
   let diagnosticReconciliations = 0;
+  let presentationBlockedSeconds = 0;
+  let presentationRetries = 0;
   let updates = 0;
   const nodeIds = new Float64Array(3);
   const nodeDestroyed = new Uint8Array(3);
@@ -1193,7 +1254,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   }
 
   function spawnOwned(world, kind, data, reserve = false) {
-    if (!reserve && ownedCount() >= definition.maxOwnedEntities) {
+    if (ownedCount() >= definition.maxOwnedEntities) {
       spawnFailures += 1;
       return 0;
     }
@@ -1240,14 +1301,65 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   }
 
   function markedQuadrant() {
-    const cycle = (Math.trunc(seed) + firewallIndex) & 3;
+    const cycle = PROTOCOL_FIREWALL_ORDER[(Math.trunc(seed) + firewallIndex) & 3];
+    const outer = (firewallIndex & 1) === 0;
+    const radius = outer ? definition.phases.firewall.outerRadius : definition.phases.firewall.innerRadius;
+    const angle = [Math.PI / 4, Math.PI * 3 / 4, Math.PI * 5 / 4, Math.PI * 7 / 4][cycle];
     return Object.freeze({
       index: cycle,
       xSign: cycle === 0 || cycle === 3 ? 1 : -1,
       ySign: cycle < 2 ? 1 : -1,
       shape: ['cut-corner-square', 'chevron', 'double-bar', 'open-diamond'][cycle],
       pulseBeat: firewallIndex % 4,
+      radiusBand: outer ? 'outer' : 'inner',
+      targetX: Math.cos(angle) * radius,
+      targetY: Math.sin(angle) * radius * 0.68,
+      sequence: firewallIndex + 1,
+      requiresCenterHandshake: firewallAwaitingCenter,
+      routeRevision: firewallRouteChanges,
     });
+  }
+
+  function firewallPrompt(marked = markedQuadrant()) {
+    const horizontal = marked.xSign > 0 ? '右' : '左';
+    const vertical = marked.ySign > 0 ? '上' : '下';
+    return firewallAwaitingCenter
+      ? `防火墙 ${marked.sequence}/4：先返回中心握手，再进入${horizontal}${vertical}${marked.radiusBand === 'outer' ? '外环' : '内环'}${marked.shape}`
+      : `防火墙 ${marked.sequence}/4：进入${horizontal}${vertical}${marked.radiusBand === 'outer' ? '外环' : '内环'}${marked.shape}`;
+  }
+
+  function clearFirewallMarker(world) {
+    if (firewallMarkerId && firewallMarkerKind) despawnOwned(world, firewallMarkerKind, firewallMarkerId);
+    firewallMarkerId = 0;
+    firewallMarkerKind = null;
+  }
+
+  function spawnFirewallMarker(world) {
+    const marked = markedQuadrant();
+    if (firewallMarkerId) {
+      const existing = world.readInto(firewallMarkerId, read);
+      if (existing?.type === 'protocol-firewall-marker') return true;
+      owned[firewallMarkerKind]?.delete(firewallMarkerId);
+      firewallMarkerId = 0;
+      firewallMarkerKind = null;
+    }
+    const kind = PROTOCOL_FIREWALL_KINDS[marked.index];
+    const id = spawnOwned(world, kind, {
+      x: marked.targetX, y: marked.targetY, radius: definition.phases.firewall.targetTolerance,
+      scale: 1.05, scaleX: marked.radiusBand === 'outer' ? 1.3 : 0.86,
+      scaleY: marked.radiusBand === 'outer' ? 1.3 : 0.86,
+      rotation: marked.shape === 'open-diamond' ? Math.PI / 4 : 0,
+      team: 1, role: 'firewall-marker', type: 'protocol-firewall-marker',
+      partId: `firewall-${marked.sequence}`, objective: kind === 'objective',
+      objectiveType: kind === 'objective' ? 'protocol-firewall-marker' : null,
+      invulnerable: true, collidable: false, contactDamaging: false, weakPoint: false,
+      color: 0xb8ff45, variant: marked.shape, state: marked.radiusBand,
+      sequence: marked.pulseBeat, phase: marked.pulseBeat, opacity: 1,
+    });
+    if (!id) return false;
+    firewallMarkerId = id;
+    firewallMarkerKind = kind;
+    return true;
   }
 
   function setObjectiveProgress() {
@@ -1266,11 +1378,25 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     objective.firewallClears = firewallClears;
     objective.safeCellClears = safeCellClears;
     objective.destroyedNodes = nodeDestroyed.reduce((sum, value) => sum + value, 0);
+    if (phase === 'firewall') {
+      const marked = markedQuadrant();
+      objective.presentation = {
+        kind: 'protocol-firewall', prompt: firewallPrompt(marked), sequence: marked.sequence,
+        shape: marked.shape, radiusBand: marked.radiusBand, xSign: marked.xSign, ySign: marked.ySign,
+        routeRevision: marked.routeRevision,
+      };
+    } else if (phase === 'trafficGrid') {
+      objective.presentation = {
+        kind: 'protocol-traffic-grid', prompt: '辨认唯一主节拍缺口；形状与离散节拍均为证据',
+        rhythmStep: Math.floor(phaseElapsed / 0.25) & 3,
+      };
+    } else objective.presentation = { kind: `protocol-${phase}`, prompt: null };
     objective.progressRatio = clamp(ratio, 0, 1);
     objective.progress = objective.progressRatio * objective.target;
   }
 
   function publishPhase(events) {
+    setObjectiveProgress();
     emit(events, 'boss:state', {
       bossId: definition.id, phase, firewallClears, safeCellClears,
       destroyedNodes: nodeDestroyed.reduce((sum, value) => sum + value, 0),
@@ -1309,7 +1435,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     const count = columns * rows;
     const trueIndex = (Math.trunc(seed) + safeCellIndex * 5) % count;
     const falseShapes = definition.safeCellShapes.standardFalse;
-    safeCells = Array.from({ length: count }, (_, index) => {
+    const candidates = Array.from({ length: count }, (_, index) => {
       const column = index % columns;
       const row = Math.floor(index / columns);
       const truthful = index === trueIndex;
@@ -1331,14 +1457,10 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
         pulseBeat: truthful ? 0 : decoy ? 2 : (index % 3) + 1,
       });
     });
-    safeRoute = Object.freeze({
-      openLanes: 1,
-      laneIndex: trueIndex % columns,
-      evidence: 'unique-shape-and-primary-beat',
-    });
-    for (const cell of safeCells) {
+    const spawned = [];
+    for (const cell of candidates) {
       const kind = cell.truthful ? 'bossPart' : cell.decoy ? 'enemy' : 'objective';
-      spawnOwned(world, kind, {
+      const id = spawnOwned(world, kind, {
         x: cell.x, y: cell.y, radius: 0.92,
         scale: 0.92,
         scaleX: cell.truthful ? 1.15 : cell.decoy ? 1 : 1.25,
@@ -1360,7 +1482,22 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
         sequence: cell.pulseBeat,
         opacity: cell.truthful ? 1 : 0.72,
       });
+      if (!id) {
+        for (const entry of spawned) despawnOwned(world, entry.kind, entry.id);
+        safeCells = [];
+        presentationRetries += 1;
+        return false;
+      }
+      spawned.push({ kind, id });
     }
+    safeCells = candidates;
+    safeRoute = Object.freeze({
+      openLanes: 1,
+      laneIndex: trueIndex % columns,
+      evidence: 'unique-shape-and-primary-beat',
+    });
+    presentationBlockedSeconds = 0;
+    return true;
   }
 
   function spawnNode(world, index) {
@@ -1385,16 +1522,37 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     return nodeIds[index] > 0;
   }
 
+  function generateCloneNodes(world) {
+    const spawned = [];
+    for (let index = 0; index < nodeIds.length; index += 1) {
+      if (spawnNode(world, index)) {
+        spawned.push(index);
+        continue;
+      }
+      for (const spawnedIndex of spawned) {
+        despawnOwned(world, PROTOCOL_NODE_KINDS[spawnedIndex], nodeIds[spawnedIndex]);
+        nodeIds[spawnedIndex] = 0;
+        nodeHp[spawnedIndex] = 0;
+      }
+      presentationRetries += 1;
+      return false;
+    }
+    presentationBlockedSeconds = 0;
+    return true;
+  }
+
   function transition(nextPhase, world, events) {
     if (phase === nextPhase || clean) return false;
     phase = nextPhase;
     phaseElapsed = 0;
     attackTimer = 0;
+    presentationBlockedSeconds = 0;
+    if (phase !== 'firewall') clearFirewallMarker(world);
     if (phase === 'trafficGrid') generateSafeCells(world);
     else if (phase === 'cloneNodes') {
       clearSafeCellVisuals(world);
       safeCells = [];
-      for (let index = 0; index < nodeIds.length; index += 1) spawnNode(world, index);
+      generateCloneNodes(world);
     } else if (phase === 'kernel') {
       for (let index = 0; index < nodeIds.length; index += 1) {
         if (nodeIds[index]) despawnOwned(world, PROTOCOL_NODE_KINDS[index], nodeIds[index]);
@@ -1410,6 +1568,33 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     publishPhase(events);
     emit(events, 'boss:phase-changed', { bossId: definition.id, phase });
     return true;
+  }
+
+  function updateSafeCellRhythm(world) {
+    const rhythmStep = Math.floor(phaseElapsed / 0.25) & 3;
+    for (const kind of ['bossPart', 'enemy', 'objective']) {
+      for (const id of owned[kind]) {
+        const entity = world.readInto(id, read);
+        if (entity?.type === 'protocol-safe-cell') world.write(id, { phase: rhythmStep });
+      }
+    }
+  }
+
+  function ensureProtocolPresentation(world, dt, events) {
+    let ready = true;
+    if (phase === 'firewall') ready = spawnFirewallMarker(world);
+    else if (phase === 'trafficGrid') ready = safeCells.length > 0 || generateSafeCells(world);
+    else if (phase === 'cloneNodes') ready = nodeIds.every((id, index) => nodeDestroyed[index] || (id && world.readInto(id, read)))
+      || generateCloneNodes(world);
+    if (ready) {
+      presentationBlockedSeconds = 0;
+      return true;
+    }
+    presentationBlockedSeconds += dt;
+    if (presentationBlockedSeconds >= PROTOCOL_PRESENTATION_RETRY_SECONDS - EPSILON) {
+      cleanup(world, events, 'boss-presentation-capacity');
+    }
+    return false;
   }
 
   function warningCap() {
@@ -1447,14 +1632,14 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   }
 
   function spawnPredictiveBeams(world, player) {
-    const direction = normalized(finite(player.vx), finite(player.vy), 1, 0);
-    const rotation = Math.atan2(direction.y, direction.x);
+    const safeLane = clamp(Math.trunc(finite(safeRoute.laneIndex, 1)), 0, 2);
     let spawned = 0;
-    for (const offset of [-1, 1]) {
+    for (const lane of [0, 1, 2]) {
+      if (lane === safeLane) continue;
       spawned += Boolean(spawnWarning(world, {
-        x: clamp(player.x + direction.x * 3.2 - direction.y * offset * 1.8, -8.8, 8.8),
-        y: clamp(player.y + direction.y * 3.2 + direction.x * offset * 1.8, -5.6, 5.6),
-        rotation, radius: 0.35, scaleX: 7.2, scaleY: 0.55,
+        x: (lane - 1) * 5.6,
+        y: clamp(finite(player.y) + (lane === 0 ? -1.4 : 1.4), -4.8, 4.8),
+        rotation: Math.PI / 2, radius: 0.35, scaleX: 3.4, scaleY: 0.55,
         attackKind: 'predictive-beam', variant: 'oriented-box', color: 0x936cff,
         duration: definition.attacks.predictiveBeam.telegraphSeconds,
       }));
@@ -1462,7 +1647,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     if (spawned) {
       attackCounts.predictiveBeam += 1;
       attacksSeen.add('predictive-beam');
-      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeRoute.laneIndex, evidence: 'beam-center-gap' });
+      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeLane, evidence: 'beam-preserved-column' });
     }
   }
 
@@ -1538,32 +1723,63 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
           continue;
         }
         if (kind === 'warning') {
-          const hazardId = spawnOwned(world, 'enemyHazard', {
+          const hazardData = {
             x: entity.x, y: entity.y, rotation: entity.rotation, radius: entity.radius,
             scaleX: entity.scaleX, scaleY: entity.scaleY, team: 2,
             ownerId: bodyId, attackKind: entity.attackKind, role: 'boss',
             variant: entity.variant, color: entity.color, state: 'active', age: 0,
             lifetime: entity.attackKind === 'traffic-wall' ? 1.05 : 0.72,
             damage: 0.65, contactDamaging: true, collidable: true,
+          };
+          despawnOwned(world, kind, id);
+          const hazardId = spawnOwned(world, 'enemyHazard', {
+            ...hazardData,
           });
           if (hazardId) attackCounts.active += 1;
+          continue;
         }
         despawnOwned(world, kind, id);
       }
     }
   }
 
-  function updateFirewall(player, world, events) {
+  function updateFirewall(player, world, dt, events) {
     const marked = markedQuadrant();
-    if (Math.abs(player.x) < definition.phases.firewall.entryRadiusX
-      || Math.abs(player.y) < definition.phases.firewall.entryRadiusY
-      || Math.sign(player.x) !== marked.xSign || Math.sign(player.y) !== marked.ySign) return;
+    firewallStepElapsed += dt;
+    if (firewallStepElapsed >= definition.phases.firewall.routeCounterSeconds) {
+      firewallStepElapsed = 0;
+      firewallRouteChanges += 1;
+      setObjectiveProgress();
+      emit(events, 'boss:firewall-route-counter', {
+        bossId: definition.id, sequence: marked.sequence, routeRevision: firewallRouteChanges,
+        prompt: firewallPrompt(marked),
+      });
+    }
+    if (firewallAwaitingCenter) {
+      if (Math.hypot(finite(player.x), finite(player.y)) > definition.phases.firewall.centerHandshakeRadius) return;
+      firewallAwaitingCenter = false;
+      firewallStepElapsed = 0;
+      setObjectiveProgress();
+      emit(events, 'boss:firewall-handshake', {
+        bossId: definition.id, sequence: marked.sequence, prompt: firewallPrompt(marked),
+      });
+      return;
+    }
+    if (Math.hypot(finite(player.x) - marked.targetX, finite(player.y) - marked.targetY)
+      > definition.phases.firewall.targetTolerance) return;
     firewallClears += 1;
     firewallIndex += 1;
+    firewallAwaitingCenter = true;
+    firewallStepElapsed = 0;
+    clearFirewallMarker(world);
     emit(events, 'boss:firewall-cleared', {
       bossId: definition.id, clear: firewallClears, required: definition.phases.firewall.requiredQuadrants,
     });
     if (firewallClears >= definition.phases.firewall.requiredQuadrants) transition('trafficGrid', world, events);
+    else {
+      spawnFirewallMarker(world);
+      setObjectiveProgress();
+    }
   }
 
   function updateTrafficGrid(player, world, dt, events) {
@@ -1630,6 +1846,8 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
       }
     } else for (const kind of PROTOCOL_OWNED_KINDS) owned[kind].clear();
     bodyId = 0;
+    firewallMarkerId = 0;
+    firewallMarkerKind = null;
     nodeIds.fill(0);
     safeCells = [];
     if (objective && objective.status === 'active') {
@@ -1661,6 +1879,11 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     attackCursor = 0;
     firewallIndex = 0;
     firewallClears = 0;
+    firewallMarkerId = 0;
+    firewallMarkerKind = null;
+    firewallAwaitingCenter = true;
+    firewallStepElapsed = 0;
+    firewallRouteChanges = 0;
     safeCellIndex = 0;
     safeCellHold = 0;
     safeCellClears = 0;
@@ -1679,6 +1902,8 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     maxOwnedEntityCount = 0;
     maxSimultaneousWarnings = 0;
     diagnosticReconciliations = 0;
+    presentationBlockedSeconds = 0;
+    presentationRetries = 0;
     updates = 0;
     return cloneFrozen(objective);
   }
@@ -1716,7 +1941,13 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     objective.elapsed = elapsed;
     objective.timeoutRemaining = Math.max(0, objective.timeout - elapsed);
     updateOwnedLifetimes(world, seconds);
-    if (objective.status === 'active' && phase === 'firewall') updateFirewall(player, world, events);
+    if (!ensureProtocolPresentation(world, seconds, events) || objective.status !== 'active') {
+      setObjectiveProgress();
+      updates += 1;
+      return Object.freeze({ phase, status: objective.status, changed: true });
+    }
+    if (phase === 'trafficGrid') updateSafeCellRhythm(world);
+    if (objective.status === 'active' && phase === 'firewall') updateFirewall(player, world, seconds, events);
     else if (objective.status === 'active' && phase === 'trafficGrid') updateTrafficGrid(player, world, seconds, events);
     if (objective.status === 'active' && phase === 'cloneNodes' && nodeDestroyed.every((value) => value === 1)) {
       transition('kernel', world, events);
@@ -1769,7 +2000,10 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     }).filter(({ entityId, destroyed }) => entityId || destroyed);
     return Object.freeze({
       bossId: definition?.id ?? null, mode, phase, elapsed, phaseElapsed,
-      firewall: Object.freeze({ clears: firewallClears, markedQuadrant: markedQuadrant() }),
+      firewall: Object.freeze({
+        clears: firewallClears, markedQuadrant: markedQuadrant(), markerEntityId: firewallMarkerId,
+        awaitingCenter: firewallAwaitingCenter, routeChanges: firewallRouteChanges,
+      }),
       trafficGrid: Object.freeze({ clears: safeCellClears, hold: safeCellHold }),
       safeCells: Object.freeze([...safeCells]), safeRoute,
       destroyedNodes: nodeDestroyed.reduce((sum, value) => sum + value, 0),
@@ -1785,6 +2019,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
       attacksSeen: Object.freeze([...attacksSeen]), attackCounts: Object.freeze({ ...attackCounts }),
       damageByWeapon: Object.freeze({ ...damageByWeapon }), ownedEntityCount: ownedCount(),
       maxOwnedEntityCount, maxSimultaneousWarnings, diagnosticReconciliations,
+      presentationBlockedSeconds, presentationRetries,
       clean, cleanupReason, updates,
     });
   }

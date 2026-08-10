@@ -925,6 +925,9 @@ export function createGameSession(options = {}) {
     reset,
     restoreCheckpoint,
     getEncounterSnapshot: () => encounterDirector.getSnapshot(),
+    getAuthoredDataLaneEffect: (environmentFrame, point) => (
+      encounterDirector.getAuthoredDataLaneEffect(environmentFrame, point)
+    ),
     getMode: () => state.mode,
     getHull: () => state.hull,
     getMaxHull: () => state.maxHull,

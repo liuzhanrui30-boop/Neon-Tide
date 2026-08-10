@@ -19,8 +19,11 @@ export const PROTOCOL_ZERO = deepFreeze({
     firewall: {
       gate: { kind: 'quadrantOutcome' },
       requiredQuadrants: 4,
-      entryRadiusX: 3.8,
-      entryRadiusY: 2.5,
+      centerHandshakeRadius: 1.15,
+      outerRadius: 6.4,
+      innerRadius: 3.45,
+      targetTolerance: 1.05,
+      routeCounterSeconds: 2.5,
     },
     trafficGrid: {
       gate: { kind: 'safeCellOutcome' },

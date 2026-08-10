@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { DATA_CITY_CHAPTER, getDataCityRoomDefinition } from '../src/content/chapters/data-city.js';
 import { PROTOCOL_ZERO } from '../src/content/bosses/protocol-zero.js';
 import { createEntityWorld } from '../src/game/entity-world.js';
-import { createObjective, getDataLaneEffect, updateObjective } from '../src/systems/objective-system.js';
-import { createBossSystem } from '../src/systems/boss-system.js';
+import { applyAuthoredChapterBeat, createObjective, getDataLaneEffect, updateObjective } from '../src/systems/objective-system.js';
+import { createBossSystem, protocolOrientedBoxesLeaveReachableLane } from '../src/systems/boss-system.js';
+import { advanceDashCharges, createPlayerState, updatePlayerState } from '../src/systems/player-system.js';
 import { createCampaign } from '../src/game/campaign.js';
 import { getEncounterTemplate } from '../src/content/encounters.js';
 import { loadChapterContent } from '../src/content/realms.js';
@@ -30,16 +31,37 @@ test('Data City is a deeply immutable introduce-develop-test teaching sawtooth',
 test('data lanes alter steering and dash recovery without direct damage', () => {
   const effect = getDataLaneEffect({
     type: 'data-lane', phase: 'active', laneCenter: 0, laneHalfWidth: 1,
-    steeringMultiplier: 0.78, dashRecoveryMultiplier: 0.65,
+    steeringMultiplier: 0.78, dashRecoveryRateMultiplier: 0.65,
   }, { x: 2, y: 0.25, hp: 5 });
   assert.deepEqual(effect, {
-    active: true, steeringMultiplier: 0.78, dashRecoveryMultiplier: 0.65, directDamage: 0,
+    active: true, steeringMultiplier: 0.78, dashRecoveryRateMultiplier: 0.65, directDamage: 0,
   });
   const outside = getDataLaneEffect({
     type: 'data-lane', phase: 'active', laneCenter: 0, laneHalfWidth: 1,
   }, { x: 0, y: 2.1, hp: 5 });
   assert.equal(outside.active, false);
   assert.equal(outside.directDamage, 0);
+});
+
+test('data-lane recovery uses an explicit rate multiplier and pause freezes both Player paths', () => {
+  let base = [0, 0];
+  let lane = [0, 0];
+  for (let step = 0; step < 60; step += 1) {
+    base = advanceDashCharges(base, 1 / 60);
+    lane = advanceDashCharges(lane, 1 / 60, { recoveryRateMultiplier: 0.65 });
+  }
+  assert.ok(base[0] > lane[0]);
+  assert.ok(Math.abs(lane[0] / base[0] - 0.65) < 1e-9);
+  assert.deepEqual(advanceDashCharges(lane, 0, { recoveryRateMultiplier: 0.65 }), lane);
+
+  const basePlayer = createPlayerState({ velocity: { x: 4, y: 0 }, facing: { x: 1, y: 0 }, dashCharges: [0, 0] });
+  const lanePlayer = createPlayerState({ velocity: { x: 4, y: 0 }, facing: { x: 1, y: 0 }, dashCharges: [0, 0] });
+  updatePlayerState(basePlayer, { moveX: 0, moveY: 1, dashPressed: false }, 1 / 60, null, {});
+  updatePlayerState(lanePlayer, { moveX: 0, moveY: 1, dashPressed: false }, 1 / 60, null, {
+    steeringRateMultiplier: 0.78, dashRecoveryRateMultiplier: 0.65,
+  });
+  assert.ok(basePlayer.velocity.y > lanePlayer.velocity.y, 'lane steering responds more slowly');
+  assert.ok(basePlayer.dashCharges[0] > lanePlayer.dashCharges[0], 'lane dash recovery is slower');
 });
 
 test('escort and storm corridor progress/environment freeze with zero simulation time', () => {
@@ -72,25 +94,34 @@ test('escort and storm corridor progress/environment freeze with zero simulation
   }, stormBefore);
 });
 
-function createProtocolHarness(mode = 'standard') {
-  const world = createEntityWorld();
+function createProtocolHarness(mode = 'standard', seed = 2030, capacities = undefined) {
+  const world = createEntityWorld(capacities ? { capacities } : undefined);
   const playerId = world.spawn('player', {
     x: 0, y: 0, previousX: 0, previousY: 0, vx: 0, vy: 0,
     hp: 8, maxHp: 8, radius: 0.4, team: 1, collidable: true,
   });
   const emitted = [];
   const events = { input: [], emit(type, payload) { emitted.push({ type, payload }); return true; } };
-  const system = createBossSystem({ seed: 2030, mode });
+  const system = createBossSystem({ seed, mode });
   system.start(PROTOCOL_ZERO, { targetDurationSeconds: 110 });
   system.update({ world, player: world.get(playerId), damageRecords: [] }, 1 / 60, events);
   return { world, playerId, system, events, emitted };
 }
 
 function enterMarkedQuadrant(harness) {
-  const snapshot = harness.system.getSnapshot();
-  const cell = snapshot.firewall.markedQuadrant;
-  const x = cell.xSign * 5.5;
-  const y = cell.ySign * 3.7;
+  let snapshot = harness.system.getSnapshot();
+  if (snapshot.firewall.awaitingCenter) {
+    const player = harness.world.get(harness.playerId);
+    harness.world.write(harness.playerId, {
+      previousX: player.x, previousY: player.y, x: 0, y: 0, vx: -player.x, vy: -player.y,
+    });
+    harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 1 / 60, harness.events);
+  }
+  const marker = ['objective', 'enemy', 'bossPart'].flatMap((kind) => [...harness.world.query(kind)])
+    .map((id) => harness.world.get(id)).find((entity) => entity?.type === 'protocol-firewall-marker');
+  assert.ok(marker, 'visible pooled firewall marker is required before movement');
+  const x = marker.x;
+  const y = marker.y;
   const player = harness.world.get(harness.playerId);
   harness.world.write(harness.playerId, {
     previousX: player.x, previousY: player.y, x, y, vx: x - player.x, vy: y - player.y,
@@ -99,6 +130,40 @@ function enterMarkedQuadrant(harness) {
     world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [],
   }, 1 / 60, harness.events);
 }
+
+test('authored Data City beats mutate only their real objective semantics', () => {
+  const escort = createObjective(getEncounterTemplate('escort-skiff'), 31);
+  const escortRouteBefore = structuredClone(escort.escort.route);
+  assert.equal(applyAuthoredChapterBeat(escort, DATA_CITY_CHAPTER.rooms[0].beats[0]), true);
+  assert.deepEqual(escort.escort.route, escortRouteBefore, 'data lane cannot move escort route');
+  assert.equal(escort.dataLane.dashRecoveryRateMultiplier, 0.65);
+  assert.equal(applyAuthoredChapterBeat(escort, DATA_CITY_CHAPTER.rooms[0].beats[2]), true);
+  assert.equal(escort.escort.authoredRoute, 'escort-inner-rail');
+  assert.notDeepEqual(escort.escort.route, escortRouteBefore);
+
+  const storm = createObjective(getEncounterTemplate('storm-run'), 32);
+  const originalSegments = structuredClone(storm.corridor.segments);
+  assert.equal(applyAuthoredChapterBeat(storm, DATA_CITY_CHAPTER.rooms[1].beats[0]), true);
+  assert.equal(storm.corridor.authoredRoute, 'alternating-corridor');
+  assert.notDeepEqual(storm.corridor.segments, originalSegments);
+  const alternating = structuredClone(storm.corridor.segments);
+  assert.equal(applyAuthoredChapterBeat(storm, DATA_CITY_CHAPTER.rooms[1].beats[2]), true);
+  assert.equal(storm.corridor.authoredRoute, 'maintenance-gap');
+  assert.notDeepEqual(storm.corridor.segments, alternating);
+  assert.deepEqual({ x: storm.nextSafeZone.x, y: storm.nextSafeZone.y }, {
+    x: storm.corridor.segments[Math.max(0, storm.corridor.activeSegment + storm.corridor.direction)].x,
+    y: storm.corridor.segments[Math.max(0, storm.corridor.activeSegment + storm.corridor.direction)].y,
+  });
+
+  const crisis = createObjective(getEncounterTemplate('dual-crisis'), 33);
+  const before = crisis.crises.map(({ x, y }) => ({ x, y }));
+  assert.ok(before[0].x * before[1].x + before[0].y * before[1].y < 0, 'initial crises are opposed');
+  assert.equal(applyAuthoredChapterBeat(crisis, DATA_CITY_CHAPTER.rooms[2].beats[0]), true);
+  assert.deepEqual(crisis.crises.map(({ x, y }) => ({ x, y })), before, 't=0 crosslink preserves opposition');
+  assert.equal(applyAuthoredChapterBeat(crisis, DATA_CITY_CHAPTER.rooms[2].beats[2]), true);
+  assert.deepEqual(crisis.crises.map(({ x, y }) => ({ x, y })), before, 'relief changes reachability/priority, not positions');
+  assert.equal(crisis.crosslink.priority, 'least-charged');
+});
 
 test('Protocol Zero phases are outcome-driven and standard safe cell is unique by shape', () => {
   assert.ok(Object.isFrozen(PROTOCOL_ZERO));
@@ -153,6 +218,82 @@ test('Protocol Zero phases are outcome-driven and standard safe cell is unique b
   assert.equal(harness.system.getObjective().status, 'completed');
   assert.equal(harness.system.getSnapshot().phase, 'complete');
   harness.world.dispose();
+});
+
+test('fixed-radius circle bots cannot solve the center-handshake inner/outer firewall across seeds', () => {
+  let completions = 0;
+  for (let seed = 0; seed < 12; seed += 1) {
+    const harness = createProtocolHarness('standard', seed);
+    for (let step = 0; step < 12 * 60; step += 1) {
+      const angle = step / 60 * 1.35;
+      const x = Math.cos(angle) * 6;
+      const y = Math.sin(angle) * 4.1;
+      const player = harness.world.get(harness.playerId);
+      harness.world.write(harness.playerId, {
+        previousX: player.x, previousY: player.y, x, y, vx: x - player.x, vy: y - player.y,
+      });
+      harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 1 / 60, harness.events);
+    }
+    const snapshot = harness.system.getSnapshot();
+    if (snapshot.phase !== 'firewall') completions += 1;
+    assert.ok(snapshot.firewall.routeChanges >= 1, 'stalled orbit receives a route counter within 12 seconds');
+    harness.world.dispose();
+  }
+  assert.ok(completions / 12 < 0.1);
+
+  const varied = createProtocolHarness('standard', 47);
+  for (let index = 0; index < 4; index += 1) enterMarkedQuadrant(varied);
+  assert.equal(varied.system.getSnapshot().phase, 'trafficGrid');
+  varied.world.dispose();
+});
+
+test('Protocol presentation capacity retries are bounded, never invisible, and respect the hard owner ceiling', () => {
+  const transient = createProtocolHarness('standard', 51, { objective: 1, bossPart: 4, enemy: 8 });
+  for (let index = 0; index < 4; index += 1) enterMarkedQuadrant(transient);
+  assert.equal(transient.system.getSnapshot().phase, 'trafficGrid');
+  assert.equal(transient.system.getSnapshot().safeCells.length, 0, 'logical safe answer is withheld when visuals fail');
+  for (let step = 0; step < 180 && transient.system.getObjective().status === 'active'; step += 1) {
+    transient.system.update({ world: transient.world, player: transient.world.get(transient.playerId), damageRecords: [] }, 1 / 60, transient.events);
+  }
+  assert.equal(transient.system.getObjective().status, 'failed');
+  assert.equal(transient.system.getObjective().failureReason, 'boss-presentation-capacity');
+  assert.equal(transient.system.getSnapshot().ownedEntityCount, 0);
+  assert.ok(transient.system.getSnapshot().maxOwnedEntityCount <= PROTOCOL_ZERO.maxOwnedEntities);
+  transient.world.dispose();
+
+  const hardCeiling = createProtocolHarness('standard', 52, {
+    objective: 24, bossPart: 32, enemy: 56, warning: 96, enemyHazard: 96,
+  });
+  for (let index = 0; index < 4; index += 1) enterMarkedQuadrant(hardCeiling);
+  for (let step = 0; step < 900; step += 1) {
+    hardCeiling.system.update({ world: hardCeiling.world, player: hardCeiling.world.get(hardCeiling.playerId), damageRecords: [] }, 1 / 60, hardCeiling.events);
+    assert.ok(hardCeiling.system.getSnapshot().ownedEntityCount <= 48);
+  }
+  hardCeiling.system.cleanup(hardCeiling.world, hardCeiling.events, 'ceiling-test');
+  assert.equal(hardCeiling.system.getSnapshot().ownedEntityCount, 0);
+  hardCeiling.world.dispose();
+});
+
+test('every real Protocol traffic/predictive timing combination leaves a continuous player-radius route', () => {
+  for (let seed = 60; seed < 72; seed += 1) {
+    const harness = createProtocolHarness('abyss', seed);
+    for (let index = 0; index < 4; index += 1) enterMarkedQuadrant(harness);
+    for (let step = 0; step < 20 * 60; step += 1) {
+      const angle = step * 0.07;
+      const player = harness.world.get(harness.playerId);
+      harness.world.write(harness.playerId, {
+        previousX: player.x, previousY: player.y,
+        x: Math.cos(angle) * 2.2, y: Math.sin(angle) * 1.6,
+        vx: -Math.sin(angle) * 2.2, vy: Math.cos(angle) * 1.6,
+      });
+      harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 1 / 60, harness.events);
+      const boxes = ['warning', 'enemyHazard'].flatMap((kind) => [...harness.world.query(kind)])
+        .map((id) => harness.world.get(id))
+        .filter((entity) => entity?.ownerKind === 'boss' && entity.variant === 'oriented-box');
+      assert.equal(protocolOrientedBoxesLeaveReachableLane(boxes, PROTOCOL_ZERO.arena, 0.4), true, `seed ${seed} step ${step}`);
+    }
+    harness.world.dispose();
+  }
 });
 
 test('a real collision-despawned kernel completes from its retained generation-safe damage record', () => {
@@ -241,6 +382,14 @@ test('lazy Data City content drives real room role windows and Protocol Zero cam
   assert.ok(roomSnapshot.threatState.rolesSeen.includes('lancer'));
   assert.equal(roomSnapshot.threatState.rolesSeen.includes('warden'), false);
   assert.ok(maximumWarnings <= DATA_CITY_CHAPTER.rooms[0].warningCap);
+  assert.deepEqual(
+    director.getAuthoredDataLaneEffect({ type: 'data-lane', phase: 'active' }, { x: 0, y: 0 }),
+    { active: true, steeringMultiplier: 0.78, dashRecoveryRateMultiplier: 0.65, directDamage: 0 },
+  );
+  assert.equal(
+    director.getAuthoredDataLaneEffect({ type: 'data-lane', phase: 'active' }, { x: 0, y: 3 }).active,
+    false,
+  );
   director.reset();
   world.dispose();
 

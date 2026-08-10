@@ -70,6 +70,10 @@ export function bootstrapNeonTide(options = {}) {
       : 'authored';
   const campaignTestAuthority = campaignTestMode ? {} : null;
   const requestedCampaignSeed = Number(searchParams.get('objective-seed'));
+  const requestedDurationScale = Number(searchParams.get('duration-scale'));
+  const campaignDurationScale = campaignTestMode && Number.isFinite(requestedDurationScale)
+    ? Math.max(0.01, Math.min(1, requestedDurationScale))
+    : null;
   const campaignSeed = import.meta.env.DEV && Number.isFinite(requestedCampaignSeed)
     ? requestedCampaignSeed
     : null;
@@ -148,7 +152,7 @@ export function bootstrapNeonTide(options = {}) {
     events,
     runSave,
     encounterQuality: entityQuality,
-    encounterDurationScale: options.encounterDurationScale ?? (objectiveTestMode ? 0.18 : 1),
+    encounterDurationScale: options.encounterDurationScale ?? campaignDurationScale ?? (objectiveTestMode ? 0.18 : 1),
     initialRouteKind,
     deterministicCampaignTest: campaignTestMode,
     campaignTestAuthority,
@@ -316,6 +320,8 @@ export function bootstrapNeonTide(options = {}) {
     campaignSeed,
     runModePreference,
     combatTestTelemetry,
+    ensureChapterContent,
+    environmentDelayScale: campaignDurationScale ?? 1,
   });
   runtime.start();
   loop.reset(performance.now());

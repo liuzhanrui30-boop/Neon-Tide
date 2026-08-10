@@ -49,7 +49,8 @@ import {
 import { createPostProcessing, selectRenderQuality } from "../game/render-quality.js";
 import { createRealmBackgrounds } from "../game/realm-backgrounds.js";
 import { normalizeActionSnapshot } from "../systems/input-system.js";
-import { AUTO_PULSE_INTERVAL } from "../systems/player-system.js";
+import { advanceDashCharges, AUTO_PULSE_INTERVAL } from "../systems/player-system.js";
+import { getDataLaneEffect } from "../systems/objective-system.js";
 import { createEntityReadTarget, ENTITY_FLAG_HIDDEN } from "../game/entity-world.js";
 import {
   applyTideLanceAimDirection,
@@ -81,6 +82,8 @@ export function createLegacyRuntime({
   campaignSeed = null,
   runModePreference = null,
   combatTestTelemetry = false,
+  ensureChapterContent = null,
+  environmentDelayScale = 1,
 }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
@@ -115,7 +118,6 @@ const BASE_MAX_SPEED = 6.15;
 const DASH_SPEED = 16.2;
 const DASH_ACTIVE_WINDOW = 0.19;
 const DASH_BUFFER_WINDOW = 0.16;
-const DASH_RECOVERY_TIME = 1.45;
 const HURT_INVULNERABILITY = 0.95;
 const UPGRADE_GRACE_PERIOD = 0.8;
 const MAX_MINES = 8;
@@ -1235,7 +1237,8 @@ function scheduleEnvironmentForStage() {
   state.environmentElapsed = 0;
   const seed = deterministicEnvironmentUnit(state.environmentSeed, state.environmentSequence);
   state.environmentSequence += 1;
-  state.environmentTimer = getEnvironmentDelay(realm.id, seed);
+  state.environmentTimer = getEnvironmentDelay(realm.id, seed)
+    * THREE.MathUtils.clamp(Number(environmentDelayScale) || 1, 0.1, 1);
   environmentFrame = getEnvironmentFrame(realm.id, 0);
   hideEnvironmentVisuals();
   return state.environmentTimer;
@@ -2367,6 +2370,7 @@ async function startGame() {
   let resumable = session.snapshot();
 
   if (resumable.mode === "chapterComplete") {
+    if (!(await ensureRouteChapterContent(resumable.route))) return false;
     pendingTransitionPayload = { campaignAdvanced: true };
     const advanced = session.startRoom(roomRequestForRunRoute(resumable.route));
     pendingTransitionPayload = null;
@@ -2381,6 +2385,7 @@ async function startGame() {
     } else {
       resetState();
       enterStage(resumable.route?.realmIndex ?? resumable.chapterIndex, false);
+      if (!(await ensureRouteChapterContent(resumable.route))) return false;
       pendingTransitionPayload = { resumedCheckpoint: resumable.runMode === "standard" };
       const resumed = resumable.build?.pendingOffer
         ? transitionTo("playing", { resumedCheckpoint: true })
@@ -2735,8 +2740,6 @@ function getDerivedValues() {
     dashInvulnerability: DASH_ACTIVE_WINDOW + (owned.has("echo-shield") ? 0.08 : 0),
     pickupWeaponEnergy: owned.has("overclock") ? LASER_RULES.focusedPickupEnergy : LASER_RULES.pickupEnergy,
   };
-  const lanePenalty = getDataLanePenalty(environmentFrame, player.position);
-  if (lanePenalty > 0) values.dashRecoveryMultiplier *= 1 - lanePenalty;
   return values;
 }
 
@@ -2821,10 +2824,22 @@ function renderUpgradeOptions(options) {
   dom.upgradeOptions.replaceChildren(...buttons);
 }
 
-function chooseUpgrade(upgradeId) {
+async function ensureRouteChapterContent(route = session.snapshot().route) {
+  const chapterIndex = Number(route?.chapterIndex ?? route?.realmIndex ?? 0);
+  if (!Number.isInteger(chapterIndex) || chapterIndex <= 0 || typeof ensureChapterContent !== "function") return true;
+  const loaded = await ensureChapterContent(chapterIndex);
+  if (!loaded) {
+    toast("章节数据加载失败，请重试", "danger");
+    return false;
+  }
+  return true;
+}
+
+async function chooseUpgrade(upgradeId) {
   if (state.mode !== "upgrade") return;
   const upgrade = state.upgradeOptions.find((candidate) => candidate.id === upgradeId);
-  if (!upgrade || !applyUpgrade(upgrade.id)) return;
+  if (!upgrade || !(await ensureRouteChapterContent())) return;
+  if (!applyUpgrade(upgrade.id)) return;
   state.upgradeOptions = [];
   state.hurtInvuln = Math.max(state.hurtInvuln, UPGRADE_GRACE_PERIOD);
   audio.event("upgrade");
@@ -2874,11 +2889,11 @@ function updateAutomaticPulse(dt) {
   return fired;
 }
 
-function updatePlayer(dt) {
+function updatePlayer(dt, dataLaneEffect = getDataLaneEffect(environmentFrame, player.position)) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
   const derived = getBuildStats();
-  const dataLaneSteeringMultiplier = getDataLanePenalty(environmentFrame, player.position) > 0 ? 0.78 : 1;
+  const dataLaneSteeringMultiplier = dataLaneEffect.steeringMultiplier;
   const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
   const hasDirection = direction.lengthSq() > 0.01;
   if (hasDirection) {
@@ -5834,8 +5849,12 @@ function simulate(dt) {
     }
     updateStage();
     if (state.mode === "playing") applyEnvironment(wallDt, simDt);
-    const dashRecoveryMultiplier = 1 / getBuildStats().dashRecoveryMultiplier;
-    state.dashCharges = state.dashCharges.map((charge) => Math.min(1, charge + (wallDt * dashRecoveryMultiplier) / DASH_RECOVERY_TIME));
+    const dataLaneEffect = session.getAuthoredDataLaneEffect?.(environmentFrame, player.position)
+      ?? getDataLaneEffect(environmentFrame, player.position);
+    state.dashCharges = advanceDashCharges(state.dashCharges, wallDt, {
+      cooldownDurationMultiplier: getBuildStats().dashRecoveryMultiplier,
+      recoveryRateMultiplier: dataLaneEffect.dashRecoveryRateMultiplier,
+    });
     const countdownTarget = state.bossDeadline ?? GAME.bossStart;
     state.timeLeft = Math.max(0, countdownTarget - state.elapsed);
     if (state.mode === "playing" && !session.isObjectiveManaged() && state.timeLeft <= 0) {
@@ -5843,7 +5862,7 @@ function simulate(dt) {
     }
     if (state.mode === "playing") {
       if (input.laserBuffer > 0) attemptLaser();
-      updatePlayer(wallDt);
+      updatePlayer(wallDt, dataLaneEffect);
       // Task 6's fixed-pool weapon system owns automatic fire. Keep the bridge
       // callable for inherited development probes, but never double-fire it in
       // the live fixed-step combat path.
