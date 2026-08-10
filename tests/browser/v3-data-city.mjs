@@ -6,6 +6,24 @@ const KEY = Object.freeze({
   up: ['w', 'KeyW'], down: ['s', 'KeyS'], left: ['a', 'KeyA'], right: ['d', 'KeyD'],
 });
 
+export function getLaneSettlingContract(dataLane) {
+  const laneCenter = Number(dataLane?.laneCenter);
+  const laneHalfWidth = Number(dataLane?.laneHalfWidth);
+  if (dataLane?.type !== 'data-lane' || !Number.isFinite(laneCenter)
+    || !Number.isFinite(laneHalfWidth) || laneHalfWidth <= 0) {
+    throw new TypeError('authored data-lane geometry is required');
+  }
+  return Object.freeze({
+    laneCenter,
+    laneHalfWidth,
+    settleTolerance: Math.min(0.16, laneHalfWidth * 0.2),
+    outsideTarget: laneCenter + laneHalfWidth + Math.max(0.75, laneHalfWidth * 0.75),
+    consecutiveFrames: 8,
+    minimumActiveRemaining: 1.8,
+    confirmationBudget: 0.3,
+  });
+}
+
 async function snapshot(page) {
   return page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
 }
@@ -115,6 +133,126 @@ async function driveTo(page, x, y, tolerance = 0.36) {
   throw new Error(`keyboard route failed: ${JSON.stringify({ player, x, y })}`);
 }
 
+async function settleKeyboardAxis(page, axis, target, tolerance, consecutiveFrames, timeoutMs = 6000) {
+  const deadline = Date.now() + timeoutMs;
+  let heldName = null;
+  let stableFrames = 0;
+  let last = null;
+  try {
+    while (Date.now() < deadline) {
+      last = await playerState(page);
+      if (last.mode !== 'playing') throw new Error(`axis settlement interrupted in ${last.mode}`);
+      const coordinate = axis === 'x' ? last.x : last.y;
+      const delta = target - coordinate;
+      const nextName = Math.abs(delta) <= tolerance
+        ? null
+        : axis === 'x'
+          ? (delta > 0 ? 'right' : 'left')
+          : (delta > 0 ? 'up' : 'down');
+      if (nextName !== heldName) {
+        if (heldName) await page.dispatchKey('keyUp', ...KEY[heldName]);
+        if (nextName) await page.dispatchKey('rawKeyDown', ...KEY[nextName]);
+        heldName = nextName;
+      }
+      stableFrames = nextName ? 0 : stableFrames + 1;
+      if (stableFrames >= consecutiveFrames) return last;
+      await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(resolve))`);
+    }
+  } finally {
+    if (heldName) await page.dispatchKey('keyUp', ...KEY[heldName]);
+  }
+  throw new Error(`keyboard axis did not settle: ${JSON.stringify({ axis, target, tolerance, last })}`);
+}
+
+async function waitForActiveLaneSettlement(page, contract, timeoutMs = 14000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const current = await snapshot(page);
+    if (current.session.mode !== 'playing') throw new Error(`lane wait interrupted in ${current.session.mode}`);
+    const lane = current.encounter.objective.dataLane;
+    assert.equal(lane?.laneCenter, contract.laneCenter);
+    assert.equal(lane?.laneHalfWidth, contract.laneHalfWidth);
+    if (Math.abs(current.player.position.y - contract.laneCenter) > contract.settleTolerance) {
+      await settleKeyboardAxis(
+        page, 'y', contract.laneCenter, contract.settleTolerance, contract.consecutiveFrames,
+      );
+    }
+    const frame = await page.gameEvaluate(`return {
+      phase: environmentFrame.phase,
+      elapsed: environmentFrame.elapsed,
+      telegraph: environmentFrame.telegraph,
+      activeDuration: environmentFrame.activeDuration,
+    }`);
+    last = { frame, player: current.player.position };
+    const remaining = frame.telegraph + frame.activeDuration - frame.elapsed;
+    if (frame.phase === 'active'
+      && remaining >= contract.minimumActiveRemaining + contract.confirmationBudget) {
+      const confirmation = await page.evaluate(`new Promise((resolve,reject)=>{
+        let stable=0;
+        const deadline=performance.now()+1500;
+        const poll=()=>{
+          const snapshot=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();
+          const lane=snapshot.encounter.objective.dataLane;
+          const y=snapshot.player?.position?.y;
+          const centered=lane?.type==='data-lane'
+            && lane.laneCenter===${contract.laneCenter}
+            && lane.laneHalfWidth===${contract.laneHalfWidth}
+            && Math.abs(y-lane.laneCenter)<=${contract.settleTolerance};
+          stable=centered?stable+1:0;
+          if(stable>=${contract.consecutiveFrames}){resolve({y,stable});return;}
+          if(performance.now()>=deadline){reject(new Error('active data-lane settlement timed out'));return;}
+          requestAnimationFrame(poll);
+        };requestAnimationFrame(poll);
+      })`);
+      const after = await page.gameEvaluate(`return {
+        phase: environmentFrame.phase,
+        elapsed: environmentFrame.elapsed,
+        telegraph: environmentFrame.telegraph,
+        activeDuration: environmentFrame.activeDuration,
+      }`);
+      const afterRemaining = after.telegraph + after.activeDuration - after.elapsed;
+      if (after.phase === 'active' && after.elapsed >= frame.elapsed
+        && afterRemaining >= contract.minimumActiveRemaining) {
+        return { ...confirmation, remaining: afterRemaining };
+      }
+    }
+    await page.evaluate(`new Promise((resolve)=>setTimeout(resolve,50))`);
+  }
+  throw new Error(`active data-lane window timed out: ${JSON.stringify(last)}`);
+}
+
+async function waitForLaneCharge(page, contract, threshold, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  let previousElapsed = -Infinity;
+  while (Date.now() < deadline) {
+    const frame = await page.gameEvaluate(`return { phase: environmentFrame.phase, elapsed: environmentFrame.elapsed }`);
+    if (frame.phase !== 'active' || frame.elapsed < previousElapsed) {
+      throw new Error(`data-lane environment did not remain active: ${JSON.stringify({ previousElapsed, frame })}`);
+    }
+    previousElapsed = frame.elapsed;
+    last = await page.evaluate(`(()=>{
+      const app=globalThis.__NEON_TIDE_V3__,snapshot=app.getDebugSnapshot();
+      const lane=snapshot.encounter.objective.dataLane,p=snapshot.player?.position;
+      const player=app.world.get(app.world.query('player').at(0));
+      return {mode:snapshot.session.mode,lane,y:p?.y,
+        charge:Math.min(player.dashCharge0,player.dashCharge1)};
+    })()`);
+    if (last.mode !== 'playing') throw new Error(`lane charge interrupted in ${last.mode}`);
+    if (last.lane?.type !== 'data-lane' || last.lane.laneCenter !== contract.laneCenter
+      || last.lane.laneHalfWidth !== contract.laneHalfWidth
+      || Math.abs(last.y - last.lane.laneCenter) > last.lane.laneHalfWidth) {
+      throw new Error(`player left authored data lane during charge recovery: ${JSON.stringify(last)}`);
+    }
+    if (last.charge >= threshold) return { ...last, phase: frame.phase };
+    await page.evaluate(`new Promise((resolve)=>{let frames=0;const poll=()=>{
+      if(++frames>=4){resolve();return;}requestAnimationFrame(poll);
+    };requestAnimationFrame(poll)})`);
+  }
+  throw new Error(`lane charge recovery timed out: ${JSON.stringify(last)}`);
+}
+
 async function dashDriveTo(page, x, y, tolerance = 0.3) {
   const deadline = Date.now() + 5000;
   let lastPlaying = null;
@@ -205,41 +343,44 @@ async function continueNaturalRoom(page, diagnostics = null) {
 }
 
 async function measureDataLaneRecovery(page) {
-  await driveTo(page, 0, 3.1, 0.28);
+  const authoredLane = (await snapshot(page)).encounter.objective.dataLane;
+  const contract = getLaneSettlingContract(authoredLane);
+  await settleKeyboardAxis(
+    page, 'y', contract.outsideTarget, contract.settleTolerance, contract.consecutiveFrames,
+  );
+  assert.ok(Math.abs((await snapshot(page)).player.position.y - contract.laneCenter) > contract.laneHalfWidth);
   const baselineStart = await page.evaluate(`performance.now()`);
   await pressDash(page);
   await page.waitForPage(`(()=>{const p=globalThis.__NEON_TIDE_V3__.world.get(globalThis.__NEON_TIDE_V3__.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)>=0.5})()`, 4000);
   const baselineMs = (await page.evaluate(`performance.now()`)) - baselineStart;
+  await settleKeyboardAxis(
+    page, 'y', contract.laneCenter, contract.settleTolerance, contract.consecutiveFrames,
+  );
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.stageIndex===1`, 5000);
-  const environmentDeadline = Date.now() + 14000;
-  while (Date.now() < environmentDeadline) {
-    const phase = await page.gameEvaluate(`return environmentFrame.phase`);
-    const current = await snapshot(page);
-    if (current.session.mode !== 'playing') throw new Error(`lane wait interrupted in ${current.session.mode}`);
-    if (phase === 'active' && Math.abs(current.player.position.y) <= 0.24) break;
-    const target = ['telegraph', 'active'].includes(phase)
-      ? { x: 0, y: 0 }
-      : current.encounter.objective.escort;
-    await driveTo(page, target.x, target.y, phase === 'active' ? 0.2 : 0.45);
-    await page.evaluate(`new Promise((resolve)=>setTimeout(resolve,100))`);
-  }
-  assert.equal(await page.gameEvaluate(`return environmentFrame.phase`), 'active');
-  assert.ok(Math.abs((await snapshot(page)).player.position.y) <= 0.24);
+  const settlement = await waitForActiveLaneSettlement(page, contract);
+  assert.ok(settlement.remaining >= contract.minimumActiveRemaining);
   const laneStart = await page.evaluate(`performance.now()`);
   await pressDash(page);
-  await page.waitForPage(`(()=>{const p=globalThis.__NEON_TIDE_V3__.world.get(globalThis.__NEON_TIDE_V3__.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)>0.12})()`, 1500);
-  const pausedCharge = await page.evaluate(`(()=>{const a=globalThis.__NEON_TIDE_V3__,p=a.world.get(a.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)})()`);
+  await waitForLaneCharge(page, contract, 0.12, 1500);
+  assert.equal(await page.gameEvaluate(`return environmentFrame.phase`), 'active');
   await page.trustedClick('#pause-button');
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='paused'`);
+  const pauseStart = await page.evaluate(`performance.now()`);
+  const pausedCharge = await page.evaluate(`(()=>{const a=globalThis.__NEON_TIDE_V3__,p=a.world.get(a.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)})()`);
+  const pausedEnvironment = await page.gameEvaluate(`return { phase: environmentFrame.phase, elapsed: environmentFrame.elapsed }`);
+  assert.equal(pausedEnvironment.phase, 'active');
   await page.evaluate(`new Promise((resolve)=>setTimeout(resolve,500))`);
   const frozenCharge = await page.evaluate(`(()=>{const a=globalThis.__NEON_TIDE_V3__,p=a.world.get(a.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)})()`);
+  const frozenEnvironment = await page.gameEvaluate(`return { phase: environmentFrame.phase, elapsed: environmentFrame.elapsed }`);
   assert.ok(Math.abs(frozenCharge - pausedCharge) < 1e-6, 'pause freezes lane recovery');
+  assert.deepEqual(frozenEnvironment, pausedEnvironment, 'pause freezes the active lane environment');
   await page.trustedClick('#primary-button');
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='playing'`);
-  await page.waitForPage(`(()=>{const p=globalThis.__NEON_TIDE_V3__.world.get(globalThis.__NEON_TIDE_V3__.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)>=0.5})()`, 4000);
-  const laneMs = (await page.evaluate(`performance.now()`)) - laneStart - 500;
+  const pauseMs = (await page.evaluate(`performance.now()`)) - pauseStart;
+  await waitForLaneCharge(page, contract, 0.5, 4000);
+  const laneMs = (await page.evaluate(`performance.now()`)) - laneStart - pauseMs;
   assert.ok(laneMs > baselineMs * 1.32, `lane recovery must be slower: ${baselineMs} vs ${laneMs}`);
-  return { baselineMs, laneMs };
+  return { baselineMs, laneMs, laneCenter: contract.laneCenter, laneHalfWidth: contract.laneHalfWidth };
 }
 
 async function completeAuthoredDataCityRooms(page) {
