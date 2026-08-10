@@ -11,6 +11,8 @@ export const CDP_HTTP = `http://127.0.0.1:${CDP_PORT}`;
 export const REALM_SCREENSHOT_DIR = process.env.REALM_SCREENSHOT_DIR || '';
 export const REALM_SCREENSHOT_ONLY = process.env.REALM_SCREENSHOT_ONLY === '1';
 export const BROWSER_MATRIX_SCENARIO = process.env.BROWSER_MATRIX_SCENARIO || '';
+export const INPUT_COMMAND_TIMEOUT_MS = Number(process.env.INPUT_COMMAND_TIMEOUT_MS || 2500);
+export const INPUT_RECOVERY_TIMEOUT_MS = Number(process.env.INPUT_RECOVERY_TIMEOUT_MS || 1200);
 
 export const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -72,7 +74,7 @@ export class CDPClient {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`${method} timed out`));
+        reject(new Error(`${method} timed out after ${timeoutMs}ms (pending=${this.pending.size}; socket=${this.socket?.readyState ?? 'unknown'})`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout, method });
       this.socket.send(JSON.stringify({ id, method, params }));
@@ -150,6 +152,14 @@ export class GamePage {
     this.failures = [];
     this.consoleErrors = [];
     this.scopeEvaluationCount = 0;
+    this.debuggerPaused = false;
+    this.scenarioStage = 'opening';
+    this.heldKeys = new Map();
+    this.inputCommandTimeoutMs = Number(options?.inputCommandTimeoutMs || INPUT_COMMAND_TIMEOUT_MS);
+    this.inputRecoveryTimeoutMs = Number(options?.inputRecoveryTimeoutMs || INPUT_RECOVERY_TIMEOUT_MS);
+    this.inputSequence = 0;
+    this.inputRecoveryCount = 0;
+    this.lastInputFailure = null;
   }
 
   static async open(name, options = {}) {
@@ -171,6 +181,12 @@ export class GamePage {
   }
 
   async #initialize() {
+    this.client.on('Debugger.paused', () => {
+      this.debuggerPaused = true;
+    });
+    this.client.on('Debugger.resumed', () => {
+      this.debuggerPaused = false;
+    });
     this.client.on('Debugger.scriptParsed', (params) => {
       if (params.url) this.scripts.set(params.url, params);
     });
@@ -300,16 +316,16 @@ export class GamePage {
     assert.equal(this.scriptKind, 'dev', `${this.name}: ${feature} requires the Vite dev source (APP_URL=${this.options.appUrl ?? APP_URL})`);
   }
 
-  async evaluate(expression, { idempotent = true } = {}) {
+  async evaluate(expression, { idempotent = true, timeoutMs = 30000 } = {}) {
     const params = { expression, returnByValue: true, awaitPromise: true };
     let result;
     try {
-      result = await this.client.send('Runtime.evaluate', params);
+      result = await this.client.send('Runtime.evaluate', params, timeoutMs);
     } catch (error) {
       if (!idempotent || !String(error?.message).includes('Runtime.evaluate timed out')) throw error;
       await this.client.send('Debugger.resume', {}, 3000).catch(() => {});
       await this.client.send('Page.bringToFront', {}, 3000).catch(() => {});
-      result = await this.client.send('Runtime.evaluate', params);
+      result = await this.client.send('Runtime.evaluate', params, timeoutMs);
     }
     if (result.exceptionDetails) {
       throw new Error(`${this.name}: ${result.exceptionDetails.exception?.description || result.exceptionDetails.text}`);
@@ -489,14 +505,146 @@ export class GamePage {
     await this.client.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
   }
 
-  async dispatchKey(type, key, code, extra = {}) {
-    await this.client.send('Input.dispatchKeyEvent', {
+  setScenarioStage(stage) {
+    this.scenarioStage = String(stage || 'unknown');
+  }
+
+  getInputDiagnostics() {
+    return {
+      stage: this.scenarioStage,
+      debuggerPaused: this.debuggerPaused,
+      heldKeys: [...this.heldKeys.values()].map(({ key, code }) => ({ key, code })),
+      inputSequence: this.inputSequence,
+      inputRecoveryCount: this.inputRecoveryCount,
+      lastInputFailure: this.lastInputFailure,
+    };
+  }
+
+  #inputParams({ type, key, code, extra = {} }) {
+    return {
       type,
       key,
       code,
       ...keyDefinition(key, code),
       ...extra,
-    });
+    };
+  }
+
+  #recordInputState(events) {
+    for (const { type, key, code } of events) {
+      if (type === 'keyUp') this.heldKeys.delete(code);
+      else if (type === 'rawKeyDown' || type === 'keyDown') this.heldKeys.set(code, { key, code });
+    }
+  }
+
+  async #releaseInputKeys(extraEvents = []) {
+    const releases = new Map(this.heldKeys);
+    for (const { type, key, code } of extraEvents) {
+      if (type !== 'keyUp') releases.set(code, { key, code });
+    }
+    // These are the only gameplay keys synthesized by the browser matrix. Add
+    // them on failure because a renderer can consume a keyDown before CDP loses
+    // its acknowledgement, leaving the local held-key ledger incomplete.
+    for (const [key, code] of [['w', 'KeyW'], ['a', 'KeyA'], ['s', 'KeyS'], ['d', 'KeyD'], [' ', 'Space'], ['e', 'KeyE']]) {
+      releases.set(code, { key, code });
+    }
+    const outcomes = await Promise.allSettled([...releases.values()].map(({ key, code }) => (
+      this.client.send('Input.dispatchKeyEvent', this.#inputParams({ type: 'keyUp', key, code }), this.inputRecoveryTimeoutMs)
+    )));
+    this.heldKeys.clear();
+    return outcomes.map((outcome) => outcome.status === 'fulfilled'
+      ? 'released'
+      : String(outcome.reason?.message || outcome.reason));
+  }
+
+  async #recoverInput(events, cause) {
+    this.inputRecoveryCount += 1;
+    const recovery = {
+      debuggerWasPaused: this.debuggerPaused,
+      resume: null,
+      focus: null,
+      releases: [],
+    };
+    try {
+      await this.client.send('Debugger.resume', {}, this.inputRecoveryTimeoutMs);
+      recovery.resume = 'resumed';
+      this.debuggerPaused = false;
+    } catch (error) {
+      recovery.resume = String(error?.message || error);
+    }
+    try {
+      await this.client.send('Page.bringToFront', {}, this.inputRecoveryTimeoutMs);
+      recovery.focus = 'focused';
+    } catch (error) {
+      recovery.focus = String(error?.message || error);
+    }
+    recovery.releases = await this.#releaseInputKeys(events);
+    this.lastInputFailure = {
+      stage: this.scenarioStage,
+      cause: String(cause?.message || cause),
+      recovery,
+    };
+    return recovery;
+  }
+
+  async dispatchKeyBatch(events, { retry = true, timeoutMs = this.inputCommandTimeoutMs } = {}) {
+    assert.ok(Array.isArray(events) && events.length > 0, 'dispatchKeyBatch requires at least one key event');
+    const normalized = events.map(({ type, key, code, extra = {} }) => ({ type, key, code, extra }));
+    const sequence = ++this.inputSequence;
+    const dispatch = async () => {
+      const outcomes = await Promise.allSettled(normalized.map((event) => (
+        this.client.send('Input.dispatchKeyEvent', this.#inputParams(event), timeoutMs)
+      )));
+      const failures = outcomes.filter(({ status }) => status === 'rejected');
+      if (failures.length > 0) {
+        throw new Error(failures.map(({ reason }) => String(reason?.message || reason)).join(' | '));
+      }
+      return outcomes;
+    };
+    try {
+      await dispatch();
+      this.#recordInputState(normalized);
+      return true;
+    } catch (firstError) {
+      const firstRecovery = await this.#recoverInput(normalized, firstError);
+      if (retry) {
+        try {
+          await dispatch();
+          this.#recordInputState(normalized);
+          return true;
+        } catch (retryError) {
+          const retryRecovery = await this.#recoverInput(normalized, retryError);
+          throw new Error(`${this.name}: input batch ${sequence} failed at ${this.scenarioStage}: ${retryError.message}; first=${firstError.message}; recovery=${JSON.stringify({ firstRecovery, retryRecovery, diagnostics: this.getInputDiagnostics() })}`, { cause: retryError });
+        }
+      }
+      throw new Error(`${this.name}: input batch ${sequence} failed at ${this.scenarioStage}: ${firstError.message}; recovery=${JSON.stringify({ firstRecovery, diagnostics: this.getInputDiagnostics() })}`, { cause: firstError });
+    }
+  }
+
+  async dispatchKey(type, key, code, extra = {}) {
+    return this.dispatchKeyBatch([{ type, key, code, extra }]);
+  }
+
+  async releaseAllKeys() {
+    return this.#releaseInputKeys([]);
+  }
+
+  async ensureInputResponsive(timeoutMs = 3500) {
+    if (this.debuggerPaused) {
+      await this.client.send('Debugger.resume', {}, this.inputRecoveryTimeoutMs);
+      this.debuggerPaused = false;
+    }
+    await this.client.send('Page.bringToFront', {}, this.inputRecoveryTimeoutMs);
+    return this.evaluate(`new Promise((resolve,reject)=>{
+      const deadline=performance.now()+${Math.max(500, timeoutMs - 250)};
+      let frames=0;
+      const poll=()=>{
+        if(++frames>=2){resolve({frames,visibility:document.visibilityState,focus:document.hasFocus()});return;}
+        if(performance.now()>=deadline){reject(new Error('animation frame responsiveness timed out'));return;}
+        requestAnimationFrame(poll);
+      };
+      requestAnimationFrame(poll);
+    })`, { timeoutMs });
   }
 
   async pressKey(key, code, extra = {}) {
@@ -564,6 +712,7 @@ export class GamePage {
   }
 
   async close() {
+    await this.releaseAllKeys().catch(() => {});
     await closeTarget(this.target.id);
     this.client.close();
   }

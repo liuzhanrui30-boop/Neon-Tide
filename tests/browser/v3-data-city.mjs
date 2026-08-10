@@ -5,6 +5,77 @@ const DATA_CITY_URL = new URL('?campaign-test=1&objective-seed=4112&duration-sca
 const KEY = Object.freeze({
   up: ['w', 'KeyW'], down: ['s', 'KeyS'], left: ['a', 'KeyA'], right: ['d', 'KeyD'],
 });
+const LAST_PLAYING = new WeakMap();
+
+function compactDiagnostic(current, activeHazards = []) {
+  const objective = current?.encounter?.objective;
+  const boss = current?.encounter?.bossBehavior;
+  return {
+    mode: current?.session?.mode ?? null,
+    terminalReason: current?.session?.terminalReason ?? null,
+    route: current?.session?.route ?? null,
+    hull: current?.session?.hull ?? null,
+    room: current?.encounter?.chapterPacing?.roomId ?? null,
+    objective: objective ? {
+      type: objective.type,
+      status: objective.status,
+      failureReason: objective.failureReason ?? null,
+      progress: objective.progress ?? null,
+      target: objective.target ?? objective.escort ?? objective.safeZone ?? null,
+      elapsed: objective.elapsed ?? null,
+      timeout: objective.timeout ?? null,
+      crises: objective.crises?.map(({ id, x, y, radius, charge, requiredSeconds, completed, escalated }) => (
+        { id, x, y, radius, charge, requiredSeconds, completed, escalated }
+      )) ?? [],
+    } : null,
+    phase: boss?.phase ?? null,
+    crisis: objective?.crises ?? [],
+    activeHazards,
+    player: current?.player ?? null,
+  };
+}
+
+function setStage(page, stage) {
+  page.setScenarioStage(stage);
+}
+
+async function captureDetailedDiagnostic(page) {
+  return page.evaluate(`(()=>{
+    const app=globalThis.__NEON_TIDE_V3__,s=app?.getDebugSnapshot?.();
+    if(!s)return null;
+    const activeHazards=[];
+    for(const kind of ['warning','enemyHazard','enemyProjectile'])for(const id of app.world.query(kind)){
+      const e=app.world.get(id);
+      if(e)activeHazards.push({id,kind,ownerKind:e.ownerKind??null,attackKind:e.attackKind??e.type??null,
+        state:e.state??null,x:e.x??null,y:e.y??null,age:e.age??null,lifetime:e.lifetime??null});
+    }
+    const o=s.encounter.objective,b=s.encounter.bossBehavior;
+    return {mode:s.session.mode,terminalReason:s.session.terminalReason??null,route:s.session.route,hull:s.session.hull,
+      room:s.encounter.chapterPacing?.roomId??null,
+      objective:o?{type:o.type,status:o.status,failureReason:o.failureReason??null,progress:o.progress??null,
+        target:o.target??o.escort??o.safeZone??null,elapsed:o.elapsed??null,timeout:o.timeout??null,
+        crises:o.crises?.map(({id,x,y,radius,charge,requiredSeconds,completed,escalated})=>({id,x,y,radius,charge,requiredSeconds,completed,escalated}))??[]}:null,
+      phase:b?.phase??null,crisis:o?.crises??[],activeHazards:activeHazards.slice(0,24),
+      player:s.player??null};
+  })()`, { timeoutMs: 2500 });
+}
+
+async function withDataCityDiagnostics(page, callback) {
+  try {
+    return await callback();
+  } catch (error) {
+    await page.releaseAllKeys().catch(() => {});
+    await page.ensureInputResponsive(2500).catch(() => {});
+    const final = await captureDetailedDiagnostic(page).catch((diagnosticError) => ({
+      unavailable: String(diagnosticError?.message || diagnosticError),
+    }));
+    throw new Error(`${error?.message || error}\nData City failure diagnostics: ${JSON.stringify({
+      stage: page.getInputDiagnostics(),
+      lastPlaying: LAST_PLAYING.get(page) ?? null,
+      final,
+    })}`, { cause: error });
+  }
+}
 
 export function getLaneSettlingContract(dataLane) {
   const laneCenter = Number(dataLane?.laneCenter);
@@ -25,7 +96,17 @@ export function getLaneSettlingContract(dataLane) {
 }
 
 async function snapshot(page) {
-  return page.evaluate(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot()`);
+  const { current, activeHazards } = await page.evaluate(`(()=>{
+    const app=globalThis.__NEON_TIDE_V3__,current=app.getDebugSnapshot(),activeHazards=[];
+    for(const kind of ['warning','enemyHazard','enemyProjectile'])for(const id of app.world.query(kind)){
+      const e=app.world.get(id);
+      if(e)activeHazards.push({id,kind,ownerKind:e.ownerKind??null,attackKind:e.attackKind??e.type??null,
+        state:e.state??null,x:e.x??null,y:e.y??null,age:e.age??null,lifetime:e.lifetime??null});
+    }
+    return {current,activeHazards:activeHazards.slice(0,24)};
+  })()`);
+  if (current?.session?.mode === 'playing') LAST_PLAYING.set(page, compactDiagnostic(current, activeHazards));
+  return current;
 }
 
 async function warningOwnerCount(page) {
@@ -56,14 +137,13 @@ async function followPublicObjective(page, objectiveType, timeoutMs = 20000) {
     else if (dx < -0.22) held.push(KEY.left);
     if (dy > 0.22) held.push(KEY.up);
     else if (dy < -0.22) held.push(KEY.down);
-    for (const [key, code] of held) await page.dispatchKey('rawKeyDown', key, code);
     const distance = Math.hypot(dx, dy);
     const dashReady = (current.player?.dashCharges ?? []).some((charge) => charge >= 0.999);
     const dashHeld = objectiveType === 'storm-corridor' && dashReady
       && (distance > 1.7 || objective.stormExposure > 0.25);
-    if (dashHeld) {
-      await page.dispatchKey('rawKeyDown', ' ', 'Space');
-    }
+    const downEvents = held.map(([key, code]) => ({ type: 'rawKeyDown', key, code }));
+    if (dashHeld) downEvents.push({ type: 'rawKeyDown', key: ' ', code: 'Space' });
+    if (downEvents.length > 0) await page.dispatchKeyBatch(downEvents);
     try {
       last = await page.evaluate(`new Promise((resolve)=>{
         let frames=0,last=null,lastPlaying=null;
@@ -76,8 +156,9 @@ async function followPublicObjective(page, objectiveType, timeoutMs = 20000) {
       })`);
       if (last) last.inputTarget = target;
     } finally {
-      if (dashHeld) await page.dispatchKey('keyUp', ' ', 'Space');
-      for (const [key, code] of held) await page.dispatchKey('keyUp', key, code);
+      const upEvents = held.map(([key, code]) => ({ type: 'keyUp', key, code }));
+      if (dashHeld) upEvents.push({ type: 'keyUp', key: ' ', code: 'Space' });
+      if (upEvents.length > 0) await page.dispatchKeyBatch(upEvents);
     }
   }
   throw new Error(`${objectiveType} public-target follower timed out: ${JSON.stringify(last)}`);
@@ -151,8 +232,10 @@ async function settleKeyboardAxis(page, axis, target, tolerance, consecutiveFram
           ? (delta > 0 ? 'right' : 'left')
           : (delta > 0 ? 'up' : 'down');
       if (nextName !== heldName) {
-        if (heldName) await page.dispatchKey('keyUp', ...KEY[heldName]);
-        if (nextName) await page.dispatchKey('rawKeyDown', ...KEY[nextName]);
+        const events = [];
+        if (heldName) events.push({ type: 'keyUp', key: KEY[heldName][0], code: KEY[heldName][1] });
+        if (nextName) events.push({ type: 'rawKeyDown', key: KEY[nextName][0], code: KEY[nextName][1] });
+        if (events.length > 0) await page.dispatchKeyBatch(events);
         heldName = nextName;
       }
       stableFrames = nextName ? 0 : stableFrames + 1;
@@ -276,15 +359,17 @@ async function dashDriveTo(page, x, y, tolerance = 0.3) {
     const held = [];
     if (dx > 0.16) held.push(KEY.right); else if (dx < -0.16) held.push(KEY.left);
     if (dy > 0.16) held.push(KEY.up); else if (dy < -0.16) held.push(KEY.down);
-    for (const [key, code] of held) await page.dispatchKey('rawKeyDown', key, code);
+    const downEvents = held.map(([key, code]) => ({ type: 'rawKeyDown', key, code }));
     const dashHeld = Math.hypot(dx, dy) > 1.35
       && current.player.dashCharges.some((charge) => charge >= 0.999);
-    if (dashHeld) await page.dispatchKey('rawKeyDown', ' ', 'Space');
+    if (dashHeld) downEvents.push({ type: 'rawKeyDown', key: ' ', code: 'Space' });
+    if (downEvents.length > 0) await page.dispatchKeyBatch(downEvents);
     try {
       await page.evaluate(`new Promise((resolve)=>{let frames=0;const poll=()=>{if(++frames>=8){resolve();return;}requestAnimationFrame(poll)};requestAnimationFrame(poll)})`);
     } finally {
-      if (dashHeld) await page.dispatchKey('keyUp', ' ', 'Space');
-      for (const [key, code] of held) await page.dispatchKey('keyUp', key, code);
+      const upEvents = held.map(([key, code]) => ({ type: 'keyUp', key, code }));
+      if (dashHeld) upEvents.push({ type: 'keyUp', key: ' ', code: 'Space' });
+      if (upEvents.length > 0) await page.dispatchKeyBatch(upEvents);
     }
   }
   throw new Error(`dash keyboard route timed out: ${JSON.stringify({ x, y })}`);
@@ -301,11 +386,15 @@ async function chooseUpgrade(page) {
 }
 
 async function pressDash(page) {
-  await page.dispatchKey('rawKeyDown', 'd', 'KeyD');
-  await page.dispatchKey('rawKeyDown', ' ', 'Space');
+  await page.dispatchKeyBatch([
+    { type: 'rawKeyDown', key: 'd', code: 'KeyD' },
+    { type: 'rawKeyDown', key: ' ', code: 'Space' },
+  ]);
   await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
-  await page.dispatchKey('keyUp', ' ', 'Space');
-  await page.dispatchKey('keyUp', 'd', 'KeyD');
+  await page.dispatchKeyBatch([
+    { type: 'keyUp', key: ' ', code: 'Space' },
+    { type: 'keyUp', key: 'd', code: 'KeyD' },
+  ]);
   await page.waitForPage(`(()=>{const p=globalThis.__NEON_TIDE_V3__.world.get(globalThis.__NEON_TIDE_V3__.world.query('player').at(0));return Math.min(p.dashCharge0,p.dashCharge1)<0.25})()`, 1000);
 }
 
@@ -347,6 +436,7 @@ async function continueNaturalRoom(page, diagnostics = null) {
 }
 
 async function measureDataLaneRecovery(page) {
+  setStage(page, 'data-city:escort:data-lane-recovery');
   const authoredLane = (await snapshot(page)).encounter.objective.dataLane;
   const contract = getLaneSettlingContract(authoredLane);
   await settleKeyboardAxis(
@@ -388,6 +478,7 @@ async function measureDataLaneRecovery(page) {
 }
 
 async function completeAuthoredDataCityRooms(page) {
+  setStage(page, 'data-city:escort:entry');
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.chapterPacing?.roomId==='data-city:escort-uplink'`);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.objective.dataLane?.directDamage===0`);
   const entry = await snapshot(page);
@@ -395,9 +486,11 @@ async function completeAuthoredDataCityRooms(page) {
   assert.equal(entry.encounter.chapterPacing.teachingStage, 'introduce');
   assert.equal(entry.encounter.objective.dataLane?.directDamage, 0);
   const recovery = await measureDataLaneRecovery(page);
+  setStage(page, 'data-city:escort:checkpoint-reload');
   await page.reload();
   await page.startGame();
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.chapterPacing?.roomId==='data-city:escort-uplink'`);
+  setStage(page, 'data-city:escort:natural');
   const escortFollow = await followPublicObjective(page, 'escort');
   const escortDone = await continueNaturalRoom(page, escortFollow.last);
   assert.equal(escortDone.encounter.objective.status, 'completed');
@@ -406,6 +499,7 @@ async function completeAuthoredDataCityRooms(page) {
   const upgradesAfterEscort = escortDone.session.build.ownedUpgrades.length;
 
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.chapterPacing?.roomId==='data-city:storm-switchback'`);
+  setStage(page, 'data-city:storm:natural');
   const stormFollow = await followPublicObjective(page, 'storm-corridor');
   const stormDone = await continueNaturalRoom(page, stormFollow.last);
   assert.equal(stormDone.encounter.objective.status, 'completed');
@@ -416,6 +510,7 @@ async function completeAuthoredDataCityRooms(page) {
   assert.ok(stormFollow.maximumWarningOwners <= 2);
 
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.chapterPacing?.roomId==='data-city:dual-crisis'`);
+  setStage(page, 'data-city:dual-crisis:natural');
   const crisisFollow = await followPublicObjective(page, 'dual-crisis');
   const crisisDone = await continueNaturalRoom(page, crisisFollow.last);
   assert.equal(crisisDone.encounter.objective.status, 'completed');
@@ -428,23 +523,30 @@ async function completeAuthoredDataCityRooms(page) {
 }
 
 async function reachProtocolZero(page, runMode = 'standard') {
+  setStage(page, `${runMode}:start`);
   if (runMode === 'abyss') await page.trustedClick('input[name="run-mode"][value="abyss"]');
   await page.startGame();
-  for (let index = 0; index < 4; index += 1) await completePrerequisiteNode(page);
+  for (let index = 0; index < 4; index += 1) {
+    setStage(page, `${runMode}:prerequisite:${index + 1}/4`);
+    await completePrerequisiteNode(page);
+  }
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().campaignContent.loads['data-city']==='loaded'`);
   await completeAuthoredDataCityRooms(page);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior?.bossId==='protocol-zero'`);
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior?.parts?.body?.entityId>0`);
+  setStage(page, `${runMode}:protocol-zero:disable-legacy-nonboss-spawns`);
   await page.gameEvaluate(`
     $state.enemySpawnTimer=Infinity;
     $state.formationTimer=Infinity;
     $state.shardSpawnTimer=Infinity;
     return true;
   `);
+  await page.ensureInputResponsive();
 }
 
 async function clearFirewall(page) {
   for (let index = 0; index < 4; index += 1) {
+    setStage(page, `protocol-zero:firewall:${index + 1}/4`);
     await driveTo(page, 0, 0, 0.24);
     await page.waitForPage(`document.querySelector('#mission-panel')?.dataset.presentationKind==='protocol-firewall'`);
     const presentation = await page.evaluate(`(()=>{
@@ -469,6 +571,7 @@ async function clearFirewall(page) {
 
 async function clearTrafficGrid(page) {
   for (let index = 0; index < 4; index += 1) {
+    setStage(page, `protocol-zero:traffic-grid:${index + 1}/4`);
     const route = await page.evaluate(`(()=>{const s=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();return s.encounter.bossBehavior.safeRoute})()`);
     assert.ok(route?.target, 'truthful cell has a public current-player route contract');
     assert.ok(Array.isArray(route.waypoints));
@@ -482,12 +585,34 @@ async function clearTrafficGrid(page) {
   return snapshot(page);
 }
 
+async function fireNaturallyChargedTideLance(page) {
+  setStage(page, 'protocol-zero:natural-tide-lance:waiting-for-hud-ready');
+  await page.waitForPage(`(()=>{
+    const energy=Number(document.querySelector('#weapon-energy-value')?.textContent??0);
+    return energy>=100&&document.querySelector('#laser-button')?.getAttribute('aria-disabled')==='false';
+  })()`, 12000);
+  const before = await snapshot(page);
+  const energyBefore = await page.evaluate(`Number(document.querySelector('#weapon-energy-value')?.textContent??0)`);
+  assert.ok(energyBefore >= 100, `Tide Lance energy must come from natural pickups: ${energyBefore}`);
+  setStage(page, 'protocol-zero:natural-tide-lance:real-keyboard-fire');
+  await page.dispatchKey('rawKeyDown', 'e', 'KeyE');
+  try {
+    await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+  } finally {
+    await page.dispatchKey('keyUp', 'e', 'KeyE');
+  }
+  await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().weapons.lanceShots>${before.weapons.lanceShots}`, 3500);
+  await page.waitForPage(`(globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.damageByWeapon['tide-lance']??0)>0`, 6000);
+  return { energyBefore, after: await snapshot(page) };
+}
+
 export const v3DataCityScenarios = [
   ['v3 Data City Protocol Zero truthful grid and real weapon victory', async () => {
     await withPage('v3-data-city-standard', { appUrl: DATA_CITY_URL, reducedMotion: true, forcedColors: true }, async (page) => {
-      await reachProtocolZero(page);
-      assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
-      const traffic = await clearFirewall(page);
+      await withDataCityDiagnostics(page, async () => {
+        await reachProtocolZero(page);
+        assert.equal(await page.evaluate(`'bossTest' in globalThis.__NEON_TIDE_V3__`), false);
+        const traffic = await clearFirewall(page);
       const truthful = traffic.encounter.bossBehavior.safeCells.filter((cell) => cell.truthful);
       assert.equal(truthful.length, 1);
       assert.equal(traffic.encounter.bossBehavior.safeCells.filter((cell) => cell.shape === truthful[0].shape).length, 1);
@@ -505,7 +630,8 @@ export const v3DataCityScenarios = [
       assert.equal(safeVisuals.find(({ state }) => state === 'truthful').kind, 'bossPart');
       assert.ok(safeVisuals.some(({ kind }) => kind === 'objective'));
 
-      const clones = await clearTrafficGrid(page);
+        const clones = await clearTrafficGrid(page);
+        setStage(page, 'protocol-zero:clone-nodes:standard');
       assert.equal(new Set(clones.encounter.bossBehavior.parts.nodes.map((node) => node.shape)).size, 3);
       const cloneVisualKinds = await page.evaluate(`(()=>{
         const app=globalThis.__NEON_TIDE_V3__,kinds=[];
@@ -522,9 +648,13 @@ export const v3DataCityScenarios = [
       assert.ok(automaticHit.encounter.bossBehavior.parts.nodes.some((node) => (
         automaticHit.weapons.lastTargetId === node.entityId || node.hp < node.maxHp
       )), 'automatic weapon naturally targets a visible clone node');
+        const naturalLance = await fireNaturallyChargedTideLance(page);
+        assert.ok(naturalLance.after.encounter.bossBehavior.damageByWeapon['tide-lance'] > 0);
+        setStage(page, 'protocol-zero:kernel:standard');
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='kernel'`, 16000);
       await driveTo(page, 0, 0, 0.3);
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`, 12000);
+        setStage(page, 'protocol-zero:cleanup:standard');
       const victory = await snapshot(page);
       assert.equal(victory.encounter.bossBehavior.clean, true);
       assert.equal(victory.encounter.bossBehavior.ownedEntityCount, 0);
@@ -532,12 +662,14 @@ export const v3DataCityScenarios = [
       assert.ok(victory.encounter.bossBehavior.maxOwnedEntityCount <= 48);
       assert.ok(victory.encounter.bossBehavior.maxSimultaneousWarnings <= 3);
       assert.equal(victory.events.dropped, 0);
+      });
     });
   }],
   ['v3 Abyss Protocol Zero decoys preserve shape and rhythm evidence', async () => {
     await withPage('v3-data-city-abyss', { appUrl: DATA_CITY_URL, reducedMotion: true, forcedColors: true }, async (page) => {
-      await reachProtocolZero(page, 'abyss');
-      const traffic = await clearFirewall(page);
+      await withDataCityDiagnostics(page, async () => {
+        await reachProtocolZero(page, 'abyss');
+        const traffic = await clearFirewall(page);
       assert.equal(traffic.encounter.bossBehavior.mode, 'abyss');
       assert.equal(traffic.encounter.bossBehavior.safeCells.filter((cell) => cell.truthful).length, 1);
       assert.ok(traffic.encounter.bossBehavior.safeCells.some((cell) => cell.decoy));
@@ -564,13 +696,20 @@ export const v3DataCityScenarios = [
       assert.ok(second.renderer.protocolRhythmEntitiesRendered > 0);
       assert.ok(second.renderer.protocolRhythmActiveRendered > 0);
       assert.ok(second.prompt.includes('离散节拍'));
-      const clones = await clearTrafficGrid(page);
+        const clones = await clearTrafficGrid(page);
+        setStage(page, 'protocol-zero:clone-nodes:abyss');
       assert.equal(clones.encounter.bossBehavior.phase, 'cloneNodes');
       assert.equal(new Set(clones.encounter.bossBehavior.parts.nodes.map((node) => node.shape)).size, 3);
       await driveTo(page, 0, 0, 0.3);
+        const automaticBefore = (await snapshot(page)).weapons.shotsFired;
+        await page.waitForPage(`(()=>{const s=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();return s.weapons.shotsFired>${automaticBefore}&&(s.encounter.bossBehavior.damageByWeapon['pulse-cannon']??0)>0})()`, 10000);
+        const naturalLance = await fireNaturallyChargedTideLance(page);
+        assert.ok(naturalLance.after.encounter.bossBehavior.damageByWeapon['tide-lance'] > 0);
+        setStage(page, 'protocol-zero:kernel:abyss');
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='kernel'`, 18000);
       await driveTo(page, 0, 0, 0.3);
       await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`, 14000);
+        setStage(page, 'protocol-zero:cleanup:abyss');
       const victory = await snapshot(page);
       assert.equal(victory.encounter.bossBehavior.clean, true);
       assert.equal(victory.encounter.bossBehavior.ownedEntityCount, 0);
@@ -578,6 +717,7 @@ export const v3DataCityScenarios = [
       assert.ok(victory.encounter.bossBehavior.maxOwnedEntityCount <= 48);
       assert.ok(victory.encounter.bossBehavior.maxSimultaneousWarnings <= 4);
       assert.equal(victory.events.dropped, 0);
+      });
     });
   }],
 ];

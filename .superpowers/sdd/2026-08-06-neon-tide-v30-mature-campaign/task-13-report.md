@@ -4,7 +4,7 @@
 
 **ITEM 9 CLOSED; ITEM 8 REMAINS OPEN. TASK 13 BROWSER ACCEPTANCE IS NOT COMPLETE.**
 
-The deterministic current-player→truthful-cell temporal corridor contract, project Node 22 suite, production build, syntax checks, and round-2 production cold probe are green. Round 3 removed the real data-lane browser-helper race, but the separately bounded Standard and Abyss campaign scenarios still failed before Protocol Zero. No Standard/Abyss Boss victory or cleanup is claimed.
+The deterministic current-player→truthful-cell temporal corridor contract, project Node 22 suite, production build, syntax checks, and round-2 production cold probe are green. Round 5 removed the unbounded CDP input failure mode and now emits a conclusive public-state failure snapshot, but the final valid Standard attempt exposed a separate hard-coded browser-helper Y-direction defect before the first natural Data City room completed. Standard Protocol Zero victory/cleanup is not claimed; Abyss was not run because Standard did not pass.
 
 ## Delivered implementation
 
@@ -124,3 +124,66 @@ Error: Input.dispatchKeyEvent timed out
 ```
 
 The timeout did not yield a valid terminal objective snapshot or a Boss result. Per the run budget, the Standard browser scenario was not retried. Abyss browser acceptance was **not run** in this round. Therefore firewall/traffic/clone/kernel victory, real-resource weapon proof, and cleanup remain unverified for both modes despite the deterministic route/pacing repairs. Temporary Vite `4174` and Chrome CDP `9360` processes were removed; the live v2.2 service on `4173` and its `9333` CDP endpoint were not touched.
+
+## Round 5 — final input-harness repair and bounded browser conclusion
+
+**Status: ITEM 8 REMAINS OPEN. Standard and Abyss Protocol Zero browser victory/cleanup are not claimed.**
+
+### CDP timeout audit and repair
+
+The Round 4 error was not the 150-second process alarm: Chrome remained alive and the scenario returned after one `Input.dispatchKeyEvent` consumed the harness's generic 30-second command timeout. The input path also sent simultaneous direction keys serially, had no input-specific timeout, did not retain a held-key ledger, swallowed the possibility of a debugger pause, and could not identify the room or phase where the command stopped acknowledging.
+
+Round 5 changed only the browser harness/tests, not player physics or game difficulty:
+
+- gameplay key commands now use an explicit 2.5-second bound;
+- same-frame direction/dash transitions are sent as a concurrent batch and awaited with `allSettled`, preventing late acknowledgements from racing recovery;
+- one bounded recovery resumes a paused debugger if necessary, restores target focus, releases W/A/S/D/Space/E, and retries the idempotent key-state transition once;
+- every Data City phase publishes a harness stage, and a failure releases keys then reports input state plus public `lastPlaying`/final mode, route, terminal reason, hull, room, objective progress/target/crises, Boss phase, active hazards, and player state;
+- Standard/Abyss acceptance now requires a naturally filled HUD energy bar and a real `E` key Tide Lance hit in addition to real automatic-weapon damage. No energy, HP, player, objective, phase, invulnerability, healing, projectile, or Boss-attack authority is written.
+
+Three deterministic harness tests prove bounded retry/release, concurrent two-key dispatch, and terminal diagnostics after a second failure.
+
+### Round 5 verification before browser acceptance
+
+All commands used the project Node `v22.14.0` runtime.
+
+```text
+node --test tests/browser-harness-input.test.mjs tests/data-city-browser-helper.test.mjs \
+  tests/data-city-chapter.test.mjs tests/campaign-natural-completion.test.mjs tests/campaign.test.mjs
+32/32 PASS (1677.123708ms)
+
+npm test
+328/328 PASS (5430.202541ms)
+
+npm run build
+PASS
+  Data City lazy chunk: 4.80 kB minified / 1.87 kB gzip; 6.93 kB unminified
+  Main entry: 15.63 kB minified / 5.85 kB gzip; 31,661 bytes unminified
+  Gameplay core: 235.23 kB minified / 74.65 kB gzip; 467.27 kB unminified
+  Existing Three.js vendor warning only: 525.56 kB minified
+```
+
+The round-2 production cold probe was not rerun because no bootstrap, session, lazy-loading, or production runtime file changed.
+
+### Final Standard result — FAIL with conclusive helper evidence
+
+An initial setup invocation ended immediately at browser-matrix setup with `TypeError: fetch failed` because the command runner reaped background Vite/Chrome children after their launcher exited. It never opened a scenario and provided no gameplay result. Vite and Chrome were then held by one persistent owner and readiness was verified before the one valid Standard attempt.
+
+The valid Standard attempt did **not** reproduce the CDP timeout, debugger pause, renderer stall, headless crash, or 150-second alarm. It failed in 7.9 seconds at the first Data City lane measurement:
+
+```text
+keyboard axis did not settle:
+axis=y target=1.75 tolerance=0.16
+last public player=(0,-5.731544943053078), mode=playing
+
+stage=data-city:escort:data-lane-recovery
+inputSequence=21, inputRecoveryCount=0, debuggerPaused=false, heldKeys=[]
+route=data-city:room:1:escort-skiff, room=data-city:escort-uplink
+hull=4, terminalReason=null
+objective=escort active, progress=0, elapsed=6.2/9.75
+final public player=(0,-5.261598339720916), velocityY=+1.9190537101679477
+```
+
+The helper's positive-public-Y branch held its hard-coded `W` mapping, while the real Chrome/game path moved the published player to the negative arena boundary and only showed positive velocity after the boundary rebound. Input acknowledgements were healthy (`inputRecoveryCount=0`), the page remained `playing`, hull was untouched, and full active-hazard diagnostics were returned. This is now a precise, reproducible browser-helper key-to-world-Y assumption defect rather than an inconclusive CDP timeout. The final-round run budget did not permit another Standard iteration, so it was not changed and rerun.
+
+Because Standard was not green, the separately bounded Abyss scenario was not run. Consequently no Round 5 claim is made for natural three-room completion, firewall, trafficGrid, cloneNodes, kernel, naturally charged Tide Lance Boss damage, victory, or cleanup in either mode.
