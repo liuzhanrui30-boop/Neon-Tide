@@ -263,6 +263,21 @@ function distanceTo(player, target) {
   return Math.hypot(x - target.x, y - target.y);
 }
 
+export function getDataLaneEffect(lane = {}, player = {}) {
+  const active = lane?.type === 'data-lane'
+    && lane?.phase === 'active'
+    && Math.abs(finite(player?.y ?? player?.position?.y) - finite(lane.laneCenter))
+      <= Math.max(0, finite(lane.laneHalfWidth, 1));
+  return Object.freeze({
+    active,
+    steeringMultiplier: active ? Math.max(0.5, Math.min(1, finite(lane.steeringMultiplier, 0.78))) : 1,
+    dashRecoveryMultiplier: active
+      ? Math.max(0.5, Math.min(1, finite(lane.dashRecoveryMultiplier, 0.65)))
+      : 1,
+    directDamage: 0,
+  });
+}
+
 function eventInput(events) {
   if (Array.isArray(events)) return events;
   if (Array.isArray(events?.input)) return events.input;

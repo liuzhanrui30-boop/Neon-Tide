@@ -9,9 +9,11 @@ const MAX_OWNED_ENTITIES = 48;
 const SPAWN_FAILURE_SECONDS = 2.5;
 const ROUTE_OUTER_RADIUS = 4.8;
 const ROUTE_INNER_RADIUS = 2.2;
+const DAMAGE_WEAPON_KEYS = new Set(['pulse-cannon', 'arc-drones', 'prism-missiles', 'tide-lance']);
 
 const finite = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
 const clamp = (value, minimum, maximum) => Math.max(minimum, Math.min(maximum, value));
+const damageWeaponKey = (value) => DAMAGE_WEAPON_KEYS.has(String(value)) ? String(value) : 'other';
 
 function cloneFrozen(value) {
   if (value == null || typeof value !== 'object') return value;
@@ -100,7 +102,7 @@ function bossObjective(definition, targetDurationSeconds) {
   };
 }
 
-export function createBossSystem({ seed = 0, mode = 'standard' } = {}) {
+function createAbyssMawBossSystem({ seed = 0, mode = 'standard' } = {}) {
   if (!Number.isFinite(Number(seed))) throw new TypeError('Boss seed must be finite');
   if (!['standard', 'abyss'].includes(mode)) throw new TypeError('Boss mode must be standard or abyss');
 
@@ -873,7 +875,8 @@ export function createBossSystem({ seed = 0, mode = 'standard' } = {}) {
       if (record?.targetKind !== 'bossPart') continue;
       const amount = Math.max(0, finite(record.amount));
       if (amount > 0 && record.weaponId) {
-        damageByWeapon[record.weaponId] = (damageByWeapon[record.weaponId] ?? 0) + amount;
+        const weaponId = damageWeaponKey(record.weaponId);
+        damageByWeapon[weaponId] = (damageByWeapon[weaponId] ?? 0) + amount;
       }
       const organIndex = organIds.findIndex((id) => id > 0 && id === record.targetId);
       if (organIndex >= 0 && phase === 'weakPoints' && !organDestroyed[organIndex]) {
@@ -1122,5 +1125,692 @@ export function createBossSystem({ seed = 0, mode = 'standard' } = {}) {
     completeForDeterministicTest,
     getSnapshot,
     getObjective: () => cloneFrozen(objective),
+  });
+}
+
+const PROTOCOL_PHASES = Object.freeze(['firewall', 'trafficGrid', 'cloneNodes', 'kernel']);
+const PROTOCOL_OWNED_KINDS = Object.freeze([...OWNED_KINDS, 'objective']);
+const PROTOCOL_NODE_KINDS = Object.freeze(['enemy', 'bossPart', 'objective']);
+const PROTOCOL_NODE_POSITIONS = Object.freeze([
+  Object.freeze({ x: -4.6, y: -2.8 }),
+  Object.freeze({ x: 4.6, y: -2.8 }),
+  Object.freeze({ x: 0, y: 3.6 }),
+]);
+
+function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
+  let definition = null;
+  let behaviorContract = null;
+  let objective = null;
+  let worldReference = null;
+  let phase = 'idle';
+  let elapsed = 0;
+  let phaseElapsed = 0;
+  let bodyId = 0;
+  let attackTimer = 0;
+  let attackCursor = 0;
+  let firewallIndex = 0;
+  let firewallClears = 0;
+  let safeCellIndex = 0;
+  let safeCellHold = 0;
+  let safeCellClears = 0;
+  let safeCells = [];
+  let safeRoute = { openLanes: 1, laneIndex: 1, evidence: 'shape-and-rhythm' };
+  let clean = false;
+  let cleanupReason = null;
+  let spawnFailures = 0;
+  let maxOwnedEntityCount = 0;
+  let maxSimultaneousWarnings = 0;
+  let diagnosticReconciliations = 0;
+  let updates = 0;
+  const nodeIds = new Float64Array(3);
+  const nodeDestroyed = new Uint8Array(3);
+  const nodeHp = new Float64Array(3);
+  const owned = Object.fromEntries(PROTOCOL_OWNED_KINDS.map((kind) => [kind, new Set()]));
+  const attacksSeen = new Set();
+  const attackCounts = { telegraph: 0, active: 0, trafficWall: 0, predictiveBeam: 0, gridLock: 0, cloneBurst: 0 };
+  const damageByWeapon = Object.create(null);
+  const read = createEntityReadTarget();
+  const playerRead = createEntityReadTarget();
+
+  function ownedCount() {
+    return PROTOCOL_OWNED_KINDS.reduce((sum, kind) => sum + owned[kind].size, 0);
+  }
+
+  function currentWarningCount() {
+    return owned.warning.size;
+  }
+
+  function reconcileOwned(world = worldReference) {
+    diagnosticReconciliations += 1;
+    if (!world?.readInto) return ownedCount();
+    for (const kind of PROTOCOL_OWNED_KINDS) {
+      for (const id of [...owned[kind]]) {
+        const entity = world.readInto(id, read);
+        if (!entity || entity.kind !== kind || entity.ownerKind !== 'boss') owned[kind].delete(id);
+      }
+    }
+    return ownedCount();
+  }
+
+  function spawnOwned(world, kind, data, reserve = false) {
+    if (!reserve && ownedCount() >= definition.maxOwnedEntities) {
+      spawnFailures += 1;
+      return 0;
+    }
+    const id = world.spawn(kind, { ...data, ownerKind: 'boss' });
+    if (id == null) {
+      spawnFailures += 1;
+      return 0;
+    }
+    owned[kind].add(id);
+    maxOwnedEntityCount = Math.max(maxOwnedEntityCount, ownedCount());
+    if (kind === 'warning') maxSimultaneousWarnings = Math.max(maxSimultaneousWarnings, currentWarningCount());
+    return id;
+  }
+
+  function despawnOwned(world, kind, id) {
+    if (!id) return false;
+    owned[kind]?.delete(id);
+    return world?.despawn?.(id) ?? false;
+  }
+
+  function validateProtocolDefinition(value) {
+    if (!value || value.id !== 'protocol-zero') throw new TypeError('Protocol Zero definition is required');
+    if (!PROTOCOL_PHASES.every((entry) => value.phases?.[entry])) {
+      throw new TypeError('Protocol Zero must include firewall, trafficGrid, cloneNodes, and kernel');
+    }
+    if (value.maxOwnedEntities > MAX_OWNED_ENTITIES || value.maxOwnedEntities < 8) {
+      throw new TypeError('Protocol Zero entity budget is outside Boss runtime bounds');
+    }
+    return value;
+  }
+
+  function protocolObjective(targetDurationSeconds) {
+    const timeout = Math.max(0.1, finite(targetDurationSeconds, 110));
+    return {
+      id: `${definition.id}:objective`, templateId: definition.id, type: 'boss', label: definition.label,
+      status: 'active', completed: false, failed: false, failureReason: null,
+      elapsed: 0, timeout, timeoutRemaining: timeout, progress: 0, target: 100, progressRatio: 0,
+      phase: 'firewall', arena: { ...definition.arena }, safeZone: null,
+      cleanup: [...definition.cleanupKinds], bossId: definition.id,
+      firewallClears: 0, requiredQuadrants: definition.phases.firewall.requiredQuadrants,
+      safeCellClears: 0, requiredSafeCells: definition.phases.trafficGrid.requiredSafeCells,
+      destroyedNodes: 0, nodeCount: definition.phases.cloneNodes.nodeCount,
+    };
+  }
+
+  function markedQuadrant() {
+    const cycle = (Math.trunc(seed) + firewallIndex) & 3;
+    return Object.freeze({
+      index: cycle,
+      xSign: cycle === 0 || cycle === 3 ? 1 : -1,
+      ySign: cycle < 2 ? 1 : -1,
+      shape: ['cut-corner-square', 'chevron', 'double-bar', 'open-diamond'][cycle],
+      pulseBeat: firewallIndex % 4,
+    });
+  }
+
+  function setObjectiveProgress() {
+    if (!objective) return;
+    let ratio = 0;
+    if (phase === 'firewall') ratio = 0.25 * firewallClears / definition.phases.firewall.requiredQuadrants;
+    else if (phase === 'trafficGrid') ratio = 0.25 + 0.25 * safeCellClears / definition.phases.trafficGrid.requiredSafeCells;
+    else if (phase === 'cloneNodes') {
+      ratio = 0.5 + 0.3 * nodeDestroyed.reduce((sum, value) => sum + value, 0) / nodeDestroyed.length;
+    } else if (phase === 'kernel') {
+      const body = worldReference?.readInto?.(bodyId, read);
+      ratio = 0.8 + 0.2 * (1 - clamp(finite(body?.hp, definition.phases.kernel.coreHp)
+        / definition.phases.kernel.coreHp, 0, 1));
+    } else if (phase === 'complete') ratio = 1;
+    objective.phase = phase;
+    objective.firewallClears = firewallClears;
+    objective.safeCellClears = safeCellClears;
+    objective.destroyedNodes = nodeDestroyed.reduce((sum, value) => sum + value, 0);
+    objective.progressRatio = clamp(ratio, 0, 1);
+    objective.progress = objective.progressRatio * objective.target;
+  }
+
+  function publishPhase(events) {
+    emit(events, 'boss:state', {
+      bossId: definition.id, phase, firewallClears, safeCellClears,
+      destroyedNodes: nodeDestroyed.reduce((sum, value) => sum + value, 0),
+      safeRoute,
+    });
+    emit(events, 'boss:music-layer', {
+      bossId: definition.id, phase, layer: definition.musicLayers[phase] ?? null,
+    });
+  }
+
+  function spawnBody(world) {
+    if (bodyId && world.readInto(bodyId, read)) return true;
+    bodyId = spawnOwned(world, 'bossPart', {
+      x: 0, y: 0, hp: definition.phases.kernel.coreHp, maxHp: definition.phases.kernel.coreHp,
+      radius: definition.silhouette.bodyRadius, scale: definition.silhouette.bodyRadius,
+      scaleX: 1.2, scaleY: 1.2, team: 2, role: 'boss', type: 'protocol-zero-body',
+      partId: 'kernel', threat: 100, invulnerable: true, collidable: true,
+      weakPoint: false, armored: true, color: definition.silhouette.bodyColor, variant: 'protocol-core',
+    }, true);
+    return bodyId > 0;
+  }
+
+  function clearSafeCellVisuals(world) {
+    for (const kind of ['bossPart', 'enemy', 'objective']) {
+      for (const id of [...owned[kind]]) {
+        const entity = world?.readInto?.(id, read);
+        if (entity?.type === 'protocol-safe-cell') despawnOwned(world, kind, id);
+      }
+    }
+  }
+
+  function generateSafeCells(world) {
+    clearSafeCellVisuals(world);
+    const columns = definition.phases.trafficGrid.gridColumns;
+    const rows = definition.phases.trafficGrid.gridRows;
+    const count = columns * rows;
+    const trueIndex = (Math.trunc(seed) + safeCellIndex * 5) % count;
+    const falseShapes = definition.safeCellShapes.standardFalse;
+    safeCells = Array.from({ length: count }, (_, index) => {
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const truthful = index === trueIndex;
+      const decoy = mode === 'abyss' && !truthful && (index + safeCellIndex) % 3 === 0;
+      const shape = truthful
+        ? definition.safeCellShapes.truthful
+        : decoy
+          ? definition.safeCellShapes.abyssDecoy[(index + safeCellIndex) % definition.safeCellShapes.abyssDecoy.length]
+          : falseShapes[index % falseShapes.length];
+      return Object.freeze({
+        id: `safe-cell-${safeCellIndex}-${index}`,
+        x: (column - 1) * 5.6,
+        y: (row - 0.5) * 5.2,
+        halfWidth: 1.35,
+        halfHeight: 1.45,
+        truthful,
+        decoy,
+        shape,
+        pulseBeat: truthful ? 0 : decoy ? 2 : (index % 3) + 1,
+      });
+    });
+    safeRoute = Object.freeze({
+      openLanes: 1,
+      laneIndex: trueIndex % columns,
+      evidence: 'unique-shape-and-primary-beat',
+    });
+    for (const cell of safeCells) {
+      const kind = cell.truthful ? 'bossPart' : cell.decoy ? 'enemy' : 'objective';
+      spawnOwned(world, kind, {
+        x: cell.x, y: cell.y, radius: 0.92,
+        scale: 0.92,
+        scaleX: cell.truthful ? 1.15 : cell.decoy ? 1 : 1.25,
+        scaleY: cell.truthful ? 1.15 : cell.decoy ? 1 : 0.82,
+        rotation: cell.decoy ? Math.PI / 4 : 0,
+        team: 1,
+        role: 'safe-cell',
+        type: 'protocol-safe-cell',
+        partId: cell.id,
+        objective: kind === 'objective',
+        objectiveType: 'protocol-safe-cell',
+        invulnerable: true,
+        collidable: false,
+        contactDamaging: false,
+        weakPoint: false,
+        color: cell.truthful ? 0xb8ff45 : cell.decoy ? 0x936cff : 0x27e5ff,
+        variant: cell.shape,
+        state: cell.truthful ? 'truthful' : cell.decoy ? 'decoy' : 'false',
+        sequence: cell.pulseBeat,
+        opacity: cell.truthful ? 1 : 0.72,
+      });
+    }
+  }
+
+  function spawnNode(world, index) {
+    if (nodeDestroyed[index]) return true;
+    if (nodeIds[index] && world.readInto(nodeIds[index], read)) return true;
+    const position = PROTOCOL_NODE_POSITIONS[index];
+    const shape = definition.phases.cloneNodes.shapes[index];
+    const kind = PROTOCOL_NODE_KINDS[index];
+    const scale = shape === 'diamond'
+      ? { scaleX: 0.92, scaleY: 0.92, rotation: 0 }
+      : shape === 'hexagon'
+        ? { scaleX: 1.08, scaleY: 1.08, rotation: 0 }
+        : { scaleX: 1.18, scaleY: 1.18, rotation: 0 };
+    nodeHp[index] = definition.phases.cloneNodes.nodeHp;
+    nodeIds[index] = spawnOwned(world, kind, {
+      ...position, ...scale, hp: nodeHp[index], maxHp: nodeHp[index], radius: 0.68, scale: 0.68,
+      team: 2, role: 'boss', type: 'protocol-clone-node', partId: `node-${index + 1}`,
+      objective: kind === 'objective', objectiveType: kind === 'objective' ? 'protocol-clone-node' : null,
+      threat: 85 - index, invulnerable: false, collidable: true, weakPoint: true,
+      armored: false, color: definition.silhouette.nodeColor, variant: shape,
+    }, true);
+    return nodeIds[index] > 0;
+  }
+
+  function transition(nextPhase, world, events) {
+    if (phase === nextPhase || clean) return false;
+    phase = nextPhase;
+    phaseElapsed = 0;
+    attackTimer = 0;
+    if (phase === 'trafficGrid') generateSafeCells(world);
+    else if (phase === 'cloneNodes') {
+      clearSafeCellVisuals(world);
+      safeCells = [];
+      for (let index = 0; index < nodeIds.length; index += 1) spawnNode(world, index);
+    } else if (phase === 'kernel') {
+      for (let index = 0; index < nodeIds.length; index += 1) {
+        if (nodeIds[index]) despawnOwned(world, PROTOCOL_NODE_KINDS[index], nodeIds[index]);
+        nodeIds[index] = 0;
+      }
+      world.write(bodyId, {
+        hp: definition.phases.kernel.coreHp, maxHp: definition.phases.kernel.coreHp,
+        invulnerable: false, armored: false, weakPoint: true,
+        color: definition.silhouette.kernelColor, variant: 'exposed-kernel',
+      });
+    }
+    setObjectiveProgress();
+    publishPhase(events);
+    emit(events, 'boss:phase-changed', { bossId: definition.id, phase });
+    return true;
+  }
+
+  function warningCap() {
+    return definition.warningCap[mode];
+  }
+
+  function spawnWarning(world, data) {
+    if (currentWarningCount() >= warningCap()) return 0;
+    const duration = Math.max(finite(data.duration), behaviorContract.telegraphFloorSeconds);
+    const id = spawnOwned(world, 'warning', {
+      ...data, duration, lifetime: duration, age: 0, collidable: false,
+      contactDamaging: false, state: 'telegraph', team: 2,
+    });
+    if (id) attackCounts.telegraph += 1;
+    return id;
+  }
+
+  function spawnTrafficWall(world) {
+    const safeLane = (safeRoute.laneIndex + attackCursor) % 3;
+    let spawned = 0;
+    for (let lane = 0; lane < 3; lane += 1) {
+      if (lane === safeLane) continue;
+      spawned += Boolean(spawnWarning(world, {
+        x: (lane - 1) * 5.6, y: 0, rotation: 0, radius: 0.55,
+        scaleX: 1.5, scaleY: 6.4, attackKind: 'traffic-wall',
+        variant: 'oriented-box', color: 0xff4fd8,
+        duration: definition.attacks.trafficWall.telegraphSeconds,
+      }));
+    }
+    if (spawned) {
+      attackCounts.trafficWall += 1;
+      attacksSeen.add('traffic-wall');
+      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeLane, evidence: 'unblocked-column' });
+    }
+  }
+
+  function spawnPredictiveBeams(world, player) {
+    const direction = normalized(finite(player.vx), finite(player.vy), 1, 0);
+    const rotation = Math.atan2(direction.y, direction.x);
+    let spawned = 0;
+    for (const offset of [-1, 1]) {
+      spawned += Boolean(spawnWarning(world, {
+        x: clamp(player.x + direction.x * 3.2 - direction.y * offset * 1.8, -8.8, 8.8),
+        y: clamp(player.y + direction.y * 3.2 + direction.x * offset * 1.8, -5.6, 5.6),
+        rotation, radius: 0.35, scaleX: 7.2, scaleY: 0.55,
+        attackKind: 'predictive-beam', variant: 'oriented-box', color: 0x936cff,
+        duration: definition.attacks.predictiveBeam.telegraphSeconds,
+      }));
+    }
+    if (spawned) {
+      attackCounts.predictiveBeam += 1;
+      attacksSeen.add('predictive-beam');
+      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeRoute.laneIndex, evidence: 'beam-center-gap' });
+    }
+  }
+
+  function spawnGridLock(world) {
+    const truthful = safeCells.find((cell) => cell.truthful);
+    if (!truthful) return;
+    let spawned = 0;
+    for (const cell of safeCells) {
+      if (cell.truthful || spawned >= warningCap()) continue;
+      spawned += Boolean(spawnWarning(world, {
+        x: cell.x, y: cell.y, radius: 0.4, scaleX: cell.halfWidth, scaleY: cell.halfHeight,
+        attackKind: 'grid-lock', variant: 'oriented-box', color: 0xff4fd8,
+        duration: definition.attacks.gridLock.telegraphSeconds,
+      }));
+    }
+    if (spawned) {
+      attackCounts.gridLock += 1;
+      attacksSeen.add('grid-lock');
+      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeRoute.laneIndex, evidence: truthful.shape });
+    }
+  }
+
+  function spawnCloneBurst(world) {
+    let spawned = 0;
+    for (let index = 0; index < nodeIds.length && spawned < warningCap(); index += 1) {
+      if (nodeDestroyed[index]) continue;
+      const node = world.readInto(nodeIds[index], read);
+      if (!node) continue;
+      const direction = normalized(-node.x, -node.y);
+      spawned += Boolean(spawnWarning(world, {
+        x: node.x + direction.x * 1.4, y: node.y + direction.y * 1.4,
+        rotation: Math.atan2(direction.y, direction.x), radius: 0.35,
+        scaleX: 4.2, scaleY: 0.55, attackKind: 'clone-burst',
+        variant: 'oriented-box', color: definition.silhouette.nodeColor,
+        duration: definition.attacks.cloneBurst.telegraphSeconds,
+      }));
+    }
+    if (spawned) {
+      attackCounts.cloneBurst += 1;
+      attacksSeen.add('clone-burst');
+      safeRoute = Object.freeze({ openLanes: 1, laneIndex: 1, evidence: 'between-distinct-node-rays' });
+    }
+  }
+
+  function scheduleAttack(world, player) {
+    if (attackTimer > 0 || phase === 'firewall') return;
+    if (phase === 'trafficGrid') {
+      if (attackCursor % 3 === 0) spawnGridLock(world);
+      else if (attackCursor % 3 === 1) spawnTrafficWall(world);
+      else spawnPredictiveBeams(world, player);
+    } else if (phase === 'cloneNodes') {
+      if (attackCursor % 2 === 0) spawnCloneBurst(world);
+      else spawnPredictiveBeams(world, player);
+    } else if (phase === 'kernel') {
+      if (attackCursor % 2 === 0) spawnTrafficWall(world);
+      else spawnPredictiveBeams(world, player);
+    }
+    attackCursor += 1;
+    attackTimer = (phase === 'kernel' ? 1.7 : 2.1) * behaviorContract.recoveryMultiplier;
+  }
+
+  function updateOwnedLifetimes(world, dt) {
+    for (const kind of ['warning', 'enemyHazard', 'enemyProjectile']) {
+      for (const id of [...owned[kind]]) {
+        const entity = world.readInto(id, read);
+        if (!entity) {
+          owned[kind].delete(id);
+          continue;
+        }
+        const age = finite(entity.age) + dt;
+        if (age < finite(entity.lifetime, Infinity) - EPSILON) {
+          world.write(id, { age });
+          continue;
+        }
+        if (kind === 'warning') {
+          const hazardId = spawnOwned(world, 'enemyHazard', {
+            x: entity.x, y: entity.y, rotation: entity.rotation, radius: entity.radius,
+            scaleX: entity.scaleX, scaleY: entity.scaleY, team: 2,
+            ownerId: bodyId, attackKind: entity.attackKind, role: 'boss',
+            variant: entity.variant, color: entity.color, state: 'active', age: 0,
+            lifetime: entity.attackKind === 'traffic-wall' ? 1.05 : 0.72,
+            damage: 0.65, contactDamaging: true, collidable: true,
+          });
+          if (hazardId) attackCounts.active += 1;
+        }
+        despawnOwned(world, kind, id);
+      }
+    }
+  }
+
+  function updateFirewall(player, world, events) {
+    const marked = markedQuadrant();
+    if (Math.abs(player.x) < definition.phases.firewall.entryRadiusX
+      || Math.abs(player.y) < definition.phases.firewall.entryRadiusY
+      || Math.sign(player.x) !== marked.xSign || Math.sign(player.y) !== marked.ySign) return;
+    firewallClears += 1;
+    firewallIndex += 1;
+    emit(events, 'boss:firewall-cleared', {
+      bossId: definition.id, clear: firewallClears, required: definition.phases.firewall.requiredQuadrants,
+    });
+    if (firewallClears >= definition.phases.firewall.requiredQuadrants) transition('trafficGrid', world, events);
+  }
+
+  function updateTrafficGrid(player, world, dt, events) {
+    const truthful = safeCells.find((cell) => cell.truthful);
+    if (!truthful) return;
+    const inside = Math.abs(player.x - truthful.x) <= truthful.halfWidth
+      && Math.abs(player.y - truthful.y) <= truthful.halfHeight;
+    safeCellHold = inside ? safeCellHold + dt : 0;
+    if (safeCellHold < definition.phases.trafficGrid.holdSeconds - EPSILON) return;
+    safeCellHold = 0;
+    safeCellClears += 1;
+    safeCellIndex += 1;
+    emit(events, 'boss:safe-cell-cleared', {
+      bossId: definition.id, clear: safeCellClears, required: definition.phases.trafficGrid.requiredSafeCells,
+      evidence: truthful.shape,
+    });
+    if (safeCellClears >= definition.phases.trafficGrid.requiredSafeCells) transition('cloneNodes', world, events);
+    else generateSafeCells(world);
+  }
+
+  function applyDamageRecords(world, damageRecords, events) {
+    for (const record of damageRecords) {
+      if (!record) continue;
+      const weaponId = damageWeaponKey(record.weaponId ?? record.sourceKind);
+      damageByWeapon[weaponId] = finite(damageByWeapon[weaponId]) + Math.max(0, finite(record.amount));
+      const nodeIndex = nodeIds.findIndex((id) => id && id === record.targetId);
+      if (nodeIndex >= 0 && phase === 'cloneNodes' && !nodeDestroyed[nodeIndex]) {
+        const entity = world.readInto(nodeIds[nodeIndex], read);
+        nodeHp[nodeIndex] = Math.max(0, finite(record.hpAfter, entity?.hp ?? nodeHp[nodeIndex] - finite(record.amount)));
+        if (record.destroyed || nodeHp[nodeIndex] <= EPSILON || !entity) {
+          nodeDestroyed[nodeIndex] = 1;
+          despawnOwned(world, PROTOCOL_NODE_KINDS[nodeIndex], nodeIds[nodeIndex]);
+          nodeIds[nodeIndex] = 0;
+          emit(events, 'boss:weak-point-destroyed', {
+            bossId: definition.id, partId: `node-${nodeIndex + 1}`, shape: definition.phases.cloneNodes.shapes[nodeIndex],
+          });
+        }
+      } else if (record.targetKind === 'bossPart' && record.targetId === bodyId && phase === 'kernel') {
+        const body = world.readInto(bodyId, read);
+        const hp = Math.max(0, finite(record.hpAfter, body?.hp ?? definition.phases.kernel.coreHp - finite(record.amount)));
+        if (body) world.write(bodyId, { hp });
+        if (record.destroyed || hp <= EPSILON || !body) {
+          owned.bossPart.delete(bodyId);
+          bodyId = 0;
+          objective.status = 'completed';
+          objective.completed = true;
+          objective.failed = false;
+          objective.failureReason = null;
+          phase = 'complete';
+          emit(events, 'boss:defeated', { bossId: definition.id });
+          emit(events, 'objective:completed', cloneFrozen(objective));
+        }
+      }
+    }
+  }
+
+  function cleanup(world = worldReference, events = null, reason = 'reset') {
+    if (clean) return false;
+    clean = true;
+    cleanupReason = reason;
+    if (world?.despawn) {
+      for (const kind of PROTOCOL_OWNED_KINDS) {
+        for (const id of [...owned[kind]]) despawnOwned(world, kind, id);
+      }
+    } else for (const kind of PROTOCOL_OWNED_KINDS) owned[kind].clear();
+    bodyId = 0;
+    nodeIds.fill(0);
+    safeCells = [];
+    if (objective && objective.status === 'active') {
+      objective.status = 'failed';
+      objective.completed = false;
+      objective.failed = true;
+      objective.failureReason = reason;
+    }
+    emit(events, 'boss:music-layer', { bossId: definition?.id ?? 'protocol-zero', phase: 'cleanup', layer: null });
+    emit(events, 'objective:cleanup', {
+      id: objective?.id ?? null, kinds: definition?.cleanupKinds ?? PROTOCOL_OWNED_KINDS,
+      status: objective?.status ?? 'failed',
+    });
+    emit(events, 'boss:cleanup', { bossId: definition?.id ?? 'protocol-zero', reason });
+    worldReference = null;
+    return true;
+  }
+
+  function start(value, { targetDurationSeconds = 110, behaviorContract: contract = null } = {}) {
+    definition = validateProtocolDefinition(value);
+    behaviorContract = validateBehaviorContract(contract, mode);
+    objective = protocolObjective(targetDurationSeconds);
+    worldReference = null;
+    phase = 'firewall';
+    elapsed = 0;
+    phaseElapsed = 0;
+    bodyId = 0;
+    attackTimer = 0;
+    attackCursor = 0;
+    firewallIndex = 0;
+    firewallClears = 0;
+    safeCellIndex = 0;
+    safeCellHold = 0;
+    safeCellClears = 0;
+    safeCells = [];
+    safeRoute = Object.freeze({ openLanes: 1, laneIndex: 1, evidence: 'marked-quadrant' });
+    nodeIds.fill(0);
+    nodeDestroyed.fill(0);
+    nodeHp.fill(0);
+    for (const kind of PROTOCOL_OWNED_KINDS) owned[kind].clear();
+    attacksSeen.clear();
+    for (const key of Object.keys(attackCounts)) attackCounts[key] = 0;
+    for (const key of Object.keys(damageByWeapon)) delete damageByWeapon[key];
+    clean = false;
+    cleanupReason = null;
+    spawnFailures = 0;
+    maxOwnedEntityCount = 0;
+    maxSimultaneousWarnings = 0;
+    diagnosticReconciliations = 0;
+    updates = 0;
+    return cloneFrozen(objective);
+  }
+
+  function update(context = {}, dt = 0, events = null) {
+    const seconds = Number(dt);
+    const world = context.world;
+    if (!Number.isFinite(seconds) || seconds < 0) throw new TypeError('BossSystem dt must be non-negative finite');
+    if (!definition || !objective || phase === 'idle') throw new Error('BossSystem must be started before update');
+    if (clean || objective.status !== 'active') return Object.freeze({ phase, status: objective.status, changed: false });
+    if (!world?.readInto || !world?.write || !world?.spawn || !world?.despawn) throw new TypeError('BossSystem requires EntityWorld');
+    worldReference = world;
+    // CollisionSystem may generation-safely despawn a lethal Boss part before
+    // handing its immutable damage record to the Director in the same fixed
+    // step. Consume that outcome against the retained handle before attempting
+    // any capacity retry, otherwise a fresh kernel could replace the destroyed
+    // one and orphan the real collision victory.
+    applyDamageRecords(world, context.damageRecords ?? [], events);
+    if (objective.status !== 'active') {
+      setObjectiveProgress();
+      updates += 1;
+      return Object.freeze({ phase, status: objective.status, changed: true });
+    }
+    if (!spawnBody(world)) {
+      cleanup(world, events, 'boss-spawn-capacity');
+      return Object.freeze({ phase, status: objective.status, changed: true });
+    }
+    const player = Number.isSafeInteger(context.player?.id)
+      ? world.readInto(context.player.id, playerRead)
+      : context.player;
+    if (!player) return Object.freeze({ phase, status: objective.status, changed: false });
+    elapsed += seconds;
+    phaseElapsed += seconds;
+    attackTimer -= seconds;
+    objective.elapsed = elapsed;
+    objective.timeoutRemaining = Math.max(0, objective.timeout - elapsed);
+    updateOwnedLifetimes(world, seconds);
+    if (objective.status === 'active' && phase === 'firewall') updateFirewall(player, world, events);
+    else if (objective.status === 'active' && phase === 'trafficGrid') updateTrafficGrid(player, world, seconds, events);
+    if (objective.status === 'active' && phase === 'cloneNodes' && nodeDestroyed.every((value) => value === 1)) {
+      transition('kernel', world, events);
+    }
+    // Protocol Zero remains the sole mutable owner of its kernel flags. Reassert
+    // the phase contract every fixed step so compatibility projections cannot
+    // make the real weak point untargetable between collision passes.
+    if (objective.status === 'active' && phase === 'kernel' && bodyId) {
+      world.write(bodyId, {
+        invulnerable: false,
+        armored: false,
+        weakPoint: true,
+        color: definition.silhouette.kernelColor,
+        variant: 'exposed-kernel',
+      });
+    }
+    if (objective.status === 'active' && elapsed >= objective.timeout - EPSILON) cleanup(world, events, 'boss-timeout');
+    else if (objective.status === 'active') scheduleAttack(world, player);
+    setObjectiveProgress();
+    updates += 1;
+    maxOwnedEntityCount = Math.max(maxOwnedEntityCount, ownedCount());
+    return Object.freeze({ phase, status: objective.status, changed: true });
+  }
+
+  function completeForDeterministicTest(events = null) {
+    if (!objective || objective.status !== 'active') return false;
+    objective.status = 'completed';
+    objective.completed = true;
+    objective.failed = false;
+    objective.failureReason = null;
+    objective.progress = objective.target;
+    objective.progressRatio = 1;
+    phase = 'complete';
+    emit(events, 'objective:completed', cloneFrozen(objective));
+    return true;
+  }
+
+  function getSnapshot() {
+    reconcileOwned(worldReference);
+    const body = worldReference?.readInto?.(bodyId, read);
+    const nodes = Array.from({ length: nodeIds.length }, (_, index) => {
+      const entity = worldReference?.readInto?.(nodeIds[index], read);
+      return Object.freeze({
+        index, entityId: nodeIds[index] || 0, destroyed: Boolean(nodeDestroyed[index]),
+        hp: entity?.hp ?? nodeHp[index], maxHp: definition?.phases.cloneNodes.nodeHp ?? 0,
+        weakPoint: entity?.weakPoint ?? phase === 'cloneNodes',
+        invulnerable: entity?.invulnerable ?? phase !== 'cloneNodes',
+        shape: definition?.phases.cloneNodes.shapes[index] ?? null,
+      });
+    }).filter(({ entityId, destroyed }) => entityId || destroyed);
+    return Object.freeze({
+      bossId: definition?.id ?? null, mode, phase, elapsed, phaseElapsed,
+      firewall: Object.freeze({ clears: firewallClears, markedQuadrant: markedQuadrant() }),
+      trafficGrid: Object.freeze({ clears: safeCellClears, hold: safeCellHold }),
+      safeCells: Object.freeze([...safeCells]), safeRoute,
+      destroyedNodes: nodeDestroyed.reduce((sum, value) => sum + value, 0),
+      partsReady: Boolean(bodyId), spawnFailures, behaviorContract,
+      parts: Object.freeze({
+        body: Object.freeze({
+          entityId: bodyId || 0, hp: body?.hp ?? 0, maxHp: definition?.phases.kernel.coreHp ?? 0,
+          weakPoint: body?.weakPoint ?? phase === 'kernel',
+          invulnerable: body?.invulnerable ?? phase !== 'kernel',
+        }),
+        nodes: Object.freeze(nodes),
+      }),
+      attacksSeen: Object.freeze([...attacksSeen]), attackCounts: Object.freeze({ ...attackCounts }),
+      damageByWeapon: Object.freeze({ ...damageByWeapon }), ownedEntityCount: ownedCount(),
+      maxOwnedEntityCount, maxSimultaneousWarnings, diagnosticReconciliations,
+      clean, cleanupReason, updates,
+    });
+  }
+
+  return Object.freeze({
+    start, update, cleanup, completeForDeterministicTest, getSnapshot,
+    getObjective: () => cloneFrozen(objective),
+  });
+}
+
+export function createBossSystem(options = {}) {
+  let implementation = null;
+  return Object.freeze({
+    start(definitionValue = ABYSS_MAW, context = {}) {
+      if (definitionValue?.id === 'abyss-maw') implementation = createAbyssMawBossSystem(options);
+      else if (definitionValue?.id === 'protocol-zero') implementation = createProtocolZeroBossSystem(options);
+      else throw new TypeError(`unsupported Boss definition: ${String(definitionValue?.id ?? 'missing')}`);
+      return implementation.start(definitionValue, context);
+    },
+    update: (...args) => implementation?.update(...args)
+      ?? (() => { throw new Error('BossSystem must be started before update'); })(),
+    cleanup: (...args) => implementation?.cleanup(...args) ?? false,
+    completeForDeterministicTest: (...args) => implementation?.completeForDeterministicTest(...args) ?? false,
+    getSnapshot: (...args) => implementation?.getSnapshot(...args) ?? Object.freeze({
+      bossId: null, phase: 'idle', clean: true, ownedEntityCount: 0,
+    }),
+    getObjective: (...args) => implementation?.getObjective(...args) ?? null,
   });
 }

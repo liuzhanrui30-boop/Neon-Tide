@@ -16,6 +16,7 @@ import {
 } from '../game/campaign-pacing.js';
 import { getAbyssRoomDefinition } from '../content/chapters/abyss.js';
 import { ABYSS_MAW } from '../content/bosses/abyss-maw.js';
+import { getLoadedChapterContent } from '../content/chapter-registry.js';
 import { createBossSystem } from './boss-system.js';
 
 
@@ -390,6 +391,8 @@ export function createEncounterDirector({
   let threatRandom = createThreatRandom(seed);
   let bossContract = null;
   let abyssRoomDefinition = null;
+  let dataCityRoomDefinition = null;
+  let dataCityBossDefinition = null;
   let bossSystem = null;
   let bossWorld = null;
   const runtimeThreatLimits = getThreatLimits({ mode, quality });
@@ -397,7 +400,9 @@ export function createEncounterDirector({
     random: () => threatRandom(),
     enemyCap: runtimeThreatLimits.activeEnemyCap,
     projectileCap: runtimeThreatLimits.projectileCap,
-    warningCap: () => abyssRoomDefinition?.warningCap ?? runtimeThreatLimits.simultaneousWarningCap,
+    warningCap: () => abyssRoomDefinition?.warningCap
+      ?? dataCityRoomDefinition?.warningCap
+      ?? runtimeThreatLimits.simultaneousWarningCap,
     speedMultiplier: pressureContract.enemySpeed,
     telegraphFloorSeconds: () => bossContract?.telegraphFloorSeconds
       ?? pressureContract.telegraphFloorSeconds,
@@ -484,10 +489,12 @@ export function createEncounterDirector({
         timing: timingContract ? cloneFrozen(timingContract) : null,
         boss: bossContract ? cloneFrozen(bossContract) : null,
         bossBehavior: bossBehaviorSnapshot(),
-        chapterPacing: abyssRoomDefinition ? Object.freeze({
-          chapterId: 'abyss',
-          roomId: abyssRoomDefinition.id,
-          warningCap: abyssRoomDefinition.warningCap,
+        chapterPacing: (abyssRoomDefinition || dataCityRoomDefinition) ? Object.freeze({
+          chapterId: abyssRoomDefinition ? 'abyss' : 'data-city',
+          roomId: (abyssRoomDefinition ?? dataCityRoomDefinition).id,
+          teachingStage: dataCityRoomDefinition?.teachingStage ?? null,
+          safeRoutes: cloneFrozen(dataCityRoomDefinition?.safeRoutes ?? []),
+          warningCap: (abyssRoomDefinition ?? dataCityRoomDefinition).warningCap,
           nextBeatIndex: chapterBeatIndex,
           routeChangesCommitted: chapterRouteChangesCommitted,
           rolesIntroduced: Object.freeze([...chapterRolesIntroduced]),
@@ -522,9 +529,20 @@ export function createEncounterDirector({
       && context?.timing?.kind !== 'boss'
       ? getAbyssRoomDefinition(template.id)
       : null;
+    const loadedDataCity = context?.campaign?.chapterId === 'data-city'
+      ? getLoadedChapterContent('data-city')
+      : null;
+    dataCityRoomDefinition = loadedDataCity
+      && context?.timing?.kind !== 'boss'
+      ? loadedDataCity.chapter?.rooms?.find(({ objectiveTemplate }) => objectiveTemplate === template.id) ?? null
+      : null;
+    dataCityBossDefinition = loadedDataCity?.boss ?? null;
     const startsAbyssBoss = context?.campaign?.chapterId === 'abyss'
       && context?.timing?.kind === 'boss'
       && context?.boss?.id === ABYSS_MAW.id;
+    const startsDataCityBoss = context?.campaign?.chapterId === 'data-city'
+      && context?.timing?.kind === 'boss'
+      && context?.boss?.id === dataCityBossDefinition?.id;
     if (context.boss) {
       const candidate = clone(context.boss);
       if (!Number.isFinite(candidate.recoveryMultiplier)
@@ -535,9 +553,11 @@ export function createEncounterDirector({
       }
       bossContract = Object.freeze(candidate);
     } else bossContract = null;
-    bossSystem = startsAbyssBoss ? createBossSystem({ seed: selectedRoomSeed, mode }) : null;
+    bossSystem = startsAbyssBoss || startsDataCityBoss
+      ? createBossSystem({ seed: selectedRoomSeed, mode })
+      : null;
     objective = bossSystem
-      ? bossSystem.start(ABYSS_MAW, {
+      ? bossSystem.start(startsAbyssBoss ? ABYSS_MAW : dataCityBossDefinition, {
         targetDurationSeconds: (authoredTargetDurationSeconds ?? 100) * durationScale,
         behaviorContract: bossContract,
       })
@@ -554,7 +574,9 @@ export function createEncounterDirector({
     chapterBeatIndex = 0;
     chapterRouteChangesCommitted = 0;
     chapterRolesIntroduced.clear();
-    for (const role of abyssRoomDefinition?.inheritedRoles ?? []) chapterRolesIntroduced.add(role);
+    for (const role of (abyssRoomDefinition ?? dataCityRoomDefinition)?.inheritedRoles ?? []) {
+      chapterRolesIntroduced.add(role);
+    }
     lastWave = null;
     const baseThreatBudget = getThreatBudget(template, {
       mode: usesCampaignPressure ? 'standard' : mode,
@@ -585,7 +607,7 @@ export function createEncounterDirector({
     return getSnapshot();
   }
 
-  function spawnAbyssIntroduction(world, beat, events) {
+  function spawnChapterIntroduction(world, definition, chapterId, beat, events) {
     if (!ENEMY_ROLES[beat.role]) return 0;
     const count = Math.max(1, Math.min(8, Math.trunc(finite(beat.count, 1))));
     const roles = Array.from({ length: count }, () => beat.role);
@@ -597,21 +619,21 @@ export function createEncounterDirector({
         if (role) rolesSeen.add(role);
       });
       emit(events, 'chapter:enemy-introduced', {
-        chapterId: 'abyss', roomId: abyssRoomDefinition.id, role: beat.role, count: ids.length,
+        chapterId, roomId: definition.id, role: beat.role, count: ids.length,
       });
     }
     return ids.length;
   }
 
-  function commitAbyssRouteChange(world, beat, events) {
+  function commitChapterRouteChange(world, definition, chapterId, beat, events) {
     const plan = createObjectiveShiftPlan(objective, {
       pathNodes: 7,
       variant: chapterRouteChangesCommitted,
     });
     const shifted = plan ? commitObjectiveShift(objective, plan) : false;
     chapterRouteChangesCommitted += 1;
-    // Purge has no shiftable target, so materialize a harmless current/gate
-    // pair. It is still real pooled world geometry and is removed with the room.
+    // Objectives without shift authority materialize harmless route geometry.
+    // This remains visible and pooled without becoming a second objective writer.
     if (!shifted && world?.spawn) {
       const direction = chapterRouteChangesCommitted % 2 ? 1 : -1;
       for (let index = 0; index < 2; index += 1) world.spawn('enemyHazard', {
@@ -622,31 +644,36 @@ export function createEncounterDirector({
         scaleY: 0.5,
         team: 2,
         ownerKind: 'chapter',
-        attackKind: 'abyss-route-current',
+        attackKind: chapterId === 'data-city' ? 'data-city-safe-route' : 'abyss-route-current',
         state: 'route-change',
         contactDamaging: false,
         collidable: false,
         opacity: 0.64,
-        color: 0x13d9ce,
+        color: chapterId === 'data-city' ? 0x27e5ff : 0x13d9ce,
       });
     }
     emit(events, 'chapter:route-changed', {
-      chapterId: 'abyss', roomId: abyssRoomDefinition.id, route: beat.route,
+      chapterId, roomId: definition.id, route: beat.route,
       shifted, routeChangesCommitted: chapterRouteChangesCommitted,
       destination: plan?.destination ?? null,
     });
   }
 
   function applyAbyssChapterBeats(context, events) {
-    if (!abyssRoomDefinition || !context.world) return;
-    const beats = abyssRoomDefinition.beats;
+    const definition = abyssRoomDefinition ?? dataCityRoomDefinition;
+    const chapterId = abyssRoomDefinition ? 'abyss' : dataCityRoomDefinition ? 'data-city' : null;
+    if (!definition || !chapterId || !context.world) return;
+    const beats = definition.beats;
     while (chapterBeatIndex < beats.length
       && beats[chapterBeatIndex].at * durationScale <= roomElapsed + 1e-9) {
       const beat = beats[chapterBeatIndex++];
-      if (beat.kind === 'enemy-introduction') spawnAbyssIntroduction(context.world, beat, events);
-      else if (beat.kind === 'route-change') commitAbyssRouteChange(context.world, beat, events);
+      if (beat.kind === 'enemy-introduction') {
+        spawnChapterIntroduction(context.world, definition, chapterId, beat, events);
+      } else if (beat.kind === 'route-change' || beat.kind === 'safe-route' || beat.kind === 'data-lane') {
+        commitChapterRouteChange(context.world, definition, chapterId, beat, events);
+      }
       else emit(events, 'chapter:beat', {
-        chapterId: 'abyss', roomId: abyssRoomDefinition.id, ...beat,
+        chapterId, roomId: definition.id, ...beat,
       });
     }
   }
@@ -697,14 +724,15 @@ export function createEncounterDirector({
       clearRate: roomElapsed > 0 ? enemiesDestroyed / roomElapsed : 0,
       untouchedSeconds, totalBudget: threatBudget?.total ?? 30,
     }, threatRandom);
-    if (abyssRoomDefinition) {
-      const reservedIntroductions = abyssRoomDefinition.beats
+    const authoredRoomDefinition = abyssRoomDefinition ?? dataCityRoomDefinition;
+    if (authoredRoomDefinition) {
+      const reservedIntroductions = authoredRoomDefinition.beats
         .slice(chapterBeatIndex)
         .filter(({ kind }) => kind === 'enemy-introduction')
         .reduce((sum, beat) => sum + Math.max(1, Math.trunc(finite(beat.count, 1))), 0);
       const tutorialSlots = Math.max(
         0,
-        abyssRoomDefinition.activeEnemyCap - reservedIntroductions - scanned.activeEnemies,
+        authoredRoomDefinition.activeEnemyCap - reservedIntroductions - scanned.activeEnemies,
       );
       const admissionCharges = wave.admissionCharges
         .filter(({ role }) => chapterRolesIntroduced.has(role))
@@ -872,6 +900,8 @@ export function createEncounterDirector({
     bossSystem = null;
     bossWorld = null;
     abyssRoomDefinition = null;
+    dataCityRoomDefinition = null;
+    dataCityBossDefinition = null;
     bossCurrentVariantIndex = null;
     bossAttacksSelected = 0;
     bossVariantsSeen.clear();

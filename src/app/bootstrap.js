@@ -134,6 +134,10 @@ export function bootstrapNeonTide(options = {}) {
       if (event.payload?.current?.route?.kind === 'campaign' && transitionChapter > 0) {
         ensureChapterContent(transitionChapter);
       }
+      const startedRoom = event.type === 'room:started' ? event.payload?.room : null;
+      if (startedRoom?.campaign === true && startedRoom.kind === 'boss') {
+        ensureChapterContent(Number(startedRoom.chapterIndex) + 1);
+      }
       objectiveBridge.consume(event);
       runtime?.consumePresentationEvent?.(event);
     },

@@ -2878,6 +2878,7 @@ function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   const direction = readMoveDirection();
   const derived = getBuildStats();
+  const dataLaneSteeringMultiplier = getDataLanePenalty(environmentFrame, player.position) > 0 ? 0.78 : 1;
   const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
   const hasDirection = direction.lengthSq() > 0.01;
   if (hasDirection) {
@@ -2892,7 +2893,7 @@ function updatePlayer(dt) {
       if (speed > 0.05) {
         const desiredVelocity = direction.clone().multiplyScalar(speed);
         const steering = desiredVelocity.sub(player.velocity);
-        const maxSteering = TURN_ACCELERATION * derived.steeringMultiplier * dt;
+        const maxSteering = TURN_ACCELERATION * derived.steeringMultiplier * dataLaneSteeringMultiplier * dt;
         if (steering.lengthSq() > maxSteering * maxSteering) steering.setLength(maxSteering);
         player.velocity.add(steering);
       }
