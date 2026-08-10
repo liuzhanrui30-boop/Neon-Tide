@@ -212,3 +212,25 @@ test('non-first chapter content loads on demand in isolated lazy modules', async
   assert.strictEqual(await loadChapterContent('data-city'), data);
   await assert.rejects(() => loadChapterContent('unknown'), /unknown campaign chapter/);
 });
+
+test('Abyss preserves Data City’s authored teach order through the lazy chapter handoff', async () => {
+  const seed = 4112;
+  const campaign = createCampaign(seed, 'abyss');
+  assert.deepEqual(
+    campaign.route.filter(({ chapterId, kind }) => chapterId === 'data-city' && kind === 'room')
+      .map(({ objectiveTemplate }) => objectiveTemplate),
+    ['escort-skiff', 'storm-run', 'dual-crisis'],
+  );
+
+  const session = createCampaignTestSession();
+  assert.equal(session.startRun('abyss', seed), true);
+  for (let index = 0; index < 4; index += 1) completeCurrentNode(session);
+  assert.deepEqual(session.snapshot().route, createCampaignRunRoute(4, seed, 'abyss'));
+  assert.equal(session.snapshot().route.chapterIndex, 1);
+
+  await loadChapterContent('data-city');
+  assert.equal(session.startRoom(roomRequestForRunRoute(session.snapshot().route)), true);
+  const encounter = session.getEncounterSnapshot();
+  assert.equal(encounter.chapterPacing.roomId, 'data-city:escort-uplink');
+  assert.equal(encounter.objective.type, 'escort');
+});

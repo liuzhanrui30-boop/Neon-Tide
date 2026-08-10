@@ -9,9 +9,10 @@ import { roomRequestForRunRoute } from '../src/game/run-route.js';
 import { createGameSession } from '../src/game/session.js';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { getEncounterTemplate } from '../src/content/encounters.js';
+import { DATA_CITY_CHAPTER } from '../src/content/chapters/data-city.js';
 import { createEncounterDirector } from '../src/systems/encounter-director.js';
 import { createEnemySystem } from '../src/systems/enemy-system.js';
-import { createObjective, updateObjective } from '../src/systems/objective-system.js';
+import { applyAuthoredChapterBeat, createObjective, updateObjective } from '../src/systems/objective-system.js';
 
 function campaignSession({ development = true, durationScale = 1 } = {}) {
   const campaignTestAuthority = {};
@@ -59,6 +60,30 @@ function simulateSequentialDualCrisis(template, seed) {
   while (objective.status === 'active' && safety < 4_000) {
     const active = objective.crises.find(({ completed }) => !completed);
     updateAtCrisis(objective, active);
+    safety += 1;
+  }
+  assert.ok(safety < 4_000);
+  return objective;
+}
+
+function simulateKeyboardSequentialDualCrisis(template, seed, {
+  start = { x: 0, y: -1.2 }, speed = 3.75, dt = 0.1,
+} = {}) {
+  const objective = createObjective(template, seed);
+  applyAuthoredChapterBeat(objective, DATA_CITY_CHAPTER.rooms[2].beats[0]);
+  const player = { ...start, hp: 3, maxHp: 3, buildStats: { objectiveProximityMultiplier: 1 } };
+  let safety = 0;
+  while (objective.status === 'active' && safety < 4_000) {
+    const target = objective.crises.find(({ completed }) => !completed);
+    const dx = target.x - player.x;
+    const dy = target.y - player.y;
+    const distance = Math.hypot(dx, dy);
+    const travel = Math.min(distance, speed * dt);
+    if (distance > 1e-9) {
+      player.x += dx / distance * travel;
+      player.y += dy / distance * travel;
+    }
+    updateObjective(objective, null, player, dt);
     safety += 1;
   }
   assert.ok(safety < 4_000);
@@ -210,6 +235,31 @@ test('all authored dual-crisis campaign nodes complete through real sequential o
     assert.ok(Math.abs(pressuredObjective.elapsed - pressuredEstimate) <= 0.21,
       `${node.id} estimator must include the actual escalation rule`);
   }
+});
+
+test('compressed Data City dual crisis reserves a real keyboard transit budget without changing the live contract', () => {
+  const node = createCampaign(4112, 'standard').route.find(({ id }) => id === 'data-city:room:3:dual-crisis');
+  const authored = getEncounterTemplate(node.objectiveTemplate);
+  const live = tuneCampaignObjectiveTemplate(authored, {
+    targetDurationSeconds: node.targetDurationSeconds,
+    durationScale: 1,
+  });
+  const compressed = tuneCampaignObjectiveTemplate(authored, {
+    targetDurationSeconds: node.targetDurationSeconds,
+    durationScale: 0.15,
+  });
+
+  assert.equal(live.pacingGeometryScale, 1, '18–25 minute live geometry remains authored');
+  assert.equal(compressed.pacingGeometryScale, 0.35, 'accelerated verification exposes its compact route contract');
+  const objective = simulateKeyboardSequentialDualCrisis(compressed, 4112);
+  assert.equal(objective.status, 'completed');
+  assert.deepEqual(objective.choiceOrder, ['crisis-1', 'crisis-2']);
+  assert.ok(objective.elapsed < objective.timeout, 'movement plus two real holds fits the compressed deadline');
+  assert.ok(objective.crises.every(({ escalated }) => !escalated));
+  const [first, second] = objective.crises;
+  assert.ok(first.x * second.x + first.y * second.y < 0, 'compact route still uses opposite quadrants');
+  assert.ok(Math.hypot(first.x - second.x, first.y - second.y) > first.radius + second.radius,
+    'compact crises remain separate and cannot be solved by standing in one overlap');
 });
 
 test('Abyss Boss recovery, variants, and real warning floor alter live behavior without unsafe telegraphs', () => {

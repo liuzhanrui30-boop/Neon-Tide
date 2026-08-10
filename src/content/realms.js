@@ -23,6 +23,10 @@ const chapters = [
   {
     id: 'data-city', index: 1, label: '数据都市', shortLabel: '都市', cssTheme: 'data-city',
     normalRoomCount: 3, bossId: 'protocol-zero', bossLabel: '零号协议', targetDurationSeconds: 315,
+    // This chapter is an authored introduce → develop → test sequence. Abyss
+    // changes pressure and Boss variants, but cannot shuffle away its teach
+    // order or the chapter's declared room contracts.
+    preserveObjectiveOrder: true,
     palette: ['#0a1038', '#27e5ff', '#ff4fd8', '#936cff', '#b8ff45'],
     objectiveTemplates: ['escort-skiff', 'storm-run', 'dual-crisis'],
     roomDurations: [65, 68, 72], bossDuration: 110,

@@ -11,6 +11,13 @@ const COMPLETION_SHARE = Object.freeze({
 
 const DUAL_CRISIS_ESCALATION_SHARE = 0.9;
 export const DUAL_CRISIS_ESCALATION_MULTIPLIER = 1.5;
+// Campaign test runs shorten the authored clock, but keyboard traversal still
+// has a non-zero physical cost. Keep a compact, non-overlapping version of a
+// dual-crisis route in those accelerated runs so the same movement → hold →
+// movement verb remains feasible instead of silently requiring a teleport.
+// Live campaigns always use a scale of 1 and therefore retain the authored
+// geometry exactly.
+export const MIN_COMPRESSED_OBJECTIVE_GEOMETRY_SCALE = 0.35;
 
 // These are transparent analytical baselines, not runtime timers. Combat rooms
 // complete as soon as their real targets are destroyed; the rates only convert
@@ -131,6 +138,9 @@ export function tuneCampaignObjectiveTemplate(template, {
   } else if (template.type === 'dual-crisis') {
     const count = 2;
     tuned.crisisSeconds = workSeconds / count;
+    tuned.pacingGeometryScale = durationScale < 1
+      ? Math.max(MIN_COMPRESSED_OBJECTIVE_GEOMETRY_SCALE, durationScale)
+      : 1;
     tuned.escalationSeconds = Math.max(
       tuned.crisisSeconds,
       effectiveTargetDurationSeconds * DUAL_CRISIS_ESCALATION_SHARE,

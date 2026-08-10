@@ -69,3 +69,58 @@ Project runtime: `/Users/kanyun/Documents/zhanrui/threejs-neon-tide/.runtime/nod
 ## Process state
 
 Temporary Vite `4174` and Chrome CDP `9360` were stopped. `4175` and `9333` were not used. Existing `4173` (`Python`, PID `11284`) was not touched.
+
+## Round 4 — fresh implementer diagnosis and bounded repair
+
+**Status: ITEM 8 REMAINS OPEN. No Data City browser Boss victory or cleanup is claimed in this round.**
+
+### Root causes found and repaired deterministically
+
+1. **Compressed Standard Dual Crisis was physically inconsistent.** The `campaign-test=1&duration-scale=0.15` contract reduced Data City's 72-second deadline to 10.8 seconds and reduced the two real hold targets to 9.072 seconds total, but left the opposite-quadrant travel geometry at live scale. The previous deterministic test placed the player directly inside each target, so it could not detect that real movement plus two holds could exceed the compressed deadline. This explains the earlier `progress=1/2` timeout/reset while hull was still approximately 3.65; the session restored the Standard chapter-entry checkpoint after objective timeout.
+
+   Repair: `tuneCampaignObjectiveTemplate()` now publishes `pacingGeometryScale` for compressed dual-crisis verification only (minimum `0.35`, exactly `1` for the live campaign). Objective construction and the authored crosslink beat scale both crisis centers and radii together, preserving opposite quadrants and non-overlap while leaving a real keyboard travel budget. The live 18–25 minute campaign uses `durationScale=1`, so its authored positions/radii remain unchanged.
+
+2. **Abyss entered a different first Data City objective than the browser contract.** Generic Abyss shuffling also shuffled Data City's deliberate introduce → develop → test room order. After four disclosed prerequisite settlements, the browser waited for `data-city:escort-uplink`, but the route could instead begin with Storm or Dual Crisis. This was a campaign route/content-order defect, not a legitimate Data City lazy-load wait.
+
+   Repair: Data City declares `preserveObjectiveOrder: true`; Abyss still varies pressure, Boss variants, and room order for chapters without an authored-order requirement. A deterministic session now settles the four Abyss prerequisites, loads Data City lazily, and starts the real `data-city:escort-uplink` escort room.
+
+3. **Failure diagnostics were too shallow.** The browser follower now retains the terminal reason, elapsed/deadline, both crisis positions/charges/radii/escalation, crosslink, current public input target, player position, route, and hull. The prerequisite helper also requires the public Data City escort room to be active immediately after the chapter-entry upgrade.
+
+### Added deterministic coverage
+
+- `compressed Data City dual crisis reserves a real keyboard transit budget without changing the live contract` simulates conservative `3.75u/s` frame-by-frame movement with the real objective update path and two sequential charges. It proves completion before the compressed deadline, separate target cells, opposite quadrants, and no escalation; it also asserts live geometry scale remains exactly `1`.
+- `Abyss preserves Data City’s authored teach order through the lazy chapter handoff` proves four legitimate prerequisite settlements reach route index 4, then starts the loaded escort room without route mutation or objective completion bypass.
+
+### Round 4 validation
+
+All commands used project Node `v22.14.0`.
+
+```text
+node --test tests/campaign-natural-completion.test.mjs tests/campaign.test.mjs tests/data-city-chapter.test.mjs
+27/27 PASS
+
+npm test
+325/325 PASS
+
+npm run build
+PASS (existing vendor-three size warning only; lazy Data City chunk retained)
+
+node --check src/content/realms.js src/game/campaign.js src/game/campaign-pacing.js src/systems/objective-system.js tests/browser/v3-data-city.mjs tests/campaign-natural-completion.test.mjs tests/campaign.test.mjs
+git diff --check
+PASS
+```
+
+### Browser acceptance result
+
+A single bounded final Standard browser attempt was made after the deterministic repair:
+
+```text
+BROWSER_MATRIX_SCENARIO='Data City Protocol Zero truthful grid' \
+APP_URL='http://127.0.0.1:4174/' CDP_PORT=9360 \
+perl -e 'alarm 150; exec @ARGV' node tests/browser-matrix.mjs
+
+not ok 1 - v3 Data City Protocol Zero truthful grid and real weapon victory
+Error: Input.dispatchKeyEvent timed out
+```
+
+The timeout did not yield a valid terminal objective snapshot or a Boss result. Per the run budget, the Standard browser scenario was not retried. Abyss browser acceptance was **not run** in this round. Therefore firewall/traffic/clone/kernel victory, real-resource weapon proof, and cleanup remain unverified for both modes despite the deterministic route/pacing repairs. Temporary Vite `4174` and Chrome CDP `9360` processes were removed; the live v2.2 service on `4173` and its `9333` CDP endpoint were not touched.

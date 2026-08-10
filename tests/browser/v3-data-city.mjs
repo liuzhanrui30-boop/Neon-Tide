@@ -69,11 +69,12 @@ async function followPublicObjective(page, objectiveType, timeoutMs = 20000) {
         let frames=0,last=null,lastPlaying=null;
         const poll=()=>{
           const app=globalThis.__NEON_TIDE_V3__,s=app.getDebugSnapshot(),o=s.encounter.objective,p=s.player?.position;
-          last={mode:s.session.mode,hull:s.session.hull,route:s.session.route,objective:o?{type:o.type,status:o.status,failureReason:o.failureReason,progress:o.progress,target:o.target,stormExposure:o.stormExposure??0,safeZone:o.safeZone,corridor:o.corridor,crosslink:o.crosslink}:null,player:p};
+          last={mode:s.session.mode,terminalReason:s.session.terminalReason??null,hull:s.session.hull,route:s.session.route,objective:o?{type:o.type,status:o.status,failureReason:o.failureReason,progress:o.progress,target:o.target,elapsed:o.elapsed,timeout:o.timeout,timeoutRemaining:o.timeoutRemaining,stormExposure:o.stormExposure??0,safeZone:o.safeZone,corridor:o.corridor,crosslink:o.crosslink,crises:o.crises?.map(({id,x,y,radius,charge,requiredSeconds,completed,escalated})=>({id,x,y,radius,charge,requiredSeconds,completed,escalated}))}:null,player:p};
           if(s.session.mode==='playing')lastPlaying=last;
           if(++frames>=8||s.session.mode!=='playing'){resolve(lastPlaying??last);return;}requestAnimationFrame(poll);
         };requestAnimationFrame(poll);
       })`);
+      if (last) last.inputTarget = target;
     } finally {
       if (dashHeld) await page.dispatchKey('keyUp', ' ', 'Space');
       for (const [key, code] of held) await page.dispatchKey('keyUp', key, code);
@@ -319,6 +320,9 @@ async function completePrerequisiteNode(page) {
     }
     await chooseUpgrade(page);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='playing'`);
+    if (enteringDataCity) {
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.chapterPacing?.roomId==='data-city:escort-uplink'`);
+    }
   } else if (mode === 'chapterComplete') {
     await page.trustedClick('#primary-button');
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='playing'`);

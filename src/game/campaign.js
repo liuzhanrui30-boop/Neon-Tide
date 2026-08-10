@@ -71,7 +71,7 @@ export function createCampaign(seed, mode = 'standard') {
   if (!RUN_MODES.has(mode)) throw new TypeError('campaign mode must be standard or abyss');
   let routeIndex = 0;
   const chapters = CAMPAIGN_CHAPTERS.map((chapter) => {
-    const authoredObjectives = mode === 'abyss'
+    const authoredObjectives = mode === 'abyss' && chapter.preserveObjectiveOrder !== true
       ? shuffled(chapter.objectiveTemplates, seed32(seed + chapter.index * 0x9e3779b9))
       : [...chapter.objectiveTemplates];
     const nodes = authoredObjectives.map((objectiveTemplate, roomIndex) => ({

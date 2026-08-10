@@ -319,7 +319,8 @@ export function applyAuthoredChapterBeat(objective, beat = {}) {
     return true;
   }
   if (objective.type === 'dual-crisis' && ['safe-route', 'route-change'].includes(beat.kind)) {
-    const radius = positive(beat.crosslink?.reachableRadius, objective.crises[0]?.radius ?? 1.7);
+    const radius = positive(beat.crosslink?.reachableRadius, objective.crises[0]?.radius ?? 1.7)
+      * positive(objective.pacingGeometryScale, 1);
     for (const crisis of objective.crises) crisis.radius = radius;
     objective.crosslink = {
       route: String(beat.route ?? 'crisis-crosslink'),
@@ -518,14 +519,29 @@ function setupObjective(template, seed) {
   } else if (template.type === 'dual-crisis') {
     const rotation = random() * TAU;
     const variants = random() >= 0.5 ? ['containment', 'rescue'] : ['rescue', 'containment'];
+    // `pacingGeometryScale` is authored by campaign pacing only for explicit
+    // accelerated campaign-test runs. It preserves the opposite-quadrant
+    // route and separate safe cells while reserving real keyboard travel time
+    // inside the shortened deadline. Normal play always receives 1.
+    const pacingGeometryScale = Math.max(0.1, Math.min(1, positive(template.pacingGeometryScale, 1)));
     base.crises = [0, 1].map((index) => {
       const angle = rotation + index * Math.PI;
-      return point(Math.cos(angle) * (4.4 + random()), Math.sin(angle) * (3.2 + random()), {
-        id: `crisis-${index + 1}`, variant: variants[index], radius: positive(template.crisisRadius, 1.7),
-        sourceId: stableSourceId(base.seed, 'crisis', index),
-        charge: 0, requiredSeconds: positive(template.crisisSeconds, 3.2), completed: false, escalated: false,
-      });
+      return point(
+        Math.cos(angle) * (4.4 + random()) * pacingGeometryScale,
+        Math.sin(angle) * (3.2 + random()) * pacingGeometryScale,
+        {
+          id: `crisis-${index + 1}`,
+          variant: variants[index],
+          radius: positive(template.crisisRadius, 1.7) * pacingGeometryScale,
+          sourceId: stableSourceId(base.seed, 'crisis', index),
+          charge: 0,
+          requiredSeconds: positive(template.crisisSeconds, 3.2),
+          completed: false,
+          escalated: false,
+        },
+      );
     });
+    base.pacingGeometryScale = pacingGeometryScale;
     base.escalationSeconds = positive(template.escalationSeconds, 28);
     base.crisisEscalationMultiplier = normalizeDualCrisisEscalationMultiplier(
       template.crisisEscalationMultiplier ?? DUAL_CRISIS_ESCALATION_MULTIPLIER,
