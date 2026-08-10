@@ -4,7 +4,11 @@ import { DATA_CITY_CHAPTER, getDataCityRoomDefinition } from '../src/content/cha
 import { PROTOCOL_ZERO } from '../src/content/bosses/protocol-zero.js';
 import { createEntityWorld } from '../src/game/entity-world.js';
 import { applyAuthoredChapterBeat, createObjective, getDataLaneEffect, updateObjective } from '../src/systems/objective-system.js';
-import { createBossSystem, protocolOrientedBoxesLeaveReachableLane } from '../src/systems/boss-system.js';
+import {
+  createBossSystem,
+  createProtocolTrafficCorridor,
+  protocolTemporalRouteReachesTruthfulCell,
+} from '../src/systems/boss-system.js';
 import { advanceDashCharges, createPlayerState, updatePlayerState } from '../src/systems/player-system.js';
 import { createCampaign } from '../src/game/campaign.js';
 import { getEncounterTemplate } from '../src/content/encounters.js';
@@ -274,24 +278,66 @@ test('Protocol presentation capacity retries are bounded, never invisible, and r
   hardCeiling.world.dispose();
 });
 
-test('every real Protocol traffic/predictive timing combination leaves a continuous player-radius route', () => {
-  for (let seed = 60; seed < 72; seed += 1) {
+test('Protocol temporal proof rejects sealed layouts from the actual player start', () => {
+  const corridor = createProtocolTrafficCorridor(
+    { x: -4.8, y: -2.6 },
+    { x: 5.6, y: 2.6, halfWidth: 1.35, halfHeight: 1.45 },
+    PROTOCOL_ZERO.arena,
+    PROTOCOL_ZERO.silhouette.bodyRadius,
+  );
+  const openFrames = Array.from({ length: 240 }, () => []);
+  assert.equal(protocolTemporalRouteReachesTruthfulCell({
+    corridor, frames: openFrames, speed: 6.15, dt: 1 / 60,
+  }), true);
+  const routePoints = [corridor.start, ...corridor.waypoints, corridor.target];
+  const segmentStart = routePoints[0];
+  const segmentEnd = routePoints[1];
+  const sealed = {
+    x: (segmentStart.x + segmentEnd.x) * 0.5,
+    y: (segmentStart.y + segmentEnd.y) * 0.5,
+    rotation: Math.atan2(segmentEnd.y - segmentStart.y, segmentEnd.x - segmentStart.x) + Math.PI / 2,
+    scaleX: 3.2, scaleY: 0.5, variant: 'oriented-box',
+  };
+  assert.equal(protocolTemporalRouteReachesTruthfulCell({
+    corridor, frames: Array.from({ length: 240 }, () => [sealed]), speed: 6.15, dt: 1 / 60,
+  }), false, 'a localized seal across the committed player-to-target corridor must be RED');
+});
+
+test('every real Protocol traffic sequence preserves current-player to truthful-cell reachability', () => {
+  for (let seed = 0; seed < 12; seed += 1) {
     const harness = createProtocolHarness('abyss', seed);
     for (let index = 0; index < 4; index += 1) enterMarkedQuadrant(harness);
-    for (let step = 0; step < 20 * 60; step += 1) {
-      const angle = step * 0.07;
+    for (let cellIndex = 0; cellIndex < PROTOCOL_ZERO.phases.trafficGrid.requiredSafeCells; cellIndex += 1) {
+      const start = harness.world.get(harness.playerId);
+      const before = harness.system.getSnapshot();
+      const truthful = before.safeCells.find((cell) => cell.truthful);
+      assert.deepEqual(before.safeRoute.start, { x: start.x, y: start.y });
+      assert.deepEqual(before.safeRoute.target, { x: truthful.x, y: truthful.y });
+      const frames = [];
+      const timingOffsetFrames = (seed + cellIndex) % 4 * 15;
+      for (let step = 0; step < 300 + timingOffsetFrames; step += 1) {
+        harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 1 / 60, harness.events);
+        frames.push(['warning', 'enemyHazard'].flatMap((kind) => [...harness.world.query(kind)])
+          .map((id) => harness.world.get(id))
+          .filter((entity) => entity?.ownerKind === 'boss' && entity.variant === 'oriented-box')
+          .map((entity) => ({
+            x: entity.x, y: entity.y, rotation: entity.rotation,
+            scaleX: entity.scaleX, scaleY: entity.scaleY,
+          })));
+      }
+      assert.equal(protocolTemporalRouteReachesTruthfulCell({
+        corridor: before.safeRoute, frames, speed: 6.15, dt: 1 / 60,
+      }), true, `seed ${seed} truthful cell ${cellIndex}`);
       const player = harness.world.get(harness.playerId);
       harness.world.write(harness.playerId, {
         previousX: player.x, previousY: player.y,
-        x: Math.cos(angle) * 2.2, y: Math.sin(angle) * 1.6,
-        vx: -Math.sin(angle) * 2.2, vy: Math.cos(angle) * 1.6,
+        x: truthful.x, y: truthful.y, vx: truthful.x - player.x, vy: truthful.y - player.y,
       });
-      harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 1 / 60, harness.events);
-      const boxes = ['warning', 'enemyHazard'].flatMap((kind) => [...harness.world.query(kind)])
-        .map((id) => harness.world.get(id))
-        .filter((entity) => entity?.ownerKind === 'boss' && entity.variant === 'oriented-box');
-      assert.equal(protocolOrientedBoxesLeaveReachableLane(boxes, PROTOCOL_ZERO.arena, 0.4), true, `seed ${seed} step ${step}`);
+      harness.system.update({ world: harness.world, player: harness.world.get(harness.playerId), damageRecords: [] }, 0.2, harness.events);
     }
+    assert.ok(harness.system.getSnapshot().attacksSeen.includes('grid-lock'));
+    assert.ok(harness.system.getSnapshot().attacksSeen.includes('traffic-wall'));
+    assert.ok(harness.system.getSnapshot().attacksSeen.includes('predictive-beam'));
     harness.world.dispose();
   }
 });

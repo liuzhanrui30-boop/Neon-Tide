@@ -1,9 +1,9 @@
 # Task 13 report — Data City and Protocol Zero
 
 ## Status
-ROUND 1 FIXES COMMITTED WITH ONE OPEN BROWSER ACCEPTANCE FAILURE.
+ROUND 2: ITEM 9 CLOSED DETERMINISTICALLY; ITEM 8 STILL OPEN IN BROWSER ACCEPTANCE.
 
-The review fixes are implemented and the complete deterministic Node 22 suite, production build, syntax checks, and whitespace checks pass. The final Standard headful scenario naturally completes all three Data City rooms and the Protocol Zero firewall, but the run still loses the player during the truthful-cell traffic-grid traversal. Abyss headful acceptance and the production cold-checkpoint probe were not rerun after that failure.
+The current-player→truthful-cell temporal corridor contract, deterministic sequence coverage, complete Node 22 suite, production build, syntax checks, and production cold-checkpoint probe pass. The final Standard/Abyss headful batch stopped in the pre-Boss data-lane measurement, so natural Standard/Abyss Boss victory and cleanup are not claimed.
 
 ## Round 1 fixes delivered
 
@@ -73,4 +73,31 @@ All final deterministic commands used the project runtime:
 Temporary `4174`, `4175`, `9333`, and `9360` listeners were verified closed. Existing `4173` (`Python`, PID `11284`) was not touched.
 
 ## Remaining concern
-Protocol Zero's traffic-grid encounter is not yet proven survivable from the naturally depleted Standard campaign hull. The deterministic geometry proves a reachable lane and the presentation is visible, but the end-to-end headful run still reaches defeat/briefing during truthful-cell traversal. This must be resolved and the Standard, Abyss, and production browser probes rerun before Task 13 can be called fully accepted.
+Protocol Zero's traffic-grid encounter is not yet proven by the Standard/Abyss headful campaign path because the final browser batch stopped earlier in the Data City lane measurement. The deterministic traffic contract is green, but browser item 8 remains open until a natural three-room run reaches firewall, traffic grid, clone nodes, kernel, victory, and cleanup.
+
+## Round 2 review — items 8 and 9
+
+### RED evidence
+- The pre-fix deterministic proof only asked whether any bottom-edge grid point could reach any top-edge grid point. It did not use the player's actual position, truthful-cell target, speed, or time sequence.
+- The first round-2 browser diagnostic with `duration-scale=0.1` reached the Storm room's final authored segment with `hull=4`, `progress=5.599999999999985/5.848000000000001`, `stormExposure=0`, then restored to the chapter-entry briefing. A second diagnostic with `duration-scale=0.2` restored to the same briefing while attempting the Dual Crisis room. Neither reached Protocol traffic, so no traffic hazard snapshot is claimed from those probes.
+- The final single headful batch used `duration-scale=0.15` and failed before any Data City room/Boss acceptance at `measureDataLaneRecovery` line 227: environment phase was `active`, but the real player had not settled within the lane-center tolerance. The Standard, Abyss, and Boss-victory browser assertions therefore remain unverified in this round.
+
+### GREEN implementation
+- `createProtocolTrafficCorridor(start, target, arena, bodyRadius, playerRadius)` creates a conservative waypoint contract from the **current player position** to the current truthful cell. It includes a player-radius-plus-margin clearance and detours around the Protocol body.
+- `protocolTemporalRouteReachesTruthfulCell({ corridor, frames, speed, dt })` advances a bounded player-radius body over consecutive frames and rejects any warning/hazard intersection or incomplete target arrival. The proof is temporal, not a single-frame bottom-to-top BFS.
+- Traffic-grid generation publishes `safeRoute.start`, `safeRoute.target`, `safeRoute.waypoints`, and `safeRoute.clearance`. On every truthful-cell transition, old Protocol traffic warnings/hazards are removed and the contract is regenerated from the actual player position.
+- `grid-lock`, `traffic-wall`, and `predictive-beam` spawns are rejected before materialization whenever their oriented geometry intersects the committed corridor. Traffic-wall safe-lane selection no longer adds `attackCursor`, so attack sequencing cannot drift the open lane away from the truthful cell. The corridor remains fixed across warning→active frames.
+- The deterministic test now covers 12 seeds × 4 truthful-cell rounds, all three traffic attack variants, timing offsets, actual player starts, and a localized corridor-seal synthetic RED case. It passes.
+
+### Round 2 verification
+- Project Node 22 full deterministic suite: `node --test` — PASS `321/321` (`5329.587041ms`).
+- Focused Data City/Protocol tests: `node --test tests/data-city-chapter.test.mjs tests/boss-system.test.mjs` — PASS `26/26`.
+- Production build plus `tests/assert-build-output.mjs dist-unminified` — PASS. Data City lazy chunk `4.80 kB` minified / `1.87 kB` gzip; unminified entry `31,661` bytes.
+- Changed-file syntax: `3/3` JS/MJS files — PASS. `git diff --check` — PASS.
+- Production browser cold-checkpoint batch on `4175`/CDP `9360`, 150-second hard timeout — PASS `2/2`:
+  - release authority isolation and direct settlement rejection;
+  - Data City lazy checkpoint await with no test authority and malicious duration query ignored.
+- Final Standard/Abyss browser batch on `4174`/CDP `9360`, 150-second hard timeout — NOT PASS: Standard stopped at `measureDataLaneRecovery` line 227 before Data City room/Boss traversal; Abyss was not reached. No browser victory/cleanup claim is made.
+
+### Round 2 process state
+Temporary `4174`, `4175`, and `9360` listeners were stopped and verified closed. Existing `4173` PID `11284` was not touched; `9333` was not used. The remaining item is browser item 8 only; item 9's deterministic temporal contract is green.

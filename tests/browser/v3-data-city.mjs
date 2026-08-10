@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { APP_URL, withPage } from './harness.mjs';
 
-const DATA_CITY_URL = new URL('?campaign-test=1&objective-seed=4112&duration-scale=0.1', APP_URL).href;
+const DATA_CITY_URL = new URL('?campaign-test=1&objective-seed=4112&duration-scale=0.15', APP_URL).href;
 const KEY = Object.freeze({
   up: ['w', 'KeyW'], down: ['s', 'KeyS'], left: ['a', 'KeyA'], right: ['d', 'KeyD'],
 });
@@ -117,9 +117,19 @@ async function driveTo(page, x, y, tolerance = 0.36) {
 
 async function dashDriveTo(page, x, y, tolerance = 0.3) {
   const deadline = Date.now() + 5000;
+  let lastPlaying = null;
   while (Date.now() < deadline) {
     const current = await snapshot(page);
-    if (current.session.mode !== 'playing') throw new Error(`dash movement interrupted in ${current.session.mode}`);
+    if (current.session.mode !== 'playing') {
+      throw new Error(`dash movement interrupted: ${JSON.stringify({ terminal: current.session, lastPlaying })}`);
+    }
+    lastPlaying = await page.evaluate(`(()=>{
+      const app=globalThis.__NEON_TIDE_V3__,s=app.getDebugSnapshot(),hazards=[];
+      for(const kind of ['warning','enemyHazard','enemyProjectile'])for(const id of app.world.query(kind)){
+        const e=app.world.get(id);if(e?.ownerKind==='boss')hazards.push({id,kind,x:e.x,y:e.y,rotation:e.rotation,scaleX:e.scaleX,scaleY:e.scaleY,age:e.age,lifetime:e.lifetime,attackKind:e.attackKind,state:e.state,damage:e.damage});
+      }
+      return {mode:s.session.mode,terminalReason:s.session.terminalReason??null,hull:s.session.hull,player:s.player?.position,boss:s.encounter.bossBehavior,hazards,recent:s.presentationEvents.recent?.slice(-16)??[]};
+    })()`);
     const player = current.player.position;
     const dx = x - player.x;
     const dy = y - player.y;
@@ -314,9 +324,13 @@ async function clearFirewall(page) {
 
 async function clearTrafficGrid(page) {
   for (let index = 0; index < 4; index += 1) {
-    const safe = await page.evaluate(`(()=>{const app=globalThis.__NEON_TIDE_V3__;for(const kind of ['bossPart','enemy','objective'])for(const id of app.world.query(kind)){const e=app.world.get(id);if(e?.type==='protocol-safe-cell'&&e.state==='truthful')return {x:e.x,y:e.y};}return null})()`);
-    assert.ok(safe, 'truthful cell has visible world presentation');
-    await dashDriveTo(page, safe.x, safe.y, 0.28);
+    const route = await page.evaluate(`(()=>{const s=globalThis.__NEON_TIDE_V3__.getDebugSnapshot();return s.encounter.bossBehavior.safeRoute})()`);
+    assert.ok(route?.target, 'truthful cell has a public current-player route contract');
+    assert.ok(Array.isArray(route.waypoints));
+    const player = (await snapshot(page)).player.position;
+    assert.ok(Math.hypot(route.start.x - player.x, route.start.y - player.y) < 0.65, 'route starts at the legal current player position');
+    for (const waypoint of route.waypoints) await dashDriveTo(page, waypoint.x, waypoint.y, 0.32);
+    await dashDriveTo(page, route.target.x, route.target.y, 0.28);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.trafficGrid.clears>${index}`, 5000);
   }
   await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='cloneNodes'`);
@@ -405,6 +419,20 @@ export const v3DataCityScenarios = [
       assert.ok(second.renderer.protocolRhythmEntitiesRendered > 0);
       assert.ok(second.renderer.protocolRhythmActiveRendered > 0);
       assert.ok(second.prompt.includes('离散节拍'));
+      const clones = await clearTrafficGrid(page);
+      assert.equal(clones.encounter.bossBehavior.phase, 'cloneNodes');
+      assert.equal(new Set(clones.encounter.bossBehavior.parts.nodes.map((node) => node.shape)).size, 3);
+      await driveTo(page, 0, 0, 0.3);
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.getDebugSnapshot().encounter.bossBehavior.phase==='kernel'`, 18000);
+      await driveTo(page, 0, 0, 0.3);
+      await page.waitForPage(`globalThis.__NEON_TIDE_V3__.session.getMode()==='upgrade'`, 14000);
+      const victory = await snapshot(page);
+      assert.equal(victory.encounter.bossBehavior.clean, true);
+      assert.equal(victory.encounter.bossBehavior.ownedEntityCount, 0);
+      assert.equal(victory.world.pools.bossPart.count, 0);
+      assert.ok(victory.encounter.bossBehavior.maxOwnedEntityCount <= 48);
+      assert.ok(victory.encounter.bossBehavior.maxSimultaneousWarnings <= 4);
+      assert.equal(victory.events.dropped, 0);
     });
   }],
 ];

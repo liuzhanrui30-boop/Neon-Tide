@@ -1139,56 +1139,151 @@ const PROTOCOL_NODE_POSITIONS = Object.freeze([
 const PROTOCOL_FIREWALL_ORDER = Object.freeze([0, 2, 1, 3]);
 const PROTOCOL_FIREWALL_KINDS = Object.freeze(['objective', 'enemy', 'bossPart', 'enemy']);
 const PROTOCOL_PRESENTATION_RETRY_SECONDS = 2.5;
+const PROTOCOL_TRAFFIC_ATTACK_KINDS = new Set(['grid-lock', 'traffic-wall', 'predictive-beam']);
+const PROTOCOL_TRAFFIC_CORRIDOR_MARGIN = 0.35;
 
-export function protocolOrientedBoxesLeaveReachableLane(boxes, arena = { halfWidth: 10.5, halfHeight: 7.2 }, playerRadius = 0.4) {
-  const candidates = Array.isArray(boxes) ? boxes : [];
-  const halfWidth = Math.max(1, finite(arena?.halfWidth, 10.5));
-  const halfHeight = Math.max(1, finite(arena?.halfHeight, 7.2));
-  const radius = Math.max(0, finite(playerRadius, 0.4));
-  const step = 0.35;
-  const columns = Math.max(3, Math.floor((halfWidth * 2 - radius * 2) / step) + 1);
-  const rows = Math.max(3, Math.floor((halfHeight * 2 - radius * 2) / step) + 1);
-  const blocked = new Uint8Array(columns * rows);
-  const indexOf = (x, y) => y * columns + x;
-  for (let row = 0; row < rows; row += 1) {
-    const y = -halfHeight + radius + row * step;
-    for (let column = 0; column < columns; column += 1) {
-      const x = -halfWidth + radius + column * step;
-      blocked[indexOf(column, row)] = candidates.some((box) => {
-        const rotation = finite(box?.rotation);
-        const dx = x - finite(box?.x);
-        const dy = y - finite(box?.y);
-        const along = dx * Math.cos(rotation) + dy * Math.sin(rotation);
-        const across = -dx * Math.sin(rotation) + dy * Math.cos(rotation);
-        return Math.abs(along) <= Math.max(0, finite(box?.scaleX)) * 0.5 + radius
-          && Math.abs(across) <= Math.max(0, finite(box?.scaleY)) * 0.5 + radius;
-      }) ? 1 : 0;
-    }
+function pointSegmentDistance(point, start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared <= EPSILON) return Math.hypot(point.x - start.x, point.y - start.y);
+  const amount = clamp(((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared, 0, 1);
+  return Math.hypot(point.x - (start.x + dx * amount), point.y - (start.y + dy * amount));
+}
+
+function routeLength(points) {
+  let length = 0;
+  for (let index = 1; index < points.length; index += 1) {
+    length += Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
   }
-  const queue = new Int32Array(columns * rows);
-  const seen = new Uint8Array(columns * rows);
-  let head = 0;
-  let tail = 0;
-  for (let column = 0; column < columns; column += 1) {
-    const index = indexOf(column, 0);
-    if (!blocked[index]) { seen[index] = 1; queue[tail++] = index; }
-  }
-  while (head < tail) {
-    const index = queue[head++];
-    const row = Math.floor(index / columns);
-    const column = index - row * columns;
-    if (row === rows - 1) return true;
-    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nextColumn = column + dx;
-      const nextRow = row + dy;
-      if (nextColumn < 0 || nextColumn >= columns || nextRow < 0 || nextRow >= rows) continue;
-      const next = indexOf(nextColumn, nextRow);
-      if (seen[next] || blocked[next]) continue;
-      seen[next] = 1;
-      queue[tail++] = next;
-    }
+  return length;
+}
+
+function routePoints(corridor = {}) {
+  return [corridor.start, ...(corridor.waypoints ?? []), corridor.target]
+    .filter((entry) => Number.isFinite(entry?.x) && Number.isFinite(entry?.y));
+}
+
+function segmentIntersectsExpandedBox(start, end, box, clearance) {
+  const rotation = finite(box?.rotation);
+  const cosine = Math.cos(rotation);
+  const sine = Math.sin(rotation);
+  const halfX = Math.max(0, finite(box?.scaleX)) * 0.5 + clearance;
+  const halfY = Math.max(0, finite(box?.scaleY)) * 0.5 + clearance;
+  const centerX = finite(box?.x);
+  const centerY = finite(box?.y);
+  const transform = (point) => {
+    const dx = point.x - centerX;
+    const dy = point.y - centerY;
+    return { x: dx * cosine + dy * sine, y: -dx * sine + dy * cosine };
+  };
+  const localStart = transform(start);
+  const localEnd = transform(end);
+  const distance = Math.hypot(localEnd.x - localStart.x, localEnd.y - localStart.y);
+  const samples = Math.max(1, Math.ceil(distance / 0.18));
+  for (let sample = 0; sample <= samples; sample += 1) {
+    const amount = sample / samples;
+    const x = localStart.x + (localEnd.x - localStart.x) * amount;
+    const y = localStart.y + (localEnd.y - localStart.y) * amount;
+    if (Math.abs(x) <= halfX && Math.abs(y) <= halfY) return true;
   }
   return false;
+}
+
+function boxIntersectsCorridor(box, corridor) {
+  const points = routePoints(corridor);
+  const clearance = Math.max(0, finite(corridor?.clearance, 0.75));
+  for (let index = 1; index < points.length; index += 1) {
+    if (segmentIntersectsExpandedBox(points[index - 1], points[index], box, clearance)) return true;
+  }
+  return false;
+}
+
+export function createProtocolTrafficCorridor(
+  startValue,
+  targetValue,
+  arena = { halfWidth: 10.5, halfHeight: 7.2 },
+  bodyRadius = 1.65,
+  playerRadius = 0.4,
+) {
+  const clearance = Math.max(0.2, finite(playerRadius, 0.4) + PROTOCOL_TRAFFIC_CORRIDOR_MARGIN);
+  const halfWidth = Math.max(2, finite(arena?.halfWidth, 10.5));
+  const halfHeight = Math.max(2, finite(arena?.halfHeight, 7.2));
+  const clampPoint = (value) => Object.freeze({
+    x: clamp(finite(value?.x), -halfWidth + clearance, halfWidth - clearance),
+    y: clamp(finite(value?.y), -halfHeight + clearance, halfHeight - clearance),
+  });
+  const start = clampPoint(startValue);
+  const target = clampPoint(targetValue);
+  const bodyClearance = Math.max(0, finite(bodyRadius, 1.65)) + clearance + 0.2;
+  const detourX = Math.min(halfWidth - clearance, bodyClearance);
+  const detourY = Math.min(halfHeight - clearance, bodyClearance);
+  const candidates = [
+    [start, target],
+    [start, clampPoint({ x: target.x, y: start.y }), target],
+    [start, clampPoint({ x: start.x, y: target.y }), target],
+    [start, clampPoint({ x: detourX, y: start.y }), clampPoint({ x: detourX, y: target.y }), target],
+    [start, clampPoint({ x: -detourX, y: start.y }), clampPoint({ x: -detourX, y: target.y }), target],
+    [start, clampPoint({ x: start.x, y: detourY }), clampPoint({ x: target.x, y: detourY }), target],
+    [start, clampPoint({ x: start.x, y: -detourY }), clampPoint({ x: target.x, y: -detourY }), target],
+  ].map((points) => points.filter((point, index) => index === 0
+    || Math.hypot(point.x - points[index - 1].x, point.y - points[index - 1].y) > EPSILON));
+  const clear = candidates.filter((points) => {
+    for (let index = 1; index < points.length; index += 1) {
+      if (pointSegmentDistance({ x: 0, y: 0 }, points[index - 1], points[index]) < bodyClearance) return false;
+    }
+    return true;
+  });
+  const selected = (clear.length ? clear : candidates)
+    .sort((left, right) => routeLength(left) - routeLength(right))[0];
+  return Object.freeze({
+    start,
+    target,
+    waypoints: Object.freeze(selected.slice(1, -1).map((point) => Object.freeze({ ...point }))),
+    clearance,
+    targetHalfWidth: Math.max(0.2, finite(targetValue?.halfWidth, 1.35)),
+    targetHalfHeight: Math.max(0.2, finite(targetValue?.halfHeight, 1.45)),
+  });
+}
+
+export function protocolTemporalRouteReachesTruthfulCell({
+  corridor,
+  frames = [],
+  speed = 6.15,
+  dt = 1 / 60,
+} = {}) {
+  const points = routePoints(corridor);
+  if (points.length < 2 || !Array.isArray(frames) || frames.length === 0) return false;
+  const seconds = finite(dt);
+  const movementPerFrame = finite(speed) * seconds;
+  if (seconds <= 0 || movementPerFrame <= 0) return false;
+  let position = { ...points[0] };
+  let targetIndex = 1;
+  for (const frame of frames) {
+    const boxes = Array.isArray(frame) ? frame : [];
+    if (boxes.some((box) => segmentIntersectsExpandedBox(position, position, box, corridor.clearance))) return false;
+    let remaining = movementPerFrame;
+    while (remaining > EPSILON && targetIndex < points.length) {
+      const target = points[targetIndex];
+      const distance = Math.hypot(target.x - position.x, target.y - position.y);
+      if (distance <= remaining + EPSILON) {
+        if (boxes.some((box) => segmentIntersectsExpandedBox(position, target, box, corridor.clearance))) return false;
+        position = { ...target };
+        remaining -= distance;
+        targetIndex += 1;
+      } else {
+        const amount = remaining / distance;
+        const next = {
+          x: position.x + (target.x - position.x) * amount,
+          y: position.y + (target.y - position.y) * amount,
+        };
+        if (boxes.some((box) => segmentIntersectsExpandedBox(position, next, box, corridor.clearance))) return false;
+        position = next;
+        remaining = 0;
+      }
+    }
+  }
+  return targetIndex >= points.length;
 }
 
 function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
@@ -1213,6 +1308,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
   let safeCellHold = 0;
   let safeCellClears = 0;
   let safeCells = [];
+  let trafficCorridor = null;
   let safeRoute = { openLanes: 1, laneIndex: 1, evidence: 'shape-and-rhythm' };
   let clean = false;
   let cleanupReason = null;
@@ -1428,7 +1524,17 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     }
   }
 
-  function generateSafeCells(world) {
+  function clearTrafficAttackEntities(world) {
+    for (const kind of ['warning', 'enemyHazard', 'enemyProjectile']) {
+      for (const id of [...owned[kind]]) {
+        const entity = world?.readInto?.(id, read);
+        if (PROTOCOL_TRAFFIC_ATTACK_KINDS.has(entity?.attackKind)) despawnOwned(world, kind, id);
+      }
+    }
+  }
+
+  function generateSafeCells(world, player = null) {
+    clearTrafficAttackEntities(world);
     clearSafeCellVisuals(world);
     const columns = definition.phases.trafficGrid.gridColumns;
     const rows = definition.phases.trafficGrid.gridRows;
@@ -1491,10 +1597,25 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
       spawned.push({ kind, id });
     }
     safeCells = candidates;
+    const truthful = candidates.find((cell) => cell.truthful);
+    const start = player && Number.isFinite(player.x) && Number.isFinite(player.y)
+      ? player
+      : trafficCorridor?.target ?? { x: 0, y: 0 };
+    trafficCorridor = createProtocolTrafficCorridor(
+      start,
+      truthful,
+      definition.arena,
+      definition.silhouette.bodyRadius,
+      Math.max(0.2, finite(player?.radius, 0.4)),
+    );
     safeRoute = Object.freeze({
       openLanes: 1,
       laneIndex: trueIndex % columns,
       evidence: 'unique-shape-and-primary-beat',
+      start: trafficCorridor.start,
+      target: trafficCorridor.target,
+      waypoints: trafficCorridor.waypoints,
+      clearance: trafficCorridor.clearance,
     });
     presentationBlockedSeconds = 0;
     return true;
@@ -1541,17 +1662,18 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     return true;
   }
 
-  function transition(nextPhase, world, events) {
+  function transition(nextPhase, world, events, player = null) {
     if (phase === nextPhase || clean) return false;
     phase = nextPhase;
     phaseElapsed = 0;
     attackTimer = 0;
     presentationBlockedSeconds = 0;
     if (phase !== 'firewall') clearFirewallMarker(world);
-    if (phase === 'trafficGrid') generateSafeCells(world);
+    if (phase === 'trafficGrid') generateSafeCells(world, player);
     else if (phase === 'cloneNodes') {
       clearSafeCellVisuals(world);
       safeCells = [];
+      trafficCorridor = null;
       generateCloneNodes(world);
     } else if (phase === 'kernel') {
       for (let index = 0; index < nodeIds.length; index += 1) {
@@ -1580,10 +1702,10 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     }
   }
 
-  function ensureProtocolPresentation(world, dt, events) {
+  function ensureProtocolPresentation(world, dt, events, player = null) {
     let ready = true;
     if (phase === 'firewall') ready = spawnFirewallMarker(world);
-    else if (phase === 'trafficGrid') ready = safeCells.length > 0 || generateSafeCells(world);
+    else if (phase === 'trafficGrid') ready = safeCells.length > 0 || generateSafeCells(world, player);
     else if (phase === 'cloneNodes') ready = nodeIds.every((id, index) => nodeDestroyed[index] || (id && world.readInto(id, read)))
       || generateCloneNodes(world);
     if (ready) {
@@ -1612,12 +1734,17 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     return id;
   }
 
+  function spawnTrafficWarning(world, data) {
+    if (trafficCorridor && boxIntersectsCorridor(data, trafficCorridor)) return 0;
+    return spawnWarning(world, data);
+  }
+
   function spawnTrafficWall(world) {
-    const safeLane = (safeRoute.laneIndex + attackCursor) % 3;
+    const safeLane = clamp(Math.trunc(finite(safeRoute.laneIndex, 1)), 0, 2);
     let spawned = 0;
     for (let lane = 0; lane < 3; lane += 1) {
       if (lane === safeLane) continue;
-      spawned += Boolean(spawnWarning(world, {
+      spawned += Boolean(spawnTrafficWarning(world, {
         x: (lane - 1) * 5.6, y: 0, rotation: 0, radius: 0.55,
         scaleX: 1.5, scaleY: 6.4, attackKind: 'traffic-wall',
         variant: 'oriented-box', color: 0xff4fd8,
@@ -1627,7 +1754,6 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     if (spawned) {
       attackCounts.trafficWall += 1;
       attacksSeen.add('traffic-wall');
-      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeLane, evidence: 'unblocked-column' });
     }
   }
 
@@ -1636,7 +1762,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     let spawned = 0;
     for (const lane of [0, 1, 2]) {
       if (lane === safeLane) continue;
-      spawned += Boolean(spawnWarning(world, {
+      spawned += Boolean(spawnTrafficWarning(world, {
         x: (lane - 1) * 5.6,
         y: clamp(finite(player.y) + (lane === 0 ? -1.4 : 1.4), -4.8, 4.8),
         rotation: Math.PI / 2, radius: 0.35, scaleX: 3.4, scaleY: 0.55,
@@ -1647,7 +1773,6 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     if (spawned) {
       attackCounts.predictiveBeam += 1;
       attacksSeen.add('predictive-beam');
-      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeLane, evidence: 'beam-preserved-column' });
     }
   }
 
@@ -1657,7 +1782,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     let spawned = 0;
     for (const cell of safeCells) {
       if (cell.truthful || spawned >= warningCap()) continue;
-      spawned += Boolean(spawnWarning(world, {
+      spawned += Boolean(spawnTrafficWarning(world, {
         x: cell.x, y: cell.y, radius: 0.4, scaleX: cell.halfWidth, scaleY: cell.halfHeight,
         attackKind: 'grid-lock', variant: 'oriented-box', color: 0xff4fd8,
         duration: definition.attacks.gridLock.telegraphSeconds,
@@ -1666,7 +1791,6 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     if (spawned) {
       attackCounts.gridLock += 1;
       attacksSeen.add('grid-lock');
-      safeRoute = Object.freeze({ openLanes: 1, laneIndex: safeRoute.laneIndex, evidence: truthful.shape });
     }
   }
 
@@ -1775,7 +1899,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     emit(events, 'boss:firewall-cleared', {
       bossId: definition.id, clear: firewallClears, required: definition.phases.firewall.requiredQuadrants,
     });
-    if (firewallClears >= definition.phases.firewall.requiredQuadrants) transition('trafficGrid', world, events);
+    if (firewallClears >= definition.phases.firewall.requiredQuadrants) transition('trafficGrid', world, events, player);
     else {
       spawnFirewallMarker(world);
       setObjectiveProgress();
@@ -1796,8 +1920,8 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
       bossId: definition.id, clear: safeCellClears, required: definition.phases.trafficGrid.requiredSafeCells,
       evidence: truthful.shape,
     });
-    if (safeCellClears >= definition.phases.trafficGrid.requiredSafeCells) transition('cloneNodes', world, events);
-    else generateSafeCells(world);
+    if (safeCellClears >= definition.phases.trafficGrid.requiredSafeCells) transition('cloneNodes', world, events, player);
+    else generateSafeCells(world, player);
   }
 
   function applyDamageRecords(world, damageRecords, events) {
@@ -1850,6 +1974,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     firewallMarkerKind = null;
     nodeIds.fill(0);
     safeCells = [];
+    trafficCorridor = null;
     if (objective && objective.status === 'active') {
       objective.status = 'failed';
       objective.completed = false;
@@ -1888,6 +2013,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     safeCellHold = 0;
     safeCellClears = 0;
     safeCells = [];
+    trafficCorridor = null;
     safeRoute = Object.freeze({ openLanes: 1, laneIndex: 1, evidence: 'marked-quadrant' });
     nodeIds.fill(0);
     nodeDestroyed.fill(0);
@@ -1941,7 +2067,7 @@ function createProtocolZeroBossSystem({ seed = 0, mode = 'standard' } = {}) {
     objective.elapsed = elapsed;
     objective.timeoutRemaining = Math.max(0, objective.timeout - elapsed);
     updateOwnedLifetimes(world, seconds);
-    if (!ensureProtocolPresentation(world, seconds, events) || objective.status !== 'active') {
+    if (!ensureProtocolPresentation(world, seconds, events, player) || objective.status !== 'active') {
       setObjectiveProgress();
       updates += 1;
       return Object.freeze({ phase, status: objective.status, changed: true });
