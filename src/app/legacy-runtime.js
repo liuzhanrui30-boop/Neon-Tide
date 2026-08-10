@@ -80,6 +80,7 @@ export function createLegacyRuntime({
   campaignRouting = false,
   campaignSeed = null,
   runModePreference = null,
+  combatTestTelemetry = false,
 }) {
 if (!session || !loop || !events) throw new TypeError("legacy runtime requires session, loop, and events");
 let started = false;
@@ -447,9 +448,29 @@ const combatBridge = {
   tideLanceFeedbackEvents: 0,
   lastTideLanceDamageRecords: Object.freeze([]),
   lastTideLanceFeedbackText: null,
+  tideLancePresentationSourceIds: new Float64Array(16),
+  tideLancePresentationSourceCount: 0,
+  tideLancePresentationSourceCursor: 0,
   entityWorld: null,
   lanceAim: null,
 };
+
+function rememberTideLancePresentationSource(sourceId) {
+  const id = Number(sourceId);
+  if (!Number.isSafeInteger(id) || id <= 0) return false;
+  for (let index = 0; index < combatBridge.tideLancePresentationSourceCount; index += 1) {
+    if (combatBridge.tideLancePresentationSourceIds[index] === id) return false;
+  }
+  if (combatBridge.tideLancePresentationSourceCount < combatBridge.tideLancePresentationSourceIds.length) {
+    combatBridge.tideLancePresentationSourceIds[combatBridge.tideLancePresentationSourceCount] = id;
+    combatBridge.tideLancePresentationSourceCount += 1;
+  } else {
+    combatBridge.tideLancePresentationSourceIds[combatBridge.tideLancePresentationSourceCursor] = id;
+    combatBridge.tideLancePresentationSourceCursor = (combatBridge.tideLancePresentationSourceCursor + 1)
+      % combatBridge.tideLancePresentationSourceIds.length;
+  }
+  return true;
+}
 const RUNTIME_COLLECTION_AUDIT_INTERVAL = 2;
 const runtimeAudit = {
   dirty: true,
@@ -2280,6 +2301,9 @@ function resetState() {
   combatBridge.tideLanceFeedbackEvents = 0;
   combatBridge.lastTideLanceDamageRecords = Object.freeze([]);
   combatBridge.lastTideLanceFeedbackText = null;
+  combatBridge.tideLancePresentationSourceIds.fill(0);
+  combatBridge.tideLancePresentationSourceCount = 0;
+  combatBridge.tideLancePresentationSourceCursor = 0;
   combatBridge.entityWorld = null;
   combatBridge.lanceAim = null;
   state.stats.projectilePeak = 0;
@@ -5645,17 +5669,24 @@ function applyCombatSummary(entityWorld, summary) {
   combatBridge.damage += summary.damage;
   combatBridge.destroyed += destroyedThisStep;
   const tideLanceHits = tideLanceRecords.length;
-  combatBridge.pendingFeedback = (firstTideLancePosition ?? firstHitPosition) && summary.weaponHitEventEmitted
-    ? Object.freeze(tideLanceHits > 0
-      ? {
+  const novelTideLancePresentation = tideLanceHits > 0
+    && rememberTideLancePresentationSource(tideLanceRecords[0].sourceId);
+  combatBridge.pendingFeedback = null;
+  if ((firstTideLancePosition ?? firstHitPosition) && summary.weaponHitEventEmitted) {
+    if (tideLanceHits > 0 && novelTideLancePresentation) {
+      combatBridge.pendingFeedback = Object.freeze({
         kind: 'tide-lance',
         position: firstTideLancePosition ?? firstHitPosition,
         hits: tideLanceHits,
         destroyed: tideLanceDestroyedThisStep,
         sourceId: tideLanceRecords[0].sourceId,
-      }
-      : { kind: 'automatic', position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep })
-    : null;
+      });
+    } else if (tideLanceHits === 0) {
+      combatBridge.pendingFeedback = Object.freeze({
+        kind: 'automatic', position: firstHitPosition, hits: summary.hits, destroyed: destroyedThisStep,
+      });
+    }
+  }
   if (tideLanceHits > 0) {
     const hitCap = deriveTideLanceSpec(getBuildStats()).hitCap;
     state.stats.laserHits += tideLanceHits;
@@ -5663,7 +5694,7 @@ function applyCombatSummary(entityWorld, summary) {
     state.stats.laserPeakTargets = Math.max(state.stats.laserPeakTargets, state.laserSequenceTargets);
     combatBridge.tideLanceDamageRecords += tideLanceHits;
     combatBridge.lastTideLanceDamageRecords = Object.freeze([...tideLanceRecords]);
-    if (laserAudio.onHits(tideLanceHits)) combatBridge.tideLanceAudioCues += 1;
+    if (novelTideLancePresentation && laserAudio.onHits(tideLanceHits)) combatBridge.tideLanceAudioCues += 1;
   }
   if (summary.perfectPhases > 0 && combatBridge.playerId) {
     const entityPlayer = entityWorld.readInto(combatBridge.playerId, combatBridge.readTarget);
@@ -6004,11 +6035,13 @@ function getDebugSnapshot() {
       feedbackEvents: combatBridge.feedbackEvents,
       suppressedFeedback: combatBridge.suppressedFeedback,
       consumedWeaponEvents: combatBridge.consumedWeaponEvents,
-      tideLanceDamageRecords: combatBridge.tideLanceDamageRecords,
-      tideLanceAudioCues: combatBridge.tideLanceAudioCues,
-      tideLanceFeedbackEvents: combatBridge.tideLanceFeedbackEvents,
-      lastTideLanceDamageRecords: combatBridge.lastTideLanceDamageRecords,
-      lastTideLanceFeedbackText: combatBridge.lastTideLanceFeedbackText,
+      ...(combatTestTelemetry ? {
+        tideLanceDamageRecords: combatBridge.tideLanceDamageRecords,
+        tideLanceAudioCues: combatBridge.tideLanceAudioCues,
+        tideLanceFeedbackEvents: combatBridge.tideLanceFeedbackEvents,
+        lastTideLanceDamageRecords: combatBridge.lastTideLanceDamageRecords,
+        lastTideLanceFeedbackText: combatBridge.lastTideLanceFeedbackText,
+      } : {}),
       damageAuthority: selectTideLanceDamageAuthority({ ecsCombatAuthority: Boolean(combatBridge.entityWorld) }),
     }),
   });

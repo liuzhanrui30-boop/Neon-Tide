@@ -75,16 +75,21 @@ async function holdAxisUntil(page, axis, target, start, tolerance) {
 async function driveTo(page, targetX, targetY, { tolerance = 0.42 } = {}) {
   let player = await playerState(page);
   if (player.mode !== 'playing') throw new Error(`movement interrupted in ${player.mode}`);
-
-  if (Math.abs(targetX - player.x) > tolerance) {
-    player = await holdAxisUntil(page, 'x', targetX, player.x, tolerance);
+  for (let correction = 0; correction < 8; correction += 1) {
+    const deltaX = targetX - player.x;
+    const deltaY = targetY - player.y;
+    if (Math.hypot(deltaX, deltaY) <= tolerance * 2.8) return player;
+    const axis = Math.abs(deltaX) >= Math.abs(deltaY) ? 'x' : 'y';
+    const target = axis === 'x' ? targetX : targetY;
+    const start = axis === 'x' ? player.x : player.y;
+    if (Math.abs(target - start) > tolerance) {
+      player = await holdAxisUntil(page, axis, target, start, tolerance);
+      if (player.mode === 'upgrade') return player;
+    }
+    await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+    player = await playerState(page);
+    if (player.mode === 'upgrade') return player;
   }
-  if (player.mode === 'upgrade') return player;
-  if (Math.abs(targetY - player.y) > tolerance) {
-    player = await holdAxisUntil(page, 'y', targetY, player.y, tolerance);
-  }
-  if (player.mode === 'upgrade') return player;
-
   if (Math.hypot(targetX - player.x, targetY - player.y) <= tolerance * 2.8) return player;
   throw new Error(`keyboard route failed to reach ${targetX},${targetY}: ${JSON.stringify(player)}`);
 }
@@ -208,20 +213,7 @@ async function performNaturalRouteBreaks(page) {
   return snapshot(page);
 }
 
-async function repairHull(page) {
-  return page.evaluate(`(()=>{
-    const session=globalThis.__NEON_TIDE_V3__.session;
-    const before={hull:session.getHull(),maxHull:session.getMaxHull(),mode:session.getMode()};
-    const applied=session.upgradeHullCapacity(session.getMaxHull(),{repair:session.getMaxHull()});
-    return {before,applied,after:{hull:session.getHull(),maxHull:session.getMaxHull(),mode:session.getMode()}};
-  })()`);
-}
-
 async function fightMawWithEvasion(page, center, target, timeoutMs = 30000) {
-  const repair = await repairHull(page);
-  assert.equal(repair.before.mode, 'playing', JSON.stringify(repair));
-  assert.equal(repair.applied, true, JSON.stringify(repair));
-  assert.equal(repair.after.hull, repair.after.maxHull, JSON.stringify(repair));
   const waypoints = [
     [center.x - 2.8, center.y - 1.9],
     [center.x + 2.8, center.y - 1.9],
@@ -346,6 +338,12 @@ export const v3AbyssScenarios = [
       assert.equal(victory.encounter.bossBehavior.ownedEntityCount, 0);
       assert.equal(victory.encounter.bossBehavior.clean, true);
       assert.equal(victory.events.dropped, 0);
+      assert.ok(victory.session.stats.damageTaken > varied.session.stats.damageTaken, JSON.stringify({
+        before: varied.session.stats.damageTaken,
+        after: victory.session.stats.damageTaken,
+        hull: victory.session.hull,
+      }));
+      assert.ok(victory.session.hull > 0, JSON.stringify(victory.session));
     });
   }],
   ['v3 Standard death at Abyss Maw reconstructs chapter entry without midpoint checkpoint', async () => {

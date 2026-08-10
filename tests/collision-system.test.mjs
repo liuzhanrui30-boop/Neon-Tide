@@ -45,6 +45,78 @@ test('friendly projectile damage is authoritative and Boss weak points amplify i
   assert.equal(events.emitted.filter(({ type }) => type === 'weaponHit').length, 1);
 });
 
+test('Bulwark Tide Lance and phase dash breaks are real collision outcomes with one HP writer', () => {
+  const lanceWorld = createEntityWorld({ capacities: { player: 1, enemy: 2, friendlyProjectile: 2 } });
+  lanceWorld.spawn('player', { x: 0, y: 0, radius: 0.4, team: 1, collidable: true });
+  const near = lanceWorld.spawn('enemy', {
+    x: 3, y: 0, hp: 20, maxHp: 20, radius: 1.15, team: 2,
+    role: 'bulwark', state: 'chase', armored: true, weakPoint: false, collidable: true,
+  });
+  const far = lanceWorld.spawn('enemy', {
+    x: 10, y: 0, hp: 20, maxHp: 20, radius: 1.15, team: 2,
+    role: 'bulwark', state: 'chase', armored: true, weakPoint: false, collidable: true,
+  });
+  lanceWorld.spawn('friendlyProjectile', {
+    previousX: 0, previousY: 0, x: 7.2, y: 0, damage: 3.2, radius: 0.275,
+    team: 1, collidable: true, piercing: true, hitBudgetRemaining: 8,
+    type: 'tide-lance', weaponId: 'tide-lance', sequence: 13,
+  });
+  const lance = createCollisionSystem().resolve(lanceWorld, null, 1 / 60, createEvents());
+  assert.equal(lance.damageRecords.length, 1, JSON.stringify(lance.damageRecords));
+  assert.deepEqual({
+    targetId: lance.damageRecords[0].targetId,
+    weaponId: lance.damageRecords[0].weaponId,
+    amount: lance.damageRecords[0].amount,
+    hpBefore: lance.damageRecords[0].hpBefore,
+    hpAfter: lance.damageRecords[0].hpAfter,
+    armorBreak: lance.damageRecords[0].armorBreak,
+    armorBreakKind: lance.damageRecords[0].armorBreakKind,
+  }, {
+    targetId: near, weaponId: 'tide-lance', amount: 3.2, hpBefore: 20, hpAfter: 16.8,
+    armorBreak: true, armorBreakKind: 'tide-lance',
+  });
+  assert.equal(lanceWorld.get(near).armored, false);
+  assert.equal(lanceWorld.get(near).weakPoint, true);
+  assert.ok(lanceWorld.get(near).armorBreakToken > 0);
+  assert.equal(lanceWorld.get(far).hp, 20);
+  assert.equal(lanceWorld.get(far).armored, true);
+  assert.equal(lanceWorld.get(far).armorBreakToken, 0);
+
+  const dashWorld = createEntityWorld({ capacities: { player: 1, enemy: 2 } });
+  dashWorld.spawn('player', {
+    previousX: -1, previousY: 0, x: 0, y: 0, radius: 0.4, team: 1,
+    collidable: true, invulnerable: true, dashTimer: 0.2, attackKind: 'dash', sequence: 21,
+  });
+  const dashHit = dashWorld.spawn('enemy', {
+    x: 0.5, y: 0, hp: 20, maxHp: 20, radius: 1.15, team: 2,
+    role: 'bulwark', state: 'chase', armored: true, weakPoint: false, collidable: true,
+  });
+  const dashMiss = dashWorld.spawn('enemy', {
+    x: 4, y: 0, hp: 20, maxHp: 20, radius: 1.15, team: 2,
+    role: 'bulwark', state: 'chase', armored: true, weakPoint: false, collidable: true,
+  });
+  const dashCollision = createCollisionSystem();
+  const firstDash = dashCollision.resolve(dashWorld, null, 1 / 60, createEvents());
+  assert.equal(firstDash.damageRecords.length, 1);
+  assert.deepEqual({
+    targetId: firstDash.damageRecords[0].targetId,
+    weaponId: firstDash.damageRecords[0].weaponId,
+    amount: firstDash.damageRecords[0].amount,
+    hpBefore: firstDash.damageRecords[0].hpBefore,
+    hpAfter: firstDash.damageRecords[0].hpAfter,
+    armorBreak: firstDash.damageRecords[0].armorBreak,
+    armorBreakKind: firstDash.damageRecords[0].armorBreakKind,
+  }, {
+    targetId: dashHit, weaponId: 'phase-dash', amount: 1, hpBefore: 20, hpAfter: 19,
+    armorBreak: true, armorBreakKind: 'dash',
+  });
+  const duplicateDash = dashCollision.resolve(dashWorld, null, 1 / 60, createEvents());
+  assert.equal(duplicateDash.damageRecords.length, 0);
+  assert.equal(dashWorld.get(dashHit).hp, 19);
+  assert.equal(dashWorld.get(dashMiss).hp, 20);
+  assert.equal(dashWorld.get(dashMiss).armored, true);
+});
+
 test('Prism Missile split spawns are deferred until after the active collision pass', () => {
   const world = createEntityWorld({ capacities: { enemy: 2, friendlyProjectile: 8 } });
   world.spawn('enemy', { x: 0, y: 0, hp: 10, radius: 0.5, team: 2, collidable: true });

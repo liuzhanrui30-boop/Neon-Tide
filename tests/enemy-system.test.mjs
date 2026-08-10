@@ -342,16 +342,24 @@ test('Warden moving walls always expose a visible non-damaging gap wider than th
   assert.notEqual(after, before);
 });
 
-test('Bulwark armor accepts one dash/Tide Lance counter token per attack and gives a fair telegraph', () => {
+test('Bulwark consumes one collision-authored dash armor-break token and gives a fair telegraph', () => {
   const setup = fixture();
   const system = createEnemySystem({ random: () => 0.5 });
+  const collision = createCollisionSystem();
   const id = system.spawnRole(setup.world, 'bulwark', { x: 0.4, y: 0, hp: 6, maxHp: 6 });
-  setup.world.write(setup.playerId, { dashTimer: 0.2, sequence: 7, attackKind: 'dash' });
+  setup.world.write(setup.playerId, {
+    previousX: -0.2, previousY: 0, x: 0, y: 0,
+    dashTimer: 0.2, sequence: 7, attackKind: 'dash', invulnerable: true,
+  });
+  const collisionSummary = collision.resolve(setup.world, { damageHull() {} }, STEP, setup.events);
+  assert.equal(collisionSummary.damageRecords.length, 1);
+  assert.equal(collisionSummary.damageRecords[0].weaponId, 'phase-dash');
+  assert.equal(collisionSummary.damageRecords[0].amount, 1);
   system.update(setup.world, setup.player(), null, STEP, setup.events);
   const first = setup.world.get(id);
   assert.equal(first.state, 'counter-telegraph');
-  assert.equal(first.counterToken, 7);
-  assert.equal(first.hp, 6);
+  assert.equal(first.counterToken, first.armorBreakToken);
+  assert.equal(first.hp, 5);
   assert.equal(first.armored, false);
   assert.equal(first.weakPoint, true);
   assert.ok(first.telegraphTimer >= getEnemyRole('bulwark').telegraphSeconds - STEP - 1e-9);
@@ -372,13 +380,6 @@ test('Bulwark Tide Lance armor break delegates the only HP write to CollisionSys
   const collisionSystem = createCollisionSystem();
   const id = enemySystem.spawnRole(setup.world, 'bulwark', { x: 3, y: 0, hp: 20, maxHp: 20 });
 
-  enemySystem.update(setup.world, setup.player(), null, STEP, setup.events);
-  const broken = setup.world.get(id);
-  assert.equal(broken.hp, 20);
-  assert.equal(broken.armored, false);
-  assert.equal(broken.weakPoint, true);
-  assert.equal(broken.state, 'counter-telegraph');
-
   weaponSystem.update(setup.world, setup.playerId, STEP, setup.events, {});
   const summary = collisionSystem.resolve(setup.world, { damageHull() {} }, STEP, setup.events, {});
   const records = summary.damageRecords.filter((record) => record.targetId === id);
@@ -386,21 +387,60 @@ test('Bulwark Tide Lance armor break delegates the only HP write to CollisionSys
   assert.equal(records[0].weaponId, 'tide-lance');
   assert.equal(records[0].hpBefore, 20);
   assert.equal(records[0].hpAfter, 16.8);
-  assert.equal(setup.world.get(id).hp, 16.8);
-  assert.equal(setup.world.get(id).armored, false);
-  assert.equal(setup.world.get(id).weakPoint, true);
+  assert.equal(records[0].armorBreak, true);
+  const broken = setup.world.get(id);
+  assert.equal(broken.hp, 16.8);
+  assert.equal(broken.armored, false);
+  assert.equal(broken.weakPoint, true);
+  assert.equal(broken.state, 'chase');
+  assert.ok(broken.armorBreakToken > 0);
+
+  enemySystem.update(setup.world, setup.player(), null, STEP, setup.events);
+  const counter = setup.world.get(id);
+  assert.equal(counter.state, 'counter-telegraph');
+  assert.equal(counter.counterToken, broken.armorBreakToken);
+  assert.equal(counter.executingTelegraph, true);
+});
+
+test('Bulwark outside the real 7.2 Tide Lance ray keeps armor and starts no counter', () => {
+  const setup = fixture();
+  setup.world.write(setup.playerId, {
+    x: 0, y: 0, previousX: 0, previousY: 0,
+    attackKind: 'tide-lance', sequence: 51, directionX: 1, directionY: 0,
+  });
+  const enemySystem = createEnemySystem({ random: () => 0.5 });
+  const weaponSystem = createWeaponSystem();
+  const collisionSystem = createCollisionSystem();
+  const id = enemySystem.spawnRole(setup.world, 'bulwark', { x: 10, y: 0, hp: 20, maxHp: 20 });
+
+  weaponSystem.update(setup.world, setup.playerId, STEP, setup.events, {});
+  const summary = collisionSystem.resolve(setup.world, { damageHull() {} }, STEP, setup.events, {});
+  assert.equal(summary.damageRecords.filter((record) => record.targetId === id).length, 0);
+  enemySystem.update(setup.world, setup.player(), null, STEP, setup.events);
+  const enemy = setup.world.get(id);
+  assert.equal(enemy.hp, 20);
+  assert.equal(enemy.armored, true);
+  assert.equal(enemy.weakPoint, false);
+  assert.equal(enemy.state, 'chase');
+  assert.equal(enemy.armorBreakToken, 0);
+  assert.equal(entities(setup.world, 'warning').some(({ ownerId }) => ownerId === id), false);
 });
 
 test('Bulwark ignores fresh dash and Tide Lance tokens until the current counter wave resolves', () => {
   const setup = fixture();
   const system = createEnemySystem({ random: () => 0.5 });
+  const collision = createCollisionSystem();
   const id = system.spawnRole(setup.world, 'bulwark', { x: 0.4, y: 0, hp: 12, maxHp: 12 });
-  setup.world.write(setup.playerId, { dashTimer: 0.2, sequence: 1, attackKind: 'dash' });
+  setup.world.write(setup.playerId, { dashTimer: 0.2, sequence: 1, attackKind: 'dash', invulnerable: true });
+  collision.resolve(setup.world, { damageHull() {} }, STEP, setup.events);
   system.update(setup.world, setup.player(), null, STEP, setup.events);
   const warningIds = entities(setup.world, 'warning').filter(({ ownerId }) => ownerId === id).map(({ id: warningId }) => warningId);
   setup.world.write(setup.playerId, { dashTimer: 0.2, sequence: 2, attackKind: 'dash' });
+  const duplicate = collision.resolve(setup.world, { damageHull() {} }, STEP, setup.events);
+  assert.equal(duplicate.damageRecords.length, 0);
   system.update(setup.world, setup.player(), null, STEP, setup.events);
-  assert.equal(setup.world.get(id).counterToken, 1);
+  const counterToken = setup.world.get(id).counterToken;
+  assert.ok(counterToken > 0);
   assert.deepEqual(entities(setup.world, 'warning').filter(({ ownerId }) => ownerId === id).map(({ id: warningId }) => warningId), warningIds);
   step(system, setup, getEnemyRole('bulwark').telegraphSeconds + STEP);
   const waveIds = entities(setup.world, 'enemyHazard').filter(({ ownerId }) => ownerId === id).map(({ id: hazardId }) => hazardId);
@@ -410,7 +450,7 @@ test('Bulwark ignores fresh dash and Tide Lance tokens until the current counter
   });
   system.update(setup.world, setup.player(), null, STEP, setup.events);
   assert.equal(setup.world.get(id).state, 'counter-active');
-  assert.equal(setup.world.get(id).counterToken, 1);
+  assert.equal(setup.world.get(id).counterToken, counterToken);
   assert.deepEqual(entities(setup.world, 'enemyHazard').filter(({ ownerId }) => ownerId === id).map(({ id: hazardId }) => hazardId), waveIds);
   assert.equal(entities(setup.world, 'warning').some(({ ownerId }) => ownerId === id), false);
 });
@@ -451,7 +491,10 @@ test('execution protection retains every committed active attack owner until its
       stateTimer: 0,
     });
     if (role === 'bulwark') {
-      setup.world.write(setup.playerId, { dashTimer: 0.2, sequence: 9, attackKind: 'dash' });
+      setup.world.write(setup.playerId, {
+        dashTimer: 0.2, sequence: 9, attackKind: 'dash', invulnerable: true,
+      });
+      createCollisionSystem().resolve(setup.world, { damageHull() {} }, STEP, setup.events);
       system.update(setup.world, setup.player(), null, STEP, setup.events);
       setup.world.write(setup.playerId, { dashTimer: 0, attackKind: null });
     } else {

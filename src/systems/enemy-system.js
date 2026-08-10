@@ -199,6 +199,7 @@ export function createEnemySystem({
       collidable: true, contactDamaging: !['lancer', 'mine', 'warden'].includes(roleId),
       armored: overrides.armored ?? roleId === 'bulwark', weakPoint: overrides.weakPoint ?? false, executingTelegraph: false,
       sequence: 0, counterToken: 0, dashToken: 0, lanceToken: 0,
+      armorBreakToken: 0, armorBreakKind: null,
     });
     if (id == null) rejectedSpawns += 1;
     else {
@@ -540,37 +541,15 @@ export function createEnemySystem({
     });
   }
 
-  function applyBulwarkBreak(world, enemy, player) {
-    if (enemy.role !== 'bulwark' || enemy.state !== 'chase' || !enemy.armored || !player) return false;
-    let token = 0;
-    if (player.dashTimer > 0 && player.attackKind === 'dash') {
-      const dashToken = player.sequence >>> 0;
-      if (dashToken !== enemy.dashToken && Math.hypot(player.x - enemy.x, player.y - enemy.y) <= player.radius + enemy.radius + 0.4) {
-        token = dashToken;
-        world.write(enemy.id, { dashToken });
-      }
-    } else if (player.attackKind === 'tide-lance' && player.sequence !== enemy.lanceToken) {
-      const directionLength = Math.hypot(player.directionX, player.directionY);
-      const directionX = directionLength > EPSILON ? player.directionX / directionLength : 0;
-      const directionY = directionLength > EPSILON ? player.directionY / directionLength : 1;
-      const offsetX = enemy.x - player.x;
-      const offsetY = enemy.y - player.y;
-      const along = offsetX * directionX + offsetY * directionY;
-      const across = Math.abs(offsetX * directionY - offsetY * directionX);
-      if (along >= 0 && along <= 18 && across <= enemy.radius + 0.5) {
-        token = player.sequence >>> 0;
-        world.write(enemy.id, { lanceToken: token });
-      }
-    }
-    if (!token || token === enemy.counterToken) return false;
-    // Breaking the armor is a state gate only. Friendly weapon damage is
-    // authored and applied exactly once by CollisionSystem.
-    world.write(enemy.id, { armored: false, weakPoint: true });
-    const updated = world.readInto(enemy.id, enemyRead);
-    if (updated && updated.hp > 0) {
-      if (canBeginHighDamage(world, updated.id)) beginBulwarkCounter(world, updated, token);
-      else world.write(updated.id, { state: 'counter-pending', stateTimer: 0.1, counterToken: token, contactDamaging: false });
-    }
+  function consumeBulwarkBreak(world, enemy) {
+    if (enemy.role !== 'bulwark' || enemy.state !== 'chase' || enemy.armored
+      || !enemy.weakPoint || !enemy.armorBreakToken || enemy.armorBreakToken === enemy.counterToken) return false;
+    const token = enemy.armorBreakToken;
+    if (canBeginHighDamage(world, enemy.id)) beginBulwarkCounter(world, enemy, token);
+    else world.write(enemy.id, {
+      state: 'counter-pending', stateTimer: 0.1, counterToken: token,
+      contactDamaging: false, executingTelegraph: false,
+    });
     return true;
   }
 
@@ -782,7 +761,7 @@ export function createEnemySystem({
   }
 
   function updateBulwark(world, enemy, player, dt) {
-    if (applyBulwarkBreak(world, enemy, player)) return;
+    if (consumeBulwarkBreak(world, enemy)) return;
     if (enemy.state === 'counter-pending') {
       if (canBeginHighDamage(world, enemy.id)) beginBulwarkCounter(world, enemy, enemy.counterToken);
       else world.write(enemy.id, { stateTimer: Math.max(0, enemy.stateTimer - dt), vx: 0, vy: 0 });

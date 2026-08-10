@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
-import { withPage } from './harness.mjs';
+import { APP_URL, withPage } from './harness.mjs';
+
+const WEAPON_URL = new URL('?weapon-test=1', APP_URL).href;
 
 async function v3WeaponsScenario() {
-  await withPage('v3-weapons-no-input', {}, async (page) => {
+  await withPage('v3-weapons-no-input', { appUrl: WEAPON_URL }, async (page) => {
     await page.startGame();
     await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
     await page.waitForPage(`globalThis.__NEON_TIDE_V3__.world.query('objective').length>0&&globalThis.__NEON_TIDE_V3__.getDebugSnapshot().renderer.pools.objective.count>0`);
@@ -243,6 +245,7 @@ async function v3WeaponsScenario() {
   });
 
   await withPage('v3-weapons-coarse-390x844', {
+    appUrl: WEAPON_URL,
     width: 390,
     height: 844,
     deviceScaleFactor: 2,
@@ -261,7 +264,10 @@ async function v3WeaponsScenario() {
 }
 
 async function v3TideLanceSingleAuthorityScenario() {
-  await withPage('v3-tide-lance-single-damage-authority', { reducedMotion: true }, async (page) => {
+  await withPage('v3-tide-lance-single-damage-authority', {
+    appUrl: WEAPON_URL,
+    reducedMotion: true,
+  }, async (page) => {
     await page.startGame();
     await page.waitForPage(`Boolean(globalThis.__NEON_TIDE_V3__?.getDebugSnapshot().legacy.combatBridge.playerId)`);
     page.requireDev('real input Tide Lance mirror pipeline');
@@ -376,6 +382,44 @@ async function v3TideLanceSingleAuthorityScenario() {
     assert.equal(ordinary.target.hp, ordinaryRecord.hpAfter);
     assert.equal(ordinary.legacy.hp, ordinaryRecord.hpAfter);
 
+    const duplicateFrame = await page.gameEvaluate(`
+      const record=combatBridge.lastTideLanceDamageRecords[0];
+      const before={
+        records:combatBridge.tideLanceDamageRecords,
+        audio:combatBridge.tideLanceAudioCues,
+        feedback:combatBridge.tideLanceFeedbackEvents,
+        feedbackEvents:combatBridge.feedbackEvents,
+        laserHit:globalThis.__V3_TIDE_AUDIO_PROBE__.laserHit??0,
+        autoText:floatingTexts.filter(({element})=>element?.textContent?.startsWith('AUTO')).length,
+      };
+      applyCombatSummary(combatBridge.entityWorld,{
+        damageRecords:[record],hits:1,damage:record.amount,destroyed:0,
+        weaponHitEventEmitted:true,perfectPhases:0,playerDamage:0,
+      });
+      events.emit('weaponHit',Object.freeze({count:1,byWeapon:Object.freeze({'tide-lance':1})}));
+      return {before,pending:combatBridge.pendingFeedback};
+    `);
+    await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+    duplicateFrame.after = await page.evaluate(`(()=>{
+      const bridge=globalThis.__NEON_TIDE_V3__.getDebugSnapshot().legacy.combatBridge;
+      return {
+        records:bridge.tideLanceDamageRecords,
+        audio:bridge.tideLanceAudioCues,
+        feedback:bridge.tideLanceFeedbackEvents,
+        feedbackEvents:bridge.feedbackEvents,
+        laserHit:globalThis.__V3_TIDE_AUDIO_PROBE__.laserHit??0,
+        autoText:[...document.querySelectorAll('.floating-text')]
+          .filter((element)=>element.textContent?.startsWith('AUTO')).length,
+      };
+    })()`);
+    assert.equal(duplicateFrame.after.records, duplicateFrame.before.records + 1, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.after.audio, duplicateFrame.before.audio, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.after.feedback, duplicateFrame.before.feedback, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.after.feedbackEvents, duplicateFrame.before.feedbackEvents, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.after.laserHit, duplicateFrame.before.laserHit, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.after.autoText, duplicateFrame.before.autoText, JSON.stringify(duplicateFrame));
+    assert.equal(duplicateFrame.pending, null, JSON.stringify(duplicateFrame));
+
     await page.waitForGame(`return $state.laserState==='idle'`, Boolean, 3000);
     const bulwarkProbe = await prepareNaturalMirror({ bulwark: true });
     assert.ok(['bulwark', 'elite'].includes(bulwarkProbe.source.type));
@@ -394,10 +438,23 @@ async function v3TideLanceSingleAuthorityScenario() {
     assert.equal(bulwarkRecord.hpBefore, 20);
     assert.equal(bulwarkRecord.hpAfter, 16.8);
     assert.equal(bulwarkRecord.amount, 3.2);
+    assert.equal(bulwarkRecord.armorBreak, true);
+    assert.equal(bulwarkRecord.armorBreakKind, 'tide-lance');
     assert.equal(bulwark.target.hp, 16.8);
     assert.equal(bulwark.legacy.hp, 16.8);
     assert.equal(bulwark.target.armored, false, JSON.stringify(bulwark));
     assert.equal(bulwark.target.weakPoint, true, JSON.stringify(bulwark));
+
+    await page.waitForPage(`(()=>{
+      const enemy=globalThis.__NEON_TIDE_V3__.world.get(${bulwarkProbe.targetId});
+      return enemy?.state==='counter-telegraph'&&enemy.counterToken>0&&enemy.executingTelegraph;
+    })()`, 3000);
+    const counterBeforeSync = await page.evaluate(`globalThis.__NEON_TIDE_V3__.world.get(${bulwarkProbe.targetId})`);
+    await page.evaluate(`new Promise((resolve)=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))`);
+    const counterAfterSync = await page.evaluate(`globalThis.__NEON_TIDE_V3__.world.get(${bulwarkProbe.targetId})`);
+    assert.equal(counterAfterSync.state, counterBeforeSync.state, JSON.stringify({ counterBeforeSync, counterAfterSync }));
+    assert.equal(counterAfterSync.counterToken, counterBeforeSync.counterToken, JSON.stringify({ counterBeforeSync, counterAfterSync }));
+    assert.equal(counterAfterSync.executingTelegraph, true, JSON.stringify({ counterBeforeSync, counterAfterSync }));
 
     const fallback = await page.evaluate(`(async()=>{
       const {selectTideLanceDamageAuthority}=await import('/src/game/skill.js');

@@ -60,6 +60,8 @@ export function bootstrapNeonTide(options = {}) {
   const objectiveTestMode = import.meta.env.DEV && searchParams.has('objective-test');
   const compatibilityTestMode = import.meta.env.DEV && searchParams.has('compatibility-test');
   const campaignTestMode = import.meta.env.DEV && searchParams.has('campaign-test');
+  const weaponTestMode = import.meta.env.DEV && searchParams.has('weapon-test');
+  const combatTestTelemetry = campaignTestMode || weaponTestMode;
   const campaignRouting = import.meta.env.PROD || campaignTestMode;
   const initialRouteKind = compatibilityTestMode
     ? 'compatibility'
@@ -309,6 +311,7 @@ export function bootstrapNeonTide(options = {}) {
     campaignRouting,
     campaignSeed,
     runModePreference,
+    combatTestTelemetry,
   });
   runtime.start();
   loop.reset(performance.now());

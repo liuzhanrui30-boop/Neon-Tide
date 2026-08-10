@@ -101,6 +101,12 @@ function containsId(ids, count, id) {
   return false;
 }
 
+function armorBreakToken(sequence, sourceId, kind) {
+  const base = (sequence >>> 0) || (sourceId >>> 0) || 1;
+  const token = (Math.imul(base, 2) + (kind === 'tide-lance' ? 1 : 0)) >>> 0;
+  return token || (kind === 'tide-lance' ? 1 : 2);
+}
+
 export function createCollisionSystem({
   outcomeCapacity = DEFAULT_OUTCOME_CAPACITY,
   spawnCapacity = DEFAULT_SPAWN_CAPACITY,
@@ -112,8 +118,11 @@ export function createCollisionSystem({
   const damageAmounts = new Float64Array(outcomes);
   const damageWeakPoints = new Uint8Array(outcomes);
   const damageFriendly = new Uint8Array(outcomes);
+  const damageArmorBreaks = new Uint8Array(outcomes);
+  const damageArmorBreakTokens = new Uint32Array(outcomes);
   const damageWeapons = new Array(outcomes).fill(null);
   const damageTargetKinds = new Array(outcomes).fill(null);
+  const damageArmorBreakKinds = new Array(outcomes).fill(null);
   const despawnIds = new Float64Array(outcomes);
   const targetDespawnIds = new Float64Array(outcomes);
   const spawnX = new Float64Array(spawns);
@@ -174,6 +183,7 @@ export function createCollisionSystem({
     collidable: true,
     color: 0xffffff,
   };
+  const dashDamageSource = { id: 0, weaponId: 'phase-dash' };
   const hitHistoryPatch = { hitBudgetRemaining: 0 };
   for (let index = 0; index < HIT_HISTORY_CAPACITY; index += 1) {
     spawnData[`hitTarget${index}`] = 0;
@@ -187,7 +197,16 @@ export function createCollisionSystem({
   let queueOverflows = 0;
   let hitEvents = 0;
 
-  function queueDamage(state, projectile, target, amount, weakPoint, friendly = true) {
+  function queueDamage(
+    state,
+    projectile,
+    target,
+    amount,
+    weakPoint,
+    friendly = true,
+    armorBreakKind = null,
+    armorBreakToken = 0,
+  ) {
     if (state.damageCount >= outcomes) {
       queueOverflows += 1;
       return false;
@@ -198,8 +217,11 @@ export function createCollisionSystem({
     damageAmounts[index] = Math.max(0, amount);
     damageWeakPoints[index] = weakPoint ? 1 : 0;
     damageFriendly[index] = friendly ? 1 : 0;
+    damageArmorBreaks[index] = armorBreakKind ? 1 : 0;
+    damageArmorBreakTokens[index] = armorBreakToken >>> 0;
     damageWeapons[index] = projectile.weaponId;
     damageTargetKinds[index] = target.kind;
+    damageArmorBreakKinds[index] = armorBreakKind;
     state.damageCount += 1;
     return true;
   }
@@ -378,14 +400,28 @@ export function createCollisionSystem({
         if (!target || !targetCanTakeFriendlyHit(projectile, target) || projectileHitIndex(projectile, target.id) >= 0) continue;
           const armoredBossPart = target.kind === 'bossPart' && (target.armored || !target.weakPoint);
           const armoredEnemy = target.kind === 'enemy' && target.armored && !target.weakPoint;
-          if (!armoredBossPart && !armoredEnemy) {
+          const breaksBulwark = armoredEnemy && target.role === 'bulwark'
+            && (projectile.type === 'tide-lance' || projectile.weaponId === 'tide-lance');
+          if (!armoredBossPart && (!armoredEnemy || breaksBulwark)) {
             const weakPointMultiplier = target.weakPoint
               ? clamp(finite(projectile.weakPointMultiplier, 1.5), 1, 2.5)
               : 1;
             const objectiveMultiplier = target.kind === 'objective'
               ? clamp(finite(projectile.objectiveDamageMultiplier, 1), 1, 1.8)
               : 1;
-            queueDamage(state, projectile, target, projectile.damage * weakPointMultiplier * objectiveMultiplier, target.weakPoint);
+            const breakToken = breaksBulwark
+              ? armorBreakToken(projectile.sequence, projectile.id, 'tide-lance')
+              : 0;
+            queueDamage(
+              state,
+              projectile,
+              target,
+              projectile.damage * weakPointMultiplier * objectiveMultiplier,
+              target.weakPoint,
+              true,
+              breaksBulwark ? 'tide-lance' : null,
+              breakToken,
+            );
           }
         if (historyCount < hitTargets.length) hitTargets[historyCount++] = target.id;
         queuePrismImpactDamage(world, state, projectile, target);
@@ -403,6 +439,29 @@ export function createCollisionSystem({
         }
         world.write(projectile.id, hitHistoryPatch);
       }
+    }
+  }
+
+  function collectDashBulwarkHits(world, state, player) {
+    if (player.dashTimer <= 0 || player.attackKind !== 'dash') return;
+    const attackToken = armorBreakToken(player.sequence, player.id, 'dash');
+    dashDamageSource.id = player.id;
+    const enemies = world.query('enemy');
+    for (let index = 0; index < enemies.length; index += 1) {
+      const enemy = world.readInto(enemies.at(index), targetRead);
+      if (!enemy || enemy.role !== 'bulwark' || enemy.state !== 'chase'
+        || !enemy.collidable || enemy.hp <= 0 || !enemy.armored || enemy.weakPoint
+        || enemy.dashToken === attackToken || !sweptCircleHit(player, enemy)) continue;
+      queueDamage(
+        state,
+        dashDamageSource,
+        enemy,
+        1,
+        false,
+        true,
+        'dash',
+        attackToken,
+      );
     }
   }
 
@@ -591,10 +650,23 @@ export function createCollisionSystem({
       const hpAfter = Math.max(0, target.hp - amount);
       const executionProtected = hpAfter <= 0 && target.kind === 'enemy'
         && isEnemyExecutionProtected(target);
-      world.write(target.id, {
+      const armorBreak = damageArmorBreaks[index] === 1
+        && target.kind === 'enemy' && target.role === 'bulwark' && target.armored;
+      const armorBreakKind = armorBreak ? damageArmorBreakKinds[index] : null;
+      const armorBreakToken = armorBreak ? damageArmorBreakTokens[index] : 0;
+      const patch = {
         hp: hpAfter,
         state: hpAfter <= 0 ? (executionProtected ? target.state : 'destroyed') : target.state,
-      });
+      };
+      if (armorBreak) {
+        patch.armored = false;
+        patch.weakPoint = true;
+        patch.armorBreakKind = armorBreakKind;
+        patch.armorBreakToken = armorBreakToken;
+        if (armorBreakKind === 'dash') patch.dashToken = armorBreakToken;
+        else if (armorBreakKind === 'tide-lance') patch.lanceToken = armorBreakToken;
+      }
+      world.write(target.id, patch);
       if (hpAfter <= 0 && !executionProtected) {
         state.targetDespawnCount = addUnique(targetDespawnIds, state.targetDespawnCount, target.id);
         destroyed += 1;
@@ -619,6 +691,9 @@ export function createCollisionSystem({
         destroyed: hpAfter <= 0 && !executionProtected,
         executionProtected,
         weakPoint: damageWeakPoints[index] === 1,
+        armorBreak,
+        armorBreakKind,
+        armorBreakToken,
       }));
     }
     return {
@@ -735,6 +810,7 @@ export function createCollisionSystem({
     const playerId = world.query('player').at(0);
     const player = Number.isSafeInteger(playerId) ? world.readInto(playerId, playerRead) : null;
     if (player?.collidable) {
+      collectDashBulwarkHits(world, state, player);
       collectPlayerHits(world, state, player, events, buildStats);
       collectPickupsAndObjectives(world, state, player, dt, events, buildStats);
     }

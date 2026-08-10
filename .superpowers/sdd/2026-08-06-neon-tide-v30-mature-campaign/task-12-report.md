@@ -9,6 +9,7 @@ DONE FOR REVIEW — the first complete campaign chapter has authored room pacing
 - `f7dd10b fix: close Abyss combat authority gaps`
 - `867b006 fix: unify Tide Lance runtime authority`
 - `fix: enforce single Tide Lance combat authority` (current amended review-fix commit)
+- `fix: finalize Abyss combat contracts` (round 5 final commit)
 
 ## Delivered
 
@@ -119,3 +120,36 @@ All final deterministic commands used Node `22.14.0`.
 
 ## Remaining concern
 - No unresolved Task 12 functional or acceptance concern remains. Vite's existing size warning applies only to the separately cached Three.js vendor chunk; the application entry remains small and the three later chapters remain lazy. Task 13 should populate the existing Data City boundary rather than moving chapter content into the eager entry.
+
+## Review round 5 final closeout
+
+### RED
+- Preserved the interrupted implementer's uncommitted RED coverage instead of reverting it. The focused run failed because CollisionSystem produced no Tide Lance or dash damage record for an armored Bulwark, while EnemySystem still broke armor and scheduled a counter from its own independent `18`-unit ray/extra-width geometry.
+- The distance-`10` regression demonstrated the authority bug directly: the real default `7.2` Tide Lance produced zero collision records, but the old EnemySystem projection still removed armor and entered a counter.
+- The dash regression demonstrated the missing authored outcome: a real invulnerable player dash swept through a Bulwark but produced no `phase-dash` record and no one-point HP delta.
+- The complete Abyss acceptance still contained two direct `session.upgradeHullCapacity(maxHull, { repair: maxHull })` full heals. Removing them first exposed an inertial keyboard-route miss during the natural Maw tail, matching the reported long-fight instability without weakening Boss attacks.
+
+### GREEN
+- CollisionSystem is now the only Bulwark combat outcome writer. A real Tide Lance sweep or player dash sweep writes the single HP delta, records `armorBreak`, `armorBreakKind`, and a bounded uint attack token, and flips armor/weak-point state. EnemySystem contains no Tide Lance ray or dash overlap calculation; it only consumes a fresh collision-authored token to begin the authored fair counter warning.
+- Default Tide Lance reach is exact: the near target changes `20 → 16.8` with exactly one record, while a Bulwark at distance `10` remains `20`, armored, without a token, warning, or counter. A real dash overlap changes `20 → 19`; the same dash token cannot apply twice, and a missed target is unchanged.
+- Tide Lance presentation now uses a fixed 16-source `Float64Array` ring. The same generation-safe projectile source across two summaries can add later damage records but produces exactly one `laserHit`, one dedicated `光矛贯穿` feedback, and no `AUTO` fallback. Reset clears the ring; no unbounded `Set` or dedupe allocation was added to the hot path.
+- The Bulwark legacy mirror regression now waits through a later compatibility sync frame and proves `state`, `counterToken`, and `executingTelegraph` remain ECS-owned rather than being overwritten.
+- Tide Lance damage/audio/feedback/record/text telemetry is exposed only by a DEV `?campaign-test` or `?weapon-test` page. Production snapshots omit all five fields even when both query parameters are supplied; no repair authority was added.
+- The Abyss bot uses only real keyboard movement, real dash input, real Tide Lance input, and offers that were actually present in the deterministic three-card upgrade choices. Legacy non-Boss spawn timers remain stopped, while Maw warnings, attacks, minions, projectiles, collision damage, phase gates, and cleanup remain live.
+- Both direct full heals were deleted. The route driver now corrects normal inertial overshoot with further real key holds, and the natural victory asserts damage taken increases after weak-point exposure while hull remains above zero at the upgrade screen.
+
+### Verification commands and real output
+All commands used Node `22.14.0`.
+
+- `npm test` — PASS `308/308` in `5.516s`.
+- `npm run build` — PASS. Minified production chunks included main `15.42 kB` (`5.78 kB` gzip), gameplay core `209.94 kB` (`66.92 kB` gzip), runtime legacy `176.35 kB` (`55.98 kB` gzip), render core `20.47 kB` (`7.39 kB` gzip), and cached Three.js vendor `525.56 kB` (`132.54 kB` gzip). The unminified entry was `31,259` bytes, below the `500,000`-byte limit.
+- `node --check` for every changed JS/MJS module — PASS.
+- `git diff --check` — PASS.
+- Isolated headful Chrome `146.0.7680.80`, temporary Vite `4174`, CDP `9337`, full `v3-weapons` under a `60s` hard timeout — PASS `2/2`: automatic combat `5.166s`; real Tide Lance/Bulwark authority, two-summary presentation dedupe, and later sync preservation `2.049s`.
+- Fresh isolated headful Chrome run 1, full `v3-abyss` under a `150s` hard timeout — PASS `3/3`: post-31-second real Lance `38.342s`; orbit rejection plus natural no-repair weapon victory `54.203s`; Standard reconstruction `1.017s`.
+- A second fresh isolated headful Chrome run 2, full `v3-abyss` under a separate `150s` hard timeout — PASS `3/3`: `39.009s`, `54.084s`, and `1.043s`.
+- Production preview `4175` with `?campaign-test=1&weapon-test=1`, headful production probe — PASS `1/1`: no `campaignTest`, `bossTest`, or `repairHull` authority; no Tide Lance test telemetry fields; direct campaign settlement still rejected.
+- Temporary Vite `4174`/preview `4175` and CDP `9337` were stopped and verified closed. The existing `4173` service was not touched; CDP `9333` was not used.
+
+### Remaining concerns after round 5
+- No unresolved Task 12 functional, browser-stability, authority, or production-isolation concern remains. The existing Vite size warning is still limited to the separately cached Three.js vendor chunk.

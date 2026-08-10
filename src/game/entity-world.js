@@ -130,7 +130,7 @@ const FLOAT_FIELDS = Object.freeze(Object.keys(FLOAT_RULES));
 const UINT_FIELDS = Object.freeze([
   'color', 'flags', 'team', 'phase', 'variantIndex', 'splitCount', 'chainCount', 'pierceCount',
   'hitBudgetRemaining', 'sequence',
-  'counterToken', 'dashToken', 'lanceToken', 'warningGroup',
+  'counterToken', 'dashToken', 'lanceToken', 'armorBreakToken', 'warningGroup',
 ]);
 const BOOLEAN_FIELDS = Object.freeze([
   'executingTelegraph', 'objective', 'invulnerable', 'collidable', 'homing', 'weakPoint',
@@ -138,6 +138,7 @@ const BOOLEAN_FIELDS = Object.freeze([
 ]);
 const STRING_FIELDS = Object.freeze([
   'role', 'state', 'type', 'variant', 'weaponId', 'objectiveType', 'partId', 'attackKind', 'ownerKind',
+  'armorBreakKind',
 ]);
 const STORAGE_FIELDS = Object.freeze([
   ...FLOAT_FIELDS,
