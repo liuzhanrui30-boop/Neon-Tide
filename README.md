@@ -1,6 +1,6 @@
 # Neon Tide · 霓虹潮汐 2.2
 
-使用 Three.js 制作的单页霓虹街机生存游戏。驾驶信号艇穿越四个视觉、音乐与环境规则完全不同的领域，在高密度编队中读预警、选路线、以相位冲刺反击，并在终幕窗口摧毁「深潮主脑」。
+使用 Three.js 制作的单页霓虹街机生存游戏。项目源码、设计文档和 AI 二次开发资料全部公开。驾驶信号艇穿越四个视觉、音乐与环境规则完全不同的领域，在高密度编队中读预警、选路线、以相位冲刺反击，并在终幕窗口摧毁「深潮主脑」。
 
 ## 最终目标
 
@@ -52,6 +52,14 @@ npm run dev
 ```
 
 打开终端显示的本地地址即可游玩。
+
+## 开源资料
+
+- [AI 二次开发交接说明](docs/open-source/AI_HANDOFF.md)
+- [游戏设计文档](docs/design/GAME_DESIGN_DOCUMENT.md)
+- [技术架构](docs/architecture/TECHNICAL_ARCHITECTURE.md)
+- [开发路线图](docs/open-source/DEVELOPMENT_ROADMAP.md)
+- [贡献指南](CONTRIBUTING.md)
 
 ## 在线游玩
 
