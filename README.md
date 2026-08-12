@@ -53,6 +53,14 @@ npm run dev
 
 打开终端显示的本地地址即可游玩。
 
+## 在线游玩
+
+GitHub Pages 发布地址：
+
+<https://liuzhanrui30-boop.github.io/Neon-Tide/>
+
+推送到 `main` 分支后，GitHub Actions 会自动运行测试、构建并更新页面。
+
 ## 测试与生产构建
 
 ```bash
