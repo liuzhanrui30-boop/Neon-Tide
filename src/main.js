@@ -1099,8 +1099,6 @@ function updateProjectiles(dt) {
       const target = enemies.find((enemy) => normalShotHitsEnemy(projectile, enemy));
       if (target) {
         state.stats.normalHits += 1;
-        state.stats.killStreakTimer = 2.35;
-        state.stats.killStreak += 1;
         target.hp -= projectile.damage;
         target.hitReactTimer = 0.1;
         const hitPosition = new THREE.Vector2(projectile.mesh.position.x, projectile.mesh.position.y);
@@ -1112,10 +1110,10 @@ function updateProjectiles(dt) {
           particles: lethal ? 5 : 3,
           speed: lethal ? 4.2 : 2.7,
           rippleScale: lethal ? 0.82 : 0.52,
-          text: lethal ? `BREAK ×${state.stats.killStreak}` : "HIT",
-          tone: lethal ? "magenta" : "danger",
-          vibration: lethal ? [10, 16, 24] : 6,
-          stretch: lethal ? 0.18 : 0.08,
+          text: lethal ? null : "HIT",
+          tone: "danger",
+          vibration: lethal ? 0 : 6,
+          stretch: lethal ? 0 : 0.08,
         });
         audio.event("normalHit", 0.55);
         if (target.type === "boss") syncBossProgress(target);
@@ -3890,31 +3888,65 @@ function updateEnemies(dt) {
 function destroyEnemy(enemy, source) {
   if (!enemy || enemy.dead) return false;
   const position = new THREE.Vector2(enemy.group.position.x, enemy.group.position.y);
+  const wasBoss = enemy.type === "boss";
+  const isPlayerKill = ["dash", "normalFire", "laser"].includes(source);
+  const rewardedKill = isPlayerKill && !wasBoss;
+  const previousScore = state.score;
   enemy.dead = true;
   const index = enemies.indexOf(enemy);
   if (index >= 0) removeEnemy(index);
-  if (["dash", "normalFire"].includes(source)) {
+  if (rewardedKill) {
     awardReward("break");
     state.stats.breaks += 1;
+    state.stats.killStreakTimer = 2.35;
+    state.stats.killStreak += 1;
   }
   if (enemy.type === "swarm") {
     state.stats.chainBreaks += 1;
     spawnParticleBurst(position, 0x64f5ff, 5, 2.4, 0.72);
   }
-  if (enemy.type !== "boss") {
-    triggerFeedback("medium", {
+  if (!wasBoss) {
+    const streak = Math.max(1, state.stats.killStreak);
+    const burstScale = streak >= 3 ? 1.35 : 1.1;
+    spawnParticleBurst(position, 0xffd166, 18 + Math.min(14, streak * 3), 5.4 + streak * 0.22, 1.05);
+    spawnParticleBurst(position, 0xff4fd8, 12 + Math.min(10, streak * 2), 3.8, 0.82);
+    spawnRipple(position, 0xffd166, 1.9 * burstScale);
+    spawnRipple(position, 0xff4fd8, 1.2 * burstScale);
+    triggerFeedback("large", {
       position,
-      color: 0xff4fd8,
-      particles: 16,
-      speed: 4.5,
-      size: 1.1,
-      rippleScale: 1.5,
-      text: "SIGNAL BREAK",
-      tone: "magenta",
+      color: 0xffd166,
+      particles: 10,
+      speed: 5.6,
+      size: 1.2,
+      rippleScale: 1.7 * burstScale,
+      flashColor: "#ffd166",
+      flashOpacity: 0.16,
+      text: `KILL // ×${streak}`,
+      tone: "gold",
+      vibration: [18, 20, 42],
+      stretch: 0.22,
     });
+    showFloatingText(`+${state.score - previousScore} // BREAK`, position.clone().add(new THREE.Vector2(0, 0.46)), "magenta", "medium");
+  } else {
+    triggerFeedback("large", {
+      position,
+      color: 0xe7ffff,
+      particles: 34,
+      speed: 6.2,
+      size: 1.35,
+      rippleScale: 2.8,
+      flashColor: "#e7ffff",
+      flashOpacity: 0.24,
+      text: "BOSS BREAK",
+      tone: "cyan",
+      vibration: [35, 25, 65, 25, 90],
+      stretch: 0.24,
+    });
+    spawnParticleBurst(position, 0xff506f, 26, 5.8, 1.3);
+    spawnRipple(position, 0xe7ffff, 3.4);
   }
-  audio.event("break");
-  if (enemy.type === "boss") finishRun("victory");
+  audio.event(wasBoss ? "bossHit" : "kill", wasBoss ? 1 : Math.min(1, 0.62 + state.stats.killStreak * 0.08));
+  if (wasBoss) finishRun("victory");
   return true;
 }
 

@@ -11,7 +11,7 @@ const MAX_STARTS_PER_UPDATE = 8;
 const MUSIC_REPHASE_FADE = 0.03;
 const SCHEDULER_LOOKAHEAD = 0.02;
 const SCHEDULER_EPSILON = 0.001;
-const DUCK_EVENTS = new Set(['dash', 'hurt', 'laserFire', 'bossHit', 'pressure', 'victory', 'defeat']);
+const DUCK_EVENTS = new Set(['dash', 'hurt', 'kill', 'laserFire', 'bossHit', 'pressure', 'victory', 'defeat']);
 
 const EVENT_RECIPES = Object.freeze({
   start: Object.freeze({ frequencies: [220, 330], duration: 0.22, type: 'sine', gain: 0.055, bus: 'ui' }),
@@ -19,6 +19,7 @@ const EVENT_RECIPES = Object.freeze({
   nearMiss: Object.freeze({ frequencies: [520, 780], duration: 0.15, type: 'sawtooth', gain: 0.045, bus: 'sfx' }),
   dash: Object.freeze({ frequencies: [180, 420], duration: 0.2, type: 'square', gain: 0.04, bus: 'sfx' }),
   break: Object.freeze({ frequencies: [110, 220], duration: 0.28, type: 'triangle', gain: 0.05, bus: 'sfx' }),
+  kill: Object.freeze({ frequencies: [120, 240, 480], duration: 0.34, type: 'square', gain: 0.075, bus: 'sfx' }),
   hurt: Object.freeze({ frequencies: [95], duration: 0.24, type: 'sawtooth', gain: 0.06, bus: 'sfx' }),
   overdrive: Object.freeze({ frequencies: [300, 600], duration: 0.35, type: 'sine', gain: 0.05, bus: 'sfx' }),
   upgrade: Object.freeze({ frequencies: [440, 660], duration: 0.24, type: 'triangle', gain: 0.05, bus: 'ui' }),
