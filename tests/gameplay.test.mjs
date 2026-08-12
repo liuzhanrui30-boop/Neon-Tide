@@ -13,7 +13,7 @@ import {
   getStageIndex,
   pickUpgradeOptions,
 } from '../src/game/gameplay.js';
-import { COMBAT, ENEMY_TYPES, GAME, STAGES, UPGRADES } from '../src/game/config.js';
+import { COMBAT, ENEMY_TYPES, GAME, MOVEMENT, STAGES, UPGRADES } from '../src/game/config.js';
 import * as gameplay from '../src/game/gameplay.js';
 
 test('a long wall frame advances authoritative time while simulation remains capped', () => {
@@ -66,6 +66,12 @@ test('normal fire is deliberate five-shot burst with a full-second recovery', ()
   assert.equal(COMBAT.normalBurstSize, 5);
   assert.equal(COMBAT.normalBurstCooldown, 1);
   assert.ok(COMBAT.normalBurstShotInterval > 0 && COMBAT.normalBurstShotInterval < 0.1);
+});
+
+test('movement response is tuned for immediate starts and fast reversals', () => {
+  assert.ok(MOVEMENT.response >= 24);
+  assert.ok(MOVEMENT.reverseResponse > MOVEMENT.response);
+  assert.ok(MOVEMENT.coastResponse >= 16);
 });
 
 test('stage boundaries begin each phase exactly at 0, 30, 64, and 100 seconds', () => {

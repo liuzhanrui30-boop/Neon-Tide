@@ -18,7 +18,7 @@ import {
   projectileHitsCircle,
   pickUpgradeOptions,
 } from "./game/gameplay.js";
-import { COMBAT, FORMATION_TEMPLATES } from "./game/config.js";
+import { COMBAT, FORMATION_TEMPLATES, MOVEMENT } from "./game/config.js";
 import {
   getCurrentForce,
   getDataLanePenalty,
@@ -52,11 +52,8 @@ const TAU = Math.PI * 2;
 const WORLD_HEIGHT = 16;
 const STORAGE_KEY = "neon-tide-high-score";
 const BASE_MAX_HEALTH = 3;
-const MOVE_ACCELERATION = 17.5;
-const TURN_ACCELERATION = 31;
-const MOVE_DAMPING = 4.4;
-const COAST_DAMPING = 6.2;
-const BASE_MAX_SPEED = 6.15;
+const TURN_ACCELERATION = 42;
+const BASE_MAX_SPEED = MOVEMENT.maxSpeed;
 const DASH_SPEED = 16.2;
 const DASH_ACTIVE_WINDOW = 0.19;
 const DASH_BUFFER_WINDOW = 0.16;
@@ -2655,18 +2652,14 @@ function updatePlayer(dt) {
 
   if (state.dashTimer <= 0) {
     if (hasDirection) {
-      const speed = player.velocity.length();
-      if (speed > 0.05) {
-        const desiredVelocity = direction.clone().multiplyScalar(speed);
-        const steering = desiredVelocity.sub(player.velocity);
-        const maxSteering = TURN_ACCELERATION * dt;
-        if (steering.lengthSq() > maxSteering * maxSteering) steering.setLength(maxSteering);
-        player.velocity.add(steering);
-      }
-      player.velocity.addScaledVector(direction, MOVE_ACCELERATION * dt);
-      player.velocity.multiplyScalar(Math.exp(-MOVE_DAMPING * 0.35 * dt));
+      const targetSpeed = BASE_MAX_SPEED * derived.speedMultiplier * laserMovementMultiplier;
+      const desiredVelocity = direction.clone().multiplyScalar(targetSpeed);
+      const reversing = player.velocity.lengthSq() > 0.04 && player.velocity.dot(direction) < -0.08;
+      const response = reversing ? MOVEMENT.reverseResponse : MOVEMENT.response;
+      player.velocity.lerp(desiredVelocity, 1 - Math.exp(-response * dt));
     } else {
-      player.velocity.multiplyScalar(Math.exp(-COAST_DAMPING * dt));
+      player.velocity.multiplyScalar(Math.exp(-MOVEMENT.coastResponse * dt));
+      if (player.velocity.lengthSq() < 0.0025) player.velocity.set(0, 0);
     }
     player.velocity.clampLength(0, BASE_MAX_SPEED * derived.speedMultiplier * laserMovementMultiplier);
   }
@@ -2762,13 +2755,15 @@ function attemptDash(direction) {
 }
 
 function readMoveDirection() {
-  const direction = new THREE.Vector2();
-  if (input.keys.has("ArrowLeft") || input.keys.has("a")) direction.x -= 1;
-  if (input.keys.has("ArrowRight") || input.keys.has("d")) direction.x += 1;
-  if (input.keys.has("ArrowDown") || input.keys.has("s")) direction.y -= 1;
-  if (input.keys.has("ArrowUp") || input.keys.has("w")) direction.y += 1;
-  direction.add(input.touch);
-  if (input.pointerActive) direction.add(input.pointer);
+  const keyboard = new THREE.Vector2();
+  if (input.keys.has("ArrowLeft") || input.keys.has("a")) keyboard.x -= 1;
+  if (input.keys.has("ArrowRight") || input.keys.has("d")) keyboard.x += 1;
+  if (input.keys.has("ArrowDown") || input.keys.has("s")) keyboard.y -= 1;
+  if (input.keys.has("ArrowUp") || input.keys.has("w")) keyboard.y += 1;
+  if (keyboard.lengthSq() > 0) return keyboard.normalize();
+  const direction = input.touch.lengthSq() > 0.0004
+    ? input.touch.clone()
+    : input.pointerActive ? input.pointer.clone() : new THREE.Vector2();
   if (direction.lengthSq() > 1) direction.normalize();
   return direction;
 }

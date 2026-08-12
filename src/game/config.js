@@ -39,6 +39,13 @@ export const COMBAT = freeze({
   difficultySpeedRamp: 0.018,
 });
 
+export const MOVEMENT = freeze({
+  maxSpeed: 6.15,
+  response: 25,
+  reverseResponse: 42,
+  coastResponse: 19,
+});
+
 export const GAME = freeze({
   version: '2.2.0',
   bossStart: STAGE_BOUNDARIES.at(-1),
