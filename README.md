@@ -4,6 +4,8 @@
 
 > 当前 GitHub Pages 发布的是已经完成稳定验收的 **v2.2.0**。v3.0 的章节化扩展方案已开源记录，但仍处于独立开发线，不应被误认为稳定发布功能。
 
+> 想继续做大型二次开发，可直接切换公开的 [v3.0 实验源码分支](https://github.com/liuzhanrui30-boop/Neon-Tide/tree/experimental/neon-tide-v30)，并先阅读其中的 [实验线状态说明](docs/open-source/V3_EXPERIMENTAL_STATUS.md)。
+
 ## 最终目标
 
 1. 收集黄色光核，为潮汐光矛充能，并在追猎、交叉突袭、远程光束、蜂群、雷墙和领域事件之间坚持到第 100 秒。
@@ -61,6 +63,7 @@ npm run dev
 - [游戏设计文档](docs/design/GAME_DESIGN_DOCUMENT.md)
 - [技术架构](docs/architecture/TECHNICAL_ARCHITECTURE.md)
 - [开发路线图](docs/open-source/DEVELOPMENT_ROADMAP.md)
+- [v3.0 实验线状态与接手方式](docs/open-source/V3_EXPERIMENTAL_STATUS.md)
 - [贡献指南](CONTRIBUTING.md)
 
 ## 在线游玩
