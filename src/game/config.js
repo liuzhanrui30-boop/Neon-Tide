@@ -23,6 +23,12 @@ export const COMBAT = freeze({
   projectilePoolSize: 72,
   desktopProjectileActiveCap: 64,
   coarsePointerProjectileActiveCap: 47,
+  normalFireCooldown: 0.16,
+  normalFireSpeed: 12,
+  normalFireLife: 0.95,
+  normalFireDamage: 1,
+  normalFireRadius: 0.11,
+  normalFireColor: 0xff3b30,
 });
 
 export const GAME = freeze({

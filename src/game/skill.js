@@ -19,6 +19,15 @@ export const LASER_RULES = freeze({
   maxTargets: 5,
 });
 
+export const NORMAL_FIRE_RULES = Object.freeze({
+  cooldown: 0.16,
+  speed: 12,
+  life: 0.95,
+  damage: 1,
+  radius: 0.11,
+  color: 0xff3b30,
+});
+
 export const gainWeaponEnergy = (current, focused) => Math.min(
   LASER_RULES.maxEnergy,
   Math.max(0, finite(current)) + (focused ? LASER_RULES.focusedPickupEnergy : LASER_RULES.pickupEnergy),

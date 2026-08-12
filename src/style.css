@@ -1375,6 +1375,13 @@ kbd {
   touch-action: manipulation;
 }
 
+/* Desktop pointer steering is intentionally visible without stealing the
+   canvas: the ship continuously follows the cursor vector while keyboard and
+   touch input remain additive. */
+@media (pointer: fine) {
+  #canvas-root canvas { cursor: crosshair; }
+}
+
 .laser-button::before {
   position: absolute;
   inset: 6px;

@@ -1,8 +1,8 @@
 import * as THREE from 'three';
 
 const TAU = Math.PI * 2;
-const BASE_HALF_HEIGHT = 7;
-const BASE_HALF_WIDTH = 10;
+const BASE_HALF_HEIGHT = 8;
+const BASE_HALF_WIDTH = 11.4;
 const BACKDROP_Z = -4;
 const REALM_TRANSITION_DURATION = 0.9;
 const REALM_AUDIT_INTERVAL = 1;
@@ -18,7 +18,7 @@ function getLayout(width, height) {
   return {
     width: safeWidth,
     height: safeHeight,
-    halfWidth: Math.max(BASE_HALF_HEIGHT * (safeWidth / safeHeight), 9.4),
+    halfWidth: Math.max(BASE_HALF_HEIGHT * (safeWidth / safeHeight), 10.7),
     halfHeight: BASE_HALF_HEIGHT,
   };
 }

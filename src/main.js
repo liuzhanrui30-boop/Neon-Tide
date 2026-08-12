@@ -49,7 +49,7 @@ import { createPostProcessing, selectRenderQuality } from "./game/render-quality
 import { createRealmBackgrounds } from "./game/realm-backgrounds.js";
 
 const TAU = Math.PI * 2;
-const WORLD_HEIGHT = 14;
+const WORLD_HEIGHT = 16;
 const STORAGE_KEY = "neon-tide-high-score";
 const BASE_MAX_HEALTH = 3;
 const MOVE_ACCELERATION = 17.5;
@@ -67,7 +67,8 @@ const MAX_MINES = 8;
 const BOSS_DASH_DAMAGE = 5;
 const BOSS_TELEGRAPH_TIME = 0.68;
 const TRAUMA_DECAY = 1.35;
-const PLAYER_VISUAL_SCALE = 0.88;
+const PLAYER_VISUAL_SCALE = 0.76;
+const PLAYER_COLLISION_RADIUS = 0.32;
 const MAX_TRAIL_NODES = GAME.maxTrailNodes;
 const MAX_PARTICLES = GAME.maxParticles;
 const MAX_RIPPLES = 64;
@@ -315,6 +316,9 @@ const input = {
   dashBuffer: 0,
   laserBuffer: 0,
   touch: new THREE.Vector2(),
+  pointer: new THREE.Vector2(),
+  pointerActive: false,
+  pointerId: null,
   joystickPointerId: null,
 };
 
@@ -394,10 +398,11 @@ const player = {
   wings: [],
   trailTimer: 0,
   laser: null,
+  normalFireTimer: 0,
   position: new THREE.Vector2(0, -1.2),
   velocity: new THREE.Vector2(),
   facing: new THREE.Vector2(0, 1),
-  radius: 0.37,
+  radius: PLAYER_COLLISION_RADIUS,
 };
 
 const shared = {
@@ -537,8 +542,8 @@ const shared = {
     depthWrite: false,
     blending: THREE.AdditiveBlending,
   }),
-  projectileCircleGeometry: new THREE.CircleGeometry(0.16, 10),
-  projectileDiamondGeometry: new THREE.PlaneGeometry(0.3, 0.3),
+  projectileCircleGeometry: new THREE.CircleGeometry(0.11, 10),
+  projectileDiamondGeometry: new THREE.PlaneGeometry(0.22, 0.22),
 };
 
 function createTriangleGeometry(nose, tailWidth, tailY) {
@@ -822,7 +827,7 @@ function getProjectileActiveCap() {
 
 function createProjectileMaterial() {
   return new THREE.MeshBasicMaterial({
-    color: 0xffd166,
+    color: 0xff3b30,
     transparent: true,
     opacity: 0,
     depthWrite: false,
@@ -1039,14 +1044,14 @@ function spawnProjectile(type, origin, direction, overrides = {}) {
   if (normalizedDirection.lengthSq() <= 0) return null;
   normalizedDirection.normalize();
   const preset = type === "voidShard"
-    ? { speed: 4.1, life: 2.8, damage: 1, radius: 0.18, color: 0xff4fba, geometry: shared.projectileDiamondGeometry }
-    : { speed: 3.2, life: 2.4, damage: 1, radius: 0.19, color: 0xffd166, geometry: shared.projectileCircleGeometry };
+    ? { speed: 4.1, life: 2.8, damage: 1, radius: 0.13, color: 0xff3b30, geometry: shared.projectileDiamondGeometry }
+    : { speed: 3.2, life: 2.4, damage: 1, radius: 0.14, color: 0xff3b30, geometry: shared.projectileCircleGeometry };
   const speed = Math.max(0, finiteOr(overrides.speed, preset.speed));
   const life = Math.max(0.01, finiteOr(overrides.life, preset.life));
   const damage = Math.max(0, Math.trunc(finiteOr(overrides.damage, preset.damage)));
   const radius = Math.max(0.01, finiteOr(overrides.radius, preset.radius));
   projectile.active = true;
-  projectile.type = type === "voidShard" ? "voidShard" : "lancerBolt";
+  projectile.type = type === "voidShard" ? "voidShard" : type === "normalBolt" ? "normalBolt" : "lancerBolt";
   projectile.life = projectile.maxLife = life;
   projectile.damage = damage;
   projectile.radius = radius;
@@ -1081,7 +1086,22 @@ function updateProjectiles(dt) {
     projectile.mesh.position.y += projectile.velocity.y * step;
     if (!state.reducedMotion) projectile.mesh.rotation.z += step * (projectile.type === "voidShard" ? 4.8 : 1.8);
     projectile.mesh.material.opacity = THREE.MathUtils.clamp(projectile.life / Math.max(projectile.maxLife, 0.001), 0, 1) * 0.92;
-    const hitPlayer = projectileHitsCircle({
+    if (projectile.type === "normalBolt") {
+      const target = enemies.find((enemy) => normalShotHitsEnemy(projectile, enemy));
+      if (target) {
+        target.hp -= projectile.damage;
+        target.hitReactTimer = 0.1;
+        const hitPosition = new THREE.Vector2(projectile.mesh.position.x, projectile.mesh.position.y);
+        spawnParticleBurst(hitPosition, COMBAT.normalFireColor, 4, 2.6, 0.55);
+        triggerFeedback("small", { position: hitPosition, color: COMBAT.normalFireColor, rippleScale: 0.45, vibration: 8 });
+        audio.event("normalHit", 0.55);
+        if (target.type === "boss") syncBossProgress(target);
+        if (target.hp <= 0) destroyEnemy(target, "normalFire");
+        resetProjectile(projectile);
+        continue;
+      }
+    }
+    const hitPlayer = projectile.type !== "normalBolt" && projectileHitsCircle({
       x: projectile.mesh.position.x,
       y: projectile.mesh.position.y,
       velocityX: projectile.velocity.x,
@@ -1103,6 +1123,21 @@ function updateProjectiles(dt) {
   }
   state.stats.projectilePeak = Math.max(state.stats.projectilePeak, activeCount);
   return activeCount;
+}
+
+function normalShotHitsEnemy(projectile, enemy) {
+  if (projectile?.type !== "normalBolt" || !enemy || enemy.dead) return false;
+  return projectileHitsCircle({
+    x: projectile.mesh.position.x,
+    y: projectile.mesh.position.y,
+    velocityX: projectile.velocity.x,
+    velocityY: projectile.velocity.y,
+    radius: projectile.radius,
+  }, {
+    x: enemy.group.position.x,
+    y: enemy.group.position.y,
+    radius: enemy.type === "boss" ? 1.2 : enemy.radius,
+  });
 }
 
 function deterministicEnvironmentUnit(seed, sequence) {
@@ -1574,6 +1609,7 @@ function triggerFeedback(tierName, options = {}) {
   if (options.text && options.position) {
     showFloatingText(options.text, options.position, options.tone ?? "cyan", tierName);
   }
+  if (options.vibration) navigator.vibrate?.(options.vibration);
 }
 
 function spawnShard(position) {
@@ -2153,6 +2189,7 @@ function resetState() {
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
   state.stats.realmAttackRoles = {};
+  player.normalFireTimer = 0;
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -2161,10 +2198,10 @@ function resetState() {
   dom.weaponEnergy.textContent = "0";
   dom.weaponEnergyFill.style.width = "0%";
   dom.laserStatus.classList.remove("ready", "charging");
-  dom.laserStatus.textContent = "光矛 // 充能中 0%";
+  dom.laserStatus.textContent = "潮汐大招 // 充能中 0%";
   dom.laserButton.classList.remove("ready", "charging");
   dom.laserButton.setAttribute("aria-disabled", "true");
-  dom.laserButton.setAttribute("aria-label", "潮汐光矛充能中，能量 0");
+  dom.laserButton.setAttribute("aria-label", "潮汐大招充能中，能量 0");
   dom.laserButton.style.setProperty("--laser-progress", "0deg");
   dom.stageProgress.style.width = "0%";
   dom.stageName.textContent = STAGE_LABELS[0];
@@ -2173,6 +2210,9 @@ function resetState() {
   input.dashBuffer = 0;
   input.laserBuffer = 0;
   input.keys.clear();
+  input.pointer.set(0, 0);
+  input.pointerActive = false;
+  input.pointerId = null;
   resetJoystick();
   player.position.set(0, -1.2);
   player.velocity.set(0, 0);
@@ -2331,6 +2371,9 @@ function transitionTo(nextMode, payload = {}) {
     input.laserBuffer = 0;
     if (nextMode !== "paused") clearLaserState();
     resetJoystick();
+    input.pointer.set(0, 0);
+    input.pointerActive = false;
+    input.pointerId = null;
     audio.suspendBeat();
   }
   renderMode(nextMode, previousMode, payload);
@@ -2556,6 +2599,7 @@ function updateHighScore() {
 
 function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
+  player.normalFireTimer = Math.max(0, player.normalFireTimer - dt);
   const direction = readMoveDirection();
   const derived = getDerivedValues();
   const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
@@ -2644,6 +2688,9 @@ function updatePlayer(dt) {
     player.trailTimer = trailInterval;
   }
   syncPlayerTransform();
+  if (player.normalFireTimer <= 0 && fireNormalShot()) {
+    player.normalFireTimer = COMBAT.normalFireCooldown;
+  }
 }
 
 function attemptDash(direction) {
@@ -2674,8 +2721,27 @@ function readMoveDirection() {
   if (input.keys.has("ArrowDown") || input.keys.has("s")) direction.y -= 1;
   if (input.keys.has("ArrowUp") || input.keys.has("w")) direction.y += 1;
   direction.add(input.touch);
+  if (input.pointerActive) direction.add(input.pointer);
   if (direction.lengthSq() > 1) direction.normalize();
   return direction;
+}
+
+function fireNormalShot() {
+  if (state.mode !== "playing" || state.playerAttacking || ["charge", "active"].includes(state.laserState)) return false;
+  const direction = player.facing.lengthSq() > 0.01 ? player.facing.clone().normalize() : new THREE.Vector2(0, 1);
+  const origin = player.position.clone().addScaledVector(direction, player.radius + 0.08);
+  const projectile = spawnProjectile("normalBolt", origin, direction, {
+    speed: COMBAT.normalFireSpeed,
+    life: COMBAT.normalFireLife,
+    damage: COMBAT.normalFireDamage,
+    radius: COMBAT.normalFireRadius,
+    color: COMBAT.normalFireColor,
+    scale: 0.78,
+  });
+  if (!projectile) return false;
+  spawnParticleBurst(origin, COMBAT.normalFireColor, 2, 1.8, 0.42);
+  audio.event("normalFire", 0.45);
+  return true;
 }
 
 function updateShards(dt) {
@@ -2787,6 +2853,7 @@ function startLaserCharge() {
   spawnRipple(player.position, paletteState.primary.getHex(), 0.72);
   toast("光矛蓄力", "cyan");
   laserAudio.onChargeStarted();
+  navigator.vibrate?.([28, 22, 55]);
   return true;
 }
 
@@ -3751,7 +3818,7 @@ function destroyEnemy(enemy, source) {
   enemy.dead = true;
   const index = enemies.indexOf(enemy);
   if (index >= 0) removeEnemy(index);
-  if (source === "dash") {
+  if (["dash", "normalFire"].includes(source)) {
     awardReward("break");
     state.stats.breaks += 1;
   }
@@ -3800,6 +3867,7 @@ function damagePlayer(enemy) {
   });
   toast("船体受损", "danger");
   audio.event("hurt");
+  navigator.vibrate?.(45);
   if (state.health <= 0) finishRun("gameover", "hullBreach");
 }
 
@@ -3985,6 +4053,7 @@ function sanitizeRuntimeScalars() {
   state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
   state.slowMotionTimer = Math.max(0, runtimeFinite(state.slowMotionTimer, 0));
   state.zoomPunch = Math.max(0, runtimeFinite(state.zoomPunch, 0));
+  player.normalFireTimer = Math.max(0, runtimeFinite(player.normalFireTimer, 0));
   if (!Array.isArray(state.dashCharges)) {
     state.dashCharges = [1, 1];
     runtimeAudit.scalarCorrected = true;
@@ -3996,6 +4065,7 @@ function sanitizeRuntimeScalars() {
   sanitizeRuntimeVector(player.position);
   sanitizeRuntimeVector(player.velocity);
   sanitizeRuntimeVector(player.facing, 0, 1);
+  sanitizeRuntimeVector(input.pointer);
   sanitizeRuntimeVector(state.laserDirection, 0, 1);
   state.stats.activeHazards = Math.max(0, runtimeFinite(state.stats.activeHazards, 0));
   state.stats.enemyPeak = Math.max(0, runtimeFinite(state.stats.enemyPeak, enemies.length));
@@ -4313,28 +4383,28 @@ function updateLaserHUD() {
   dom.laserStatus.classList.toggle("ready", ready);
   dom.laserStatus.classList.toggle("charging", charging || active || (!ready && energy > 0));
   const statusByReason = {
-    ready: "光矛 // READY",
-    charge: "光矛 // 蓄力",
-    active: "光矛 // 发射",
-    dash: "光矛 // 相位冲刺中",
-    conflict: "光矛 // 状态冲突",
-    paused: "光矛 // 已暂停",
-    locked: "光矛 // 不可用",
+    ready: "潮汐大招 // READY",
+    charge: "潮汐大招 // 蓄力",
+    active: "潮汐大招 // 发射",
+    dash: "潮汐大招 // 相位冲刺中",
+    conflict: "潮汐大招 // 状态冲突",
+    paused: "潮汐大招 // 已暂停",
+    locked: "潮汐大招 // 不可用",
   };
-  dom.laserStatus.textContent = statusByReason[availability.reason] ?? `光矛 // 充能中 ${roundedEnergy}%`;
+  dom.laserStatus.textContent = statusByReason[availability.reason] ?? `潮汐大招 // 充能中 ${roundedEnergy}%`;
   dom.laserButton.classList.toggle("ready", ready);
   dom.laserButton.classList.toggle("charging", charging || active || (!ready && energy > 0));
   dom.laserButton.setAttribute("aria-disabled", String(!availability.canStart));
   const labelByReason = {
-    ready: "潮汐光矛 READY，按 E 发射",
-    charge: "潮汐光矛蓄力",
-    active: "潮汐光矛发射",
-    dash: "潮汐光矛暂不可用，相位冲刺中",
-    conflict: "潮汐光矛暂不可用，状态冲突",
-    paused: "潮汐光矛已暂停，继续游戏后可发射",
-    locked: "潮汐光矛当前状态不可用",
+    ready: "潮汐大招 READY，按 E 发射",
+    charge: "潮汐大招蓄力",
+    active: "潮汐大招发射",
+    dash: "潮汐大招暂不可用，相位冲刺中",
+    conflict: "潮汐大招暂不可用，状态冲突",
+    paused: "潮汐大招已暂停，继续游戏后可发射",
+    locked: "潮汐大招当前状态不可用",
   };
-  dom.laserButton.setAttribute("aria-label", labelByReason[availability.reason] ?? `潮汐光矛充能中，能量 ${roundedEnergy}`);
+  dom.laserButton.setAttribute("aria-label", labelByReason[availability.reason] ?? `潮汐大招充能中，能量 ${roundedEnergy}`);
   dom.laserButton.style.setProperty("--laser-progress", `${Math.round(energyPercent * 3.6)}deg`);
 }
 
@@ -4488,7 +4558,7 @@ function toast(message, color = "cyan") {
 function updateBounds() {
   const aspect = window.innerWidth / Math.max(window.innerHeight, 1);
   view.halfHeight = WORLD_HEIGHT / 2;
-  view.halfWidth = Math.max(view.halfHeight * aspect, 9.4);
+  view.halfWidth = Math.max(view.halfHeight * aspect, 10.7);
   camera.left = -view.halfWidth;
   camera.right = view.halfWidth;
   camera.top = view.halfHeight;
@@ -4627,6 +4697,30 @@ function setupInput() {
   });
   bindInputListener(dom.joystick, "pointerup", resetJoystick);
   bindInputListener(dom.joystick, "pointercancel", resetJoystick);
+  bindInputListener(renderer.domElement, "pointermove", (event) => {
+    if (event.pointerType === "touch") return;
+    const rect = renderer.domElement.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / Math.max(1, rect.width)) * 2 - 1;
+    const y = 1 - ((event.clientY - rect.top) / Math.max(1, rect.height)) * 2;
+    input.pointer.set(THREE.MathUtils.clamp(x, -1, 1), THREE.MathUtils.clamp(y, -1, 1));
+    input.pointerActive = state.mode === "playing";
+  });
+  bindInputListener(renderer.domElement, "pointerleave", () => {
+    input.pointer.set(0, 0);
+    input.pointerActive = false;
+  });
+  bindInputListener(renderer.domElement, "pointerdown", (event) => {
+    if (event.pointerType === "touch" || state.mode !== "playing") return;
+    input.pointerId = event.pointerId;
+    renderer.domElement.setPointerCapture?.(event.pointerId);
+    input.pointerActive = true;
+  });
+  bindInputListener(renderer.domElement, "pointerup", (event) => {
+    if (event.pointerId !== input.pointerId) return;
+    input.pointerId = null;
+    input.pointerActive = false;
+    input.pointer.set(0, 0);
+  });
   return true;
 }
 

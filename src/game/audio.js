@@ -29,6 +29,8 @@ const EVENT_RECIPES = Object.freeze({
   laserReady: Object.freeze({ frequencies: [660, 990], duration: 0.18, type: 'triangle', gain: 0.075, bus: 'ui' }),
   laserFire: Object.freeze({ frequencies: [90, 360], duration: 0.28, type: 'sawtooth', gain: 0.08, bus: 'sfx' }),
   laserHit: Object.freeze({ frequencies: [130, 520], duration: 0.18, type: 'square', gain: 0.065, bus: 'sfx' }),
+  normalFire: Object.freeze({ frequencies: [210, 420], duration: 0.055, type: 'square', gain: 0.022, bus: 'sfx' }),
+  normalHit: Object.freeze({ frequencies: [145, 290], duration: 0.07, type: 'triangle', gain: 0.028, bus: 'sfx' }),
   environment: Object.freeze({ frequencies: [80, 120], duration: 0.42, type: 'sine', gain: 0.05, bus: 'ambience' }),
   realmShift: Object.freeze({ frequencies: [220, 330, 495], duration: 0.48, type: 'triangle', gain: 0.065, bus: 'ui' }),
 });

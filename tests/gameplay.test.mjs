@@ -13,7 +13,7 @@ import {
   getStageIndex,
   pickUpgradeOptions,
 } from '../src/game/gameplay.js';
-import { ENEMY_TYPES, GAME, STAGES, UPGRADES } from '../src/game/config.js';
+import { COMBAT, ENEMY_TYPES, GAME, STAGES, UPGRADES } from '../src/game/config.js';
 import * as gameplay from '../src/game/gameplay.js';
 
 test('a long wall frame advances authoritative time while simulation remains capped', () => {
@@ -42,6 +42,17 @@ test('runtime sanitizers reject NaN and Infinity before they reach gameplay stat
 test('session timing is derived from boss entry and the boss window', () => {
   assert.equal(GAME.bossStart, STAGES[3].start);
   assert.equal(GAME.duration, GAME.bossStart + GAME.bossWindow);
+});
+
+test('rapid red normal fire is exported as a bounded combat contract', () => {
+  assert.deepEqual({
+    cooldown: COMBAT.normalFireCooldown,
+    speed: COMBAT.normalFireSpeed,
+    life: COMBAT.normalFireLife,
+    damage: COMBAT.normalFireDamage,
+    radius: COMBAT.normalFireRadius,
+    color: COMBAT.normalFireColor,
+  }, { cooldown:0.16,speed:12,life:0.95,damage:1,radius:0.11,color:0xff3b30 });
 });
 
 test('stage boundaries begin each phase exactly at 0, 30, 64, and 100 seconds', () => {

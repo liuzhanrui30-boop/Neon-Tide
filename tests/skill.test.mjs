@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { LASER_RULES, canFireLaser, gainWeaponEnergy, getLaserPhase, laserHitsCircle, selectLaserTargets } from '../src/game/skill.js';
+import { LASER_RULES, NORMAL_FIRE_RULES, canFireLaser, gainWeaponEnergy, getLaserPhase, laserHitsCircle, selectLaserTargets } from '../src/game/skill.js';
+
+test('normal fire is a compact red rapid-fire weapon while charge remains the ultimate', () => {
+  assert.deepEqual(NORMAL_FIRE_RULES, {
+    cooldown: 0.16,
+    speed: 12,
+    life: 0.95,
+    damage: 1,
+    radius: 0.11,
+    color: 0xff3b30,
+  });
+  assert.ok(NORMAL_FIRE_RULES.radius < LASER_RULES.width / 2);
+  assert.equal(canFireLaser(99), false);
+  assert.equal(canFireLaser(100), true);
+});
 
 test('twenty normal pickups charge one laser and firing requires full energy', () => {
   let energy = 0;
