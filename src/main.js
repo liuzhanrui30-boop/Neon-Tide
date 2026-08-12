@@ -96,10 +96,10 @@ const STAGE_PALETTES = Object.freeze([
   { background: 0x06131a, grid: 0x477a86, fog: 0x3b8996, ring: 0xe7ffff, primary: 0xe7ffff, secondary: 0x64f5ff },
 ]);
 const FEEDBACK_TIERS = Object.freeze({
-  small: { trauma: 0.13, slowScale: 1, slowDuration: 0, zoom: 0 },
-  nearMiss: { trauma: 0.18, slowScale: 0.72, slowDuration: 0.1, zoom: 0.012 },
-  medium: { trauma: 0.38, slowScale: 0.72, slowDuration: 0.045, zoom: 0.018 },
-  large: { trauma: 0.78, slowScale: 0.5, slowDuration: 0.1, zoom: 0.045 },
+  small: { trauma: 0.16, slowScale: 1, slowDuration: 0, zoom: 0.006 },
+  nearMiss: { trauma: 0.28, slowScale: 0.62, slowDuration: 0.12, zoom: 0.018 },
+  medium: { trauma: 0.48, slowScale: 0.6, slowDuration: 0.06, zoom: 0.026 },
+  large: { trauma: 0.86, slowScale: 0.45, slowDuration: 0.12, zoom: 0.055 },
 });
 const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
@@ -254,6 +254,8 @@ const state = {
   lastFormation: null,
   lastFormationAt: -Infinity,
   shardSpawnTimer: 1.8,
+  pressureFireTimer: 2.6,
+  pressureSequence: 0,
   dashCharges: [1, 1],
   dashTimer: 0,
   dashInvulnTimer: 0,
@@ -302,6 +304,11 @@ const state = {
     laserHits: 0,
     laserInterrupts: 0,
     laserPeakTargets: 0,
+    normalHits: 0,
+    killStreak: 0,
+    killStreakTimer: 0,
+    pressureVolleys: 0,
+    pressureProjectiles: 0,
     projectilePeak: 0,
     environmentEvents: 0,
     environmentActiveFrames: 0,
@@ -1089,14 +1096,28 @@ function updateProjectiles(dt) {
     if (projectile.type === "normalBolt") {
       const target = enemies.find((enemy) => normalShotHitsEnemy(projectile, enemy));
       if (target) {
+        state.stats.normalHits += 1;
+        state.stats.killStreakTimer = 2.35;
+        state.stats.killStreak += 1;
         target.hp -= projectile.damage;
         target.hitReactTimer = 0.1;
         const hitPosition = new THREE.Vector2(projectile.mesh.position.x, projectile.mesh.position.y);
-        spawnParticleBurst(hitPosition, COMBAT.normalFireColor, 4, 2.6, 0.55);
-        triggerFeedback("small", { position: hitPosition, color: COMBAT.normalFireColor, rippleScale: 0.45, vibration: 8 });
+        const lethal = target.hp <= 0;
+        spawnParticleBurst(hitPosition, COMBAT.normalFireColor, lethal ? 11 : 6, lethal ? 4.1 : 2.8, lethal ? 0.78 : 0.56);
+        triggerFeedback("small", {
+          position: hitPosition,
+          color: COMBAT.normalFireColor,
+          particles: lethal ? 5 : 3,
+          speed: lethal ? 4.2 : 2.7,
+          rippleScale: lethal ? 0.82 : 0.52,
+          text: lethal ? `BREAK ×${state.stats.killStreak}` : "HIT",
+          tone: lethal ? "magenta" : "danger",
+          vibration: lethal ? [10, 16, 24] : 6,
+          stretch: lethal ? 0.18 : 0.08,
+        });
         audio.event("normalHit", 0.55);
         if (target.type === "boss") syncBossProgress(target);
-        if (target.hp <= 0) destroyEnemy(target, "normalFire");
+        if (lethal) destroyEnemy(target, "normalFire");
         resetProjectile(projectile);
         continue;
       }
@@ -1599,6 +1620,11 @@ function triggerFeedback(tierName, options = {}) {
   addTrauma(tier.trauma);
   if (tier.slowDuration > 0) triggerSlowMotion(tier.slowScale, tier.slowDuration);
   if (!state.reducedMotion) state.zoomPunch = Math.max(state.zoomPunch, tier.zoom);
+  if (options.stretch && !state.reducedMotion) {
+    const amount = THREE.MathUtils.clamp(Number(options.stretch), 0, 0.28);
+    player.group.scale.x *= 1 + amount;
+    player.group.scale.y *= 1 - amount * 0.45;
+  }
   if (options.flashColor) flash(options.flashColor, options.flashOpacity ?? 0.1);
   if (options.position && options.color && options.particles) {
     spawnParticleBurst(options.position, options.color, options.particles, options.speed ?? 3.2, options.size ?? 1);
@@ -2155,6 +2181,8 @@ function resetState() {
   state.lastFormation = null;
   state.lastFormationAt = -Infinity;
   state.shardSpawnTimer = 1.8;
+  state.pressureFireTimer = 2.6;
+  state.pressureSequence = 0;
   state.dashCharges = [1, 1];
   state.dashTimer = 0;
   state.dashInvulnTimer = 0;
@@ -2194,6 +2222,11 @@ function resetState() {
   state.stats.laserHits = 0;
   state.stats.laserInterrupts = 0;
   state.stats.laserPeakTargets = 0;
+  state.stats.normalHits = 0;
+  state.stats.killStreak = 0;
+  state.stats.killStreakTimer = 0;
+  state.stats.pressureVolleys = 0;
+  state.stats.pressureProjectiles = 0;
   state.stats.projectilePeak = 0;
   state.stats.environmentEvents = 0;
   state.stats.environmentActiveFrames = 0;
@@ -2789,12 +2822,14 @@ function collectShard(index) {
   triggerFeedback("small", {
     position,
     color: 0xffd166,
-    particles: 5,
-    speed: 3.2,
-    size: 0.82,
-    rippleScale: 0.82,
-    text: `+${state.score - previousScore}`,
+    particles: 9,
+    speed: 3.8,
+    size: 0.94,
+    rippleScale: 1.12,
+    text: `+${state.score - previousScore} // CHARGE`,
     tone: "gold",
+    vibration: 5,
+    stretch: 0.08,
   });
   audio.event("pickup", Math.min(1, state.combo / GAME.comboCap));
 }
@@ -3006,7 +3041,10 @@ function recordRealmAttack(role) {
 
 function steerEnemy(enemy, toPlayer, dt, speed = enemy.speed, response = 2.8, wobbleStrength = 0.2) {
   const laneResponse = getDataLanePenalty(environmentFrame, enemy.group.position) > 0 ? 1.15 : 1;
-  const steering = enemyScratch.steering.copy(toPlayer).multiplyScalar(speed);
+  const ramp = enemy.type === "boss"
+    ? 1
+    : 1 + Math.min(0.55, Math.max(0, state.elapsed) * COMBAT.difficultySpeedRamp);
+  const steering = enemyScratch.steering.copy(toPlayer).multiplyScalar(speed * ramp);
   if (wobbleStrength > 0) {
     enemyScratch.perpendicular.set(-toPlayer.y, toPlayer.x)
       .multiplyScalar(Math.sin(state.elapsed * 2.2 + enemy.wobble) * wobbleStrength);
@@ -3091,7 +3129,7 @@ function updateStriker(enemy, dt, toPlayer) {
     if (enemy.stateTimer <= 0) {
       enemy.visuals.lines.forEach((line, index) => { line.visible = index === 1; });
       enemy.visuals.body.scale.setScalar(1);
-      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(18 + Math.min(2, state.elapsed * 0.01));
+      enemy.velocity.copy(enemy.dashDirection).multiplyScalar(20 + Math.min(5, state.elapsed * 0.04));
       enemy.group.rotation.z = Math.atan2(enemy.dashDirection.y, enemy.dashDirection.x) - Math.PI / 2;
       enemy.intentIndex = (enemy.intentIndex + 1) % 3;
       recordRealmAttack("Striker");
@@ -3713,12 +3751,14 @@ function registerNearMiss(enemy, distance, collided = false) {
   triggerFeedback("nearMiss", {
     position,
     color: 0xffd166,
-    particles: 8,
-    speed: 3.2,
-    size: 0.9,
-    rippleScale: 1.05,
-    text: `NEAR MISS +${state.score - previousScore}`,
+    particles: 14,
+    speed: 4.1,
+    size: 1.04,
+    rippleScale: 1.45,
+    text: `PERFECT DODGE +${state.score - previousScore}`,
     tone: "gold",
+    vibration: 12,
+    stretch: 0.16,
   });
   audio.event("nearMiss", 0.8);
   return true;
@@ -3880,10 +3920,72 @@ function damagePlayer(enemy) {
   if (state.health <= 0) finishRun("gameover", "hullBreach");
 }
 
+/**
+ * Crossfire director: periodic converging volleys punish orbiting the outer
+ * rim and make the player's movement choice matter. Each shot is telegraphed
+ * by its off-screen origin and aims at the player's current position, with a
+ * small fan angle so there is no single “hold one direction” answer.
+ */
+function spawnPressureVolley() {
+  if (state.mode !== "playing" || state.stageIndex >= 3 || state.bossTriggered) return 0;
+  const stage = THREE.MathUtils.clamp(Math.trunc(state.stageIndex), 0, 2);
+  const count = COMBAT.pressureFireCount[stage] ?? 2;
+  const speed = COMBAT.pressureFireSpeed[stage] ?? 4.6;
+  const y = THREE.MathUtils.clamp(player.position.y, -view.halfHeight + 1.2, view.halfHeight - 1.2);
+  const x = THREE.MathUtils.clamp(player.position.x, -view.halfWidth + 1.2, view.halfWidth - 1.2);
+  const origins = [
+    new THREE.Vector2(-view.halfWidth - 1.4, y + 2.4),
+    new THREE.Vector2(view.halfWidth + 1.4, y - 2.4),
+  ];
+  if (stage >= 1) origins.push(new THREE.Vector2(x - 2.8, view.halfHeight + 1.4));
+  if (stage >= 2) origins.push(new THREE.Vector2(x + 2.8, -view.halfHeight - 1.4));
+  const spread = stage === 0 ? 0.16 : stage === 1 ? 0.23 : 0.3;
+  const target = player.position.clone();
+  let fired = 0;
+  origins.slice(0, count).forEach((origin, index) => {
+    const base = target.clone().sub(origin).normalize();
+    const offset = (index - (Math.min(count, origins.length) - 1) / 2) * spread * 0.42;
+    const direction = base.clone().rotateAround(new THREE.Vector2(0, 0), offset);
+    const projectile = spawnProjectile("lancerBolt", origin, direction, {
+      speed,
+      life: 3.6,
+      damage: 1,
+      radius: 0.12,
+      color: COMBAT.normalFireColor,
+      scale: 0.86,
+    });
+    if (projectile) {
+      fired += 1;
+      const entry = origin.clone().addScaledVector(direction, 1.45);
+      spawnRipple(entry, COMBAT.normalFireColor, 0.78 + stage * 0.12);
+      spawnParticleBurst(entry, COMBAT.normalFireColor, 5, 2.2, 0.68);
+    }
+  });
+  if (fired > 0) {
+    state.pressureSequence += 1;
+    state.stats.pressureVolleys += 1;
+    state.stats.pressureProjectiles += fired;
+    toast("CROSSFIRE // 交叉锁定", "danger");
+    triggerFeedback("small", {
+      position: player.position,
+      color: COMBAT.normalFireColor,
+      particles: 6,
+      speed: 2.6,
+      size: 0.8,
+      rippleScale: 1.2,
+      text: "MOVE // 交叉弹幕",
+      tone: "danger",
+    });
+    audio.event("pressure", 0.9);
+  }
+  return fired;
+}
+
 function updateSpawning(dt) {
   if (state.stageIndex >= 3 || state.bossTriggered) return;
   state.enemySpawnTimer -= dt;
   state.formationTimer -= dt;
+  state.pressureFireTimer -= dt;
   const healthPercent = (state.health / Math.max(1, state.maxHealth)) * 100;
   const reliefBudget = computeSpawnBudget(state.elapsed, healthPercent, state.score);
   const cap = getEnemyCap();
@@ -3909,6 +4011,11 @@ function updateSpawning(dt) {
       threatBudget -= threatCost;
     }
     state.enemySpawnTimer = getSpawnInterval(state.stageIndex, state.elapsed);
+  }
+
+  if (state.pressureFireTimer <= 0) {
+    spawnPressureVolley();
+    state.pressureFireTimer = COMBAT.pressureFireIntervals[state.stageIndex] ?? 2.6;
   }
 
   state.shardSpawnTimer -= dt;
@@ -4046,6 +4153,8 @@ function sanitizeRuntimeScalars() {
   state.enemySpawnTimer = runtimeFiniteOrInfinity(state.enemySpawnTimer, 0);
   state.formationTimer = runtimeFinite(state.formationTimer, 0);
   state.shardSpawnTimer = runtimeFinite(state.shardSpawnTimer, 0);
+  state.pressureFireTimer = Math.max(0, runtimeFinite(state.pressureFireTimer, 2.6));
+  state.pressureSequence = Math.max(0, Math.trunc(runtimeFinite(state.pressureSequence, 0)));
   state.environmentTimer = runtimeFiniteOrInfinity(state.environmentTimer, Infinity);
   state.environmentElapsed = Math.max(0, runtimeFinite(state.environmentElapsed, 0));
   state.environmentSeed = Math.trunc(runtimeFinite(state.environmentSeed, 0x4e544944));
@@ -4079,6 +4188,11 @@ function sanitizeRuntimeScalars() {
   state.stats.activeHazards = Math.max(0, runtimeFinite(state.stats.activeHazards, 0));
   state.stats.enemyPeak = Math.max(0, runtimeFinite(state.stats.enemyPeak, enemies.length));
   state.stats.projectilePeak = Math.max(0, runtimeFinite(state.stats.projectilePeak, 0));
+  state.stats.normalHits = Math.max(0, runtimeFinite(state.stats.normalHits, 0));
+  state.stats.killStreak = Math.max(0, runtimeFinite(state.stats.killStreak, 0));
+  state.stats.killStreakTimer = Math.max(0, runtimeFinite(state.stats.killStreakTimer, 0));
+  state.stats.pressureVolleys = Math.max(0, runtimeFinite(state.stats.pressureVolleys, 0));
+  state.stats.pressureProjectiles = Math.max(0, runtimeFinite(state.stats.pressureProjectiles, 0));
   state.stats.environmentEvents = Math.max(0, runtimeFinite(state.stats.environmentEvents, 0));
   state.stats.environmentActiveFrames = Math.max(0, runtimeFinite(state.stats.environmentActiveFrames, 0));
   if (runtimeAudit.scalarCorrected) runtimeStats.finiteGuards += 1;
@@ -4762,6 +4876,8 @@ function animate() {
     if (state.comboTimer <= 0 && state.combo > 0) {
       clearCombo();
     }
+    state.stats.killStreakTimer = Math.max(0, state.stats.killStreakTimer - simDt);
+    if (state.stats.killStreakTimer <= 0) state.stats.killStreak = 0;
     updateStage();
     if (state.mode === "playing") applyEnvironment(wallDt, simDt);
     const dashRecoveryMultiplier = getDerivedValues().dashRecoveryMultiplier;

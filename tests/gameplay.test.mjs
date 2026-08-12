@@ -55,6 +55,13 @@ test('rapid red normal fire is exported as a bounded combat contract', () => {
   }, { cooldown:0.16,speed:12,life:0.95,damage:1,radius:0.11,color:0xff3b30 });
 });
 
+test('crossfire pressure ramps by realm instead of allowing a single safe orbit', () => {
+  assert.deepEqual(COMBAT.pressureFireIntervals, [3.2, 2.15, 1.45]);
+  assert.deepEqual(COMBAT.pressureFireCount, [2, 3, 4]);
+  assert.deepEqual(COMBAT.pressureFireSpeed, [4.6, 5.35, 6.1]);
+  assert.ok(COMBAT.difficultySpeedRamp > 0.01);
+});
+
 test('stage boundaries begin each phase exactly at 0, 30, 64, and 100 seconds', () => {
   assert.equal(getStageIndex(0), 0);
   assert.equal(getStageIndex(30), 1);

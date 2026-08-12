@@ -11,7 +11,7 @@ const MAX_STARTS_PER_UPDATE = 8;
 const MUSIC_REPHASE_FADE = 0.03;
 const SCHEDULER_LOOKAHEAD = 0.02;
 const SCHEDULER_EPSILON = 0.001;
-const DUCK_EVENTS = new Set(['dash', 'hurt', 'laserFire', 'bossHit', 'victory', 'defeat']);
+const DUCK_EVENTS = new Set(['dash', 'hurt', 'laserFire', 'bossHit', 'pressure', 'victory', 'defeat']);
 
 const EVENT_RECIPES = Object.freeze({
   start: Object.freeze({ frequencies: [220, 330], duration: 0.22, type: 'sine', gain: 0.055, bus: 'ui' }),
@@ -31,6 +31,7 @@ const EVENT_RECIPES = Object.freeze({
   laserHit: Object.freeze({ frequencies: [130, 520], duration: 0.18, type: 'square', gain: 0.065, bus: 'sfx' }),
   normalFire: Object.freeze({ frequencies: [210, 420], duration: 0.055, type: 'square', gain: 0.022, bus: 'sfx' }),
   normalHit: Object.freeze({ frequencies: [145, 290], duration: 0.07, type: 'triangle', gain: 0.028, bus: 'sfx' }),
+  pressure: Object.freeze({ frequencies: [72, 144], duration: 0.2, type: 'sawtooth', gain: 0.045, bus: 'sfx' }),
   environment: Object.freeze({ frequencies: [80, 120], duration: 0.42, type: 'sine', gain: 0.05, bus: 'ambience' }),
   realmShift: Object.freeze({ frequencies: [220, 330, 495], duration: 0.48, type: 'triangle', gain: 0.065, bus: 'ui' }),
 });

@@ -29,6 +29,11 @@ export const COMBAT = freeze({
   normalFireDamage: 1,
   normalFireRadius: 0.11,
   normalFireColor: 0xff3b30,
+  /** Periodic crossfire pressure that prevents stationary orbiting. */
+  pressureFireIntervals: [3.2, 2.15, 1.45],
+  pressureFireCount: [2, 3, 4],
+  pressureFireSpeed: [4.6, 5.35, 6.1],
+  difficultySpeedRamp: 0.012,
 });
 
 export const GAME = freeze({
