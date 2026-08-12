@@ -97,9 +97,9 @@ const STAGE_PALETTES = Object.freeze([
 ]);
 const FEEDBACK_TIERS = Object.freeze({
   small: { trauma: 0.16, slowScale: 1, slowDuration: 0, zoom: 0.006 },
-  nearMiss: { trauma: 0.28, slowScale: 0.62, slowDuration: 0.12, zoom: 0.018 },
-  medium: { trauma: 0.48, slowScale: 0.6, slowDuration: 0.06, zoom: 0.026 },
-  large: { trauma: 0.86, slowScale: 0.45, slowDuration: 0.12, zoom: 0.055 },
+  nearMiss: { trauma: 0.28, slowScale: 1, slowDuration: 0, zoom: 0.018 },
+  medium: { trauma: 0.48, slowScale: 1, slowDuration: 0, zoom: 0.026 },
+  large: { trauma: 0.86, slowScale: 1, slowDuration: 0, zoom: 0.055 },
 });
 const BOSS_CORE_IDLE_COLOR = new THREE.Color(0xff506f);
 const BOSS_CORE_HIT_COLOR = new THREE.Color(0xe7ffff);
@@ -406,6 +406,8 @@ const player = {
   trailTimer: 0,
   laser: null,
   normalFireTimer: 0,
+  normalBurstShotsRemaining: 0,
+  normalBurstTimer: 0,
   position: new THREE.Vector2(0, -1.2),
   velocity: new THREE.Vector2(),
   facing: new THREE.Vector2(0, 1),
@@ -1451,15 +1453,11 @@ function addTrauma(amount) {
 }
 
 function triggerSlowMotion(scale, duration) {
-  if (state.reducedMotion) {
-    state.slowMotionScale = 1;
-    state.slowMotionTimer = 0;
-    return false;
-  }
-  if (!Number.isFinite(scale) || !Number.isFinite(duration) || scale <= 0 || duration <= 0) return false;
-  state.slowMotionScale = Math.min(state.slowMotionScale, THREE.MathUtils.clamp(scale, 0.25, 1));
-  state.slowMotionTimer = Math.max(state.slowMotionTimer, duration);
-  return true;
+  // Combat always runs at full speed. Feedback uses shake, particles and
+  // audio instead of freezing the simulation or changing player timing.
+  state.slowMotionScale = 1;
+  state.slowMotionTimer = 0;
+  return false;
 }
 
 function applyReducedMotionPreference(matches) {
@@ -1767,7 +1765,7 @@ function createStriker(position = randomEdgePosition()) {
   });
   group.add(...lines, glow, stabilizer, body);
   return registerEnemy("striker", position, group, "track", {
-    speed: 2.0 + Math.random() * 0.22,
+    speed: 2.7 + state.elapsed * 0.016 + Math.random() * 0.28,
     stateTimer: 0.55 + Math.random() * 0.75,
     intentIndex: Math.floor(Math.random() * 3),
     selectedLane: 1,
@@ -1801,7 +1799,7 @@ function createLancer(position = randomEdgePosition(1.2)) {
   beam.scale.set(0.2, 1, 1);
   group.add(line, beam, glow, reticle, spear, body);
   return registerEnemy("lancer", position, group, "lock", {
-    speed: 0.35 + Math.random() * 0.2,
+    speed: 0.65 + state.elapsed * 0.006 + Math.random() * 0.25,
     stateTimer: 0.65 + Math.random() * 0.35,
     beamDirection: new THREE.Vector2(),
     beamWidth: 0.2,
@@ -1826,7 +1824,7 @@ function createSwarm(position = randomEdgePosition(0.7), wingSign = 0) {
   group.add(glow, leftWing, rightWing, body);
   const ingress = new THREE.Vector2().subVectors(player.position, position).normalize();
   return registerEnemy("swarm", position, group, "ingress", {
-    speed: 2.8 + Math.random() * 0.7,
+    speed: 3.6 + state.elapsed * 0.02 + Math.random() * 0.8,
     stateTimer: 0.65 + Math.random() * 0.35,
     wingSign: wingSign || (Math.random() < 0.5 ? -1 : 1),
     splitTimer: 0.72,
@@ -1877,7 +1875,7 @@ function createElite(position = randomEdgePosition(1.1), type = "elite") {
   body.scale.setScalar(1.75);
   group.add(shockwave, shield, outer, body);
   return registerEnemy(type, position, group, "chase", {
-    speed: 1.4 + Math.random() * 0.4,
+    speed: 1.8 + state.elapsed * 0.012 + Math.random() * 0.5,
     stateTimer: 1.4 + Math.random() * 0.5,
     shockTimer: 2.6 + Math.random() * 1.2,
     shockRadius: 0,
@@ -2232,6 +2230,8 @@ function resetState() {
   state.stats.environmentActiveFrames = 0;
   state.stats.realmAttackRoles = {};
   player.normalFireTimer = 0;
+  player.normalBurstShotsRemaining = 0;
+  player.normalBurstTimer = 0;
   dom.missionObjective.textContent = `坚持 ${GAME.bossStart} 秒，定位深潮主脑`;
   dom.score.textContent = "0000";
   dom.timeLabel.textContent = "首领接入";
@@ -2411,6 +2411,8 @@ function transitionTo(nextMode, payload = {}) {
     input.keys.clear();
     input.dashBuffer = 0;
     input.laserBuffer = 0;
+    player.normalBurstShotsRemaining = 0;
+    player.normalBurstTimer = 0;
     if (nextMode !== "paused") clearLaserState();
     resetJoystick();
     input.pointer.set(0, 0);
@@ -2642,6 +2644,7 @@ function updateHighScore() {
 function updatePlayer(dt) {
   player.hitReactTimer = Math.max(0, player.hitReactTimer - dt);
   player.normalFireTimer = Math.max(0, player.normalFireTimer - dt);
+  player.normalBurstTimer = Math.max(0, player.normalBurstTimer - dt);
   const direction = readMoveDirection();
   const derived = getDerivedValues();
   const laserMovementMultiplier = state.laserState === "charge" ? 0.8 : 1;
@@ -2730,8 +2733,12 @@ function updatePlayer(dt) {
     player.trailTimer = trailInterval;
   }
   syncPlayerTransform();
-  if (player.normalFireTimer <= 0 && fireNormalShot()) {
-    player.normalFireTimer = COMBAT.normalFireCooldown;
+  if (player.normalBurstShotsRemaining > 0 && player.normalBurstTimer <= 0) {
+    if (fireNormalShot()) {
+      player.normalBurstShotsRemaining -= 1;
+      player.normalBurstTimer = COMBAT.normalBurstShotInterval;
+      if (player.normalBurstShotsRemaining <= 0) player.normalFireTimer = COMBAT.normalBurstCooldown;
+    }
   }
 }
 
@@ -2783,6 +2790,25 @@ function fireNormalShot() {
   if (!projectile) return false;
   spawnParticleBurst(origin, COMBAT.normalFireColor, 2, 1.8, 0.42);
   audio.event("normalFire", 0.45);
+  return true;
+}
+
+function requestNormalBurst() {
+  if (state.mode !== "playing" || player.normalFireTimer > 0 || player.normalBurstShotsRemaining > 0) return false;
+  player.normalBurstShotsRemaining = COMBAT.normalBurstSize;
+  player.normalBurstTimer = 0;
+  triggerFeedback("small", {
+    position: player.position,
+    color: COMBAT.normalFireColor,
+    particles: 5,
+    speed: 2.8,
+    size: 0.72,
+    rippleScale: 0.92,
+    text: "BURST ×5",
+    tone: "danger",
+    vibration: [8, 14, 8],
+    stretch: 0.1,
+  });
   return true;
 }
 
@@ -3933,17 +3959,34 @@ function spawnPressureVolley() {
   const speed = COMBAT.pressureFireSpeed[stage] ?? 4.6;
   const y = THREE.MathUtils.clamp(player.position.y, -view.halfHeight + 1.2, view.halfHeight - 1.2);
   const x = THREE.MathUtils.clamp(player.position.x, -view.halfWidth + 1.2, view.halfWidth - 1.2);
-  const origins = [
-    new THREE.Vector2(-view.halfWidth - 1.4, y + 2.4),
-    new THREE.Vector2(view.halfWidth + 1.4, y - 2.4),
-  ];
-  if (stage >= 1) origins.push(new THREE.Vector2(x - 2.8, view.halfHeight + 1.4));
-  if (stage >= 2) origins.push(new THREE.Vector2(x + 2.8, -view.halfHeight - 1.4));
+  const pattern = state.pressureSequence % 3;
+  const origins = pattern === 0
+    ? [
+      new THREE.Vector2(-view.halfWidth - 1.4, y + 1.7),
+      new THREE.Vector2(-view.halfWidth - 1.4, y - 1.7),
+      new THREE.Vector2(view.halfWidth + 1.4, y + 0.4),
+      new THREE.Vector2(view.halfWidth + 1.4, y - 0.4),
+    ]
+    : pattern === 1
+      ? [
+        new THREE.Vector2(-view.halfWidth - 1.4, y + 2.4),
+        new THREE.Vector2(view.halfWidth + 1.4, y - 2.4),
+        new THREE.Vector2(x - 2.8, view.halfHeight + 1.4),
+        new THREE.Vector2(x + 2.8, -view.halfHeight - 1.4),
+      ]
+      : [
+        new THREE.Vector2(x - 2.2, view.halfHeight + 1.4),
+        new THREE.Vector2(x + 2.2, view.halfHeight + 1.4),
+        new THREE.Vector2(x - 2.2, -view.halfHeight - 1.4),
+        new THREE.Vector2(x + 2.2, -view.halfHeight - 1.4),
+      ];
   const spread = stage === 0 ? 0.16 : stage === 1 ? 0.23 : 0.3;
   const target = player.position.clone();
   let fired = 0;
   origins.slice(0, count).forEach((origin, index) => {
-    const base = target.clone().sub(origin).normalize();
+    const base = pattern === 0
+      ? new THREE.Vector2(origin.x < 0 ? 1 : -1, (index - 1.5) * 0.045).normalize()
+      : target.clone().sub(origin).normalize();
     const offset = (index - (Math.min(count, origins.length) - 1) / 2) * spread * 0.42;
     const direction = base.clone().rotateAround(new THREE.Vector2(0, 0), offset);
     const projectile = spawnProjectile("lancerBolt", origin, direction, {
@@ -4169,9 +4212,11 @@ function sanitizeRuntimeScalars() {
   state.laserSequenceTargets = clampFinite(state.laserSequenceTargets, 0, LASER_RULES.maxTargets, 0);
   state.trauma = clampFinite(state.trauma, 0, 1, 0);
   state.slowMotionScale = clampFinite(state.slowMotionScale, 0.25, 1, 1);
-  state.slowMotionTimer = Math.max(0, runtimeFinite(state.slowMotionTimer, 0));
+  state.slowMotionTimer = 0;
   state.zoomPunch = Math.max(0, runtimeFinite(state.zoomPunch, 0));
   player.normalFireTimer = Math.max(0, runtimeFinite(player.normalFireTimer, 0));
+  player.normalBurstShotsRemaining = Math.max(0, Math.trunc(runtimeFinite(player.normalBurstShotsRemaining, 0)));
+  player.normalBurstTimer = Math.max(0, runtimeFinite(player.normalBurstTimer, 0));
   if (!Array.isArray(state.dashCharges)) {
     state.dashCharges = [1, 1];
     runtimeAudit.scalarCorrected = true;
@@ -4715,7 +4760,11 @@ function onKeyDown(event) {
   const gameplayControlKey = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(event.key);
   if (state.mode === "playing" && gameplayControlKey && !controlTarget) event.preventDefault();
   if (state.mode === "playing") input.keys.add(key);
-  if (!event.repeat && !controlTarget && event.code === "Space") requestDash();
+  if (!event.repeat && !controlTarget && event.code === "Space") {
+    event.preventDefault();
+    requestNormalBurst();
+  }
+  if (!event.repeat && !controlTarget && event.code === "ShiftLeft") requestDash();
   if (!event.repeat && !controlTarget && event.code === "KeyE") {
     event.preventDefault();
     requestLaser();

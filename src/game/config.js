@@ -10,30 +10,33 @@ const STAGE_BOUNDARIES = [0, 30, 64, 100];
 const BOSS_WINDOW = 26;
 
 export const COMBAT = freeze({
-  desktopEnemyCap: 42,
-  coarsePointerEnemyCap: 32,
+  desktopEnemyCap: 50,
+  coarsePointerEnemyCap: 38,
   particleCap: 300,
   trailNodeCap: 48,
-  spawnIntervals: [0.62, 0.46, 0.34],
-  spawnIntervalFloor: 0.26,
+  spawnIntervals: [0.52, 0.38, 0.28],
+  spawnIntervalFloor: 0.2,
   formationCooldown: { min: 4, max: 7 },
   formationTelegraph: { min: 0.45, max: 0.85 },
-  targetPopulations: [15, 24, 34],
-  spawnBurstLimits: [2, 3, 4],
+  targetPopulations: [20, 30, 42],
+  spawnBurstLimits: [3, 4, 5],
   projectilePoolSize: 72,
   desktopProjectileActiveCap: 64,
   coarsePointerProjectileActiveCap: 47,
   normalFireCooldown: 0.16,
+  normalBurstSize: 5,
+  normalBurstShotInterval: 0.075,
+  normalBurstCooldown: 1,
   normalFireSpeed: 12,
   normalFireLife: 0.95,
   normalFireDamage: 1,
   normalFireRadius: 0.11,
   normalFireColor: 0xff3b30,
   /** Periodic crossfire pressure that prevents stationary orbiting. */
-  pressureFireIntervals: [3.2, 2.15, 1.45],
-  pressureFireCount: [2, 3, 4],
-  pressureFireSpeed: [4.6, 5.35, 6.1],
-  difficultySpeedRamp: 0.012,
+  pressureFireIntervals: [2.55, 1.7, 1.05],
+  pressureFireCount: [3, 4, 4],
+  pressureFireSpeed: [5.5, 6.4, 7.2],
+  difficultySpeedRamp: 0.018,
 });
 
 export const GAME = freeze({

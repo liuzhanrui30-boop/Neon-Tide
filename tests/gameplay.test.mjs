@@ -56,10 +56,16 @@ test('rapid red normal fire is exported as a bounded combat contract', () => {
 });
 
 test('crossfire pressure ramps by realm instead of allowing a single safe orbit', () => {
-  assert.deepEqual(COMBAT.pressureFireIntervals, [3.2, 2.15, 1.45]);
-  assert.deepEqual(COMBAT.pressureFireCount, [2, 3, 4]);
-  assert.deepEqual(COMBAT.pressureFireSpeed, [4.6, 5.35, 6.1]);
-  assert.ok(COMBAT.difficultySpeedRamp > 0.01);
+  assert.deepEqual(COMBAT.pressureFireIntervals, [2.55, 1.7, 1.05]);
+  assert.deepEqual(COMBAT.pressureFireCount, [3, 4, 4]);
+  assert.deepEqual(COMBAT.pressureFireSpeed, [5.5, 6.4, 7.2]);
+  assert.ok(COMBAT.difficultySpeedRamp > 0.015);
+});
+
+test('normal fire is deliberate five-shot burst with a full-second recovery', () => {
+  assert.equal(COMBAT.normalBurstSize, 5);
+  assert.equal(COMBAT.normalBurstCooldown, 1);
+  assert.ok(COMBAT.normalBurstShotInterval > 0 && COMBAT.normalBurstShotInterval < 0.1);
 });
 
 test('stage boundaries begin each phase exactly at 0, 30, 64, and 100 seconds', () => {

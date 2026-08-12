@@ -27,9 +27,9 @@ test('director stage boundaries and total timing are stable', () => {
 });
 
 test('enemy caps honor desktop and coarse-pointer budgets', () => {
-  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 42);
-  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 32);
-  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 640 }), 32);
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 50);
+  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 38);
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 640 }), 38);
   assert.equal(GAME.maxParticles, 300);
   assert.equal(GAME.maxTrailNodes, 48);
 });
@@ -38,7 +38,7 @@ test('spawn intervals tighten by stage but never cross the floor', () => {
   const first = getSpawnInterval(0, 0);
   const second = getSpawnInterval(1, 30);
   const third = getSpawnInterval(2, 64);
-  assert.deepEqual([first, second, third], [0.62, 0.46, 0.34]);
+  assert.deepEqual([first, second, third], [0.52, 0.38, 0.28]);
   assert.ok(getSpawnInterval(2, 10_000) >= GAME.spawnIntervalFloor);
   assert.equal(getSpawnInterval(2, 10_000), GAME.spawnIntervalFloor);
 });
@@ -158,19 +158,19 @@ test('formations refuse an unsafe compact viewport rather than closing the safe 
 
 
 test('2.2 pressure caps and spawn cadence are locked', () => {
-  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 42);
-  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 32);
-  assert.deepEqual([getSpawnInterval(0, 0), getSpawnInterval(1, 30), getSpawnInterval(2, 64)], [0.62, 0.46, 0.34]);
-  assert.equal(getSpawnInterval(2, 10_000), 0.26);
+  assert.equal(getActiveEnemyCap({ coarsePointer: false, viewportWidth: 1440 }), 50);
+  assert.equal(getActiveEnemyCap({ coarsePointer: true, viewportWidth: 1440 }), 38);
+  assert.deepEqual([getSpawnInterval(0, 0), getSpawnInterval(1, 30), getSpawnInterval(2, 64)], [0.52, 0.38, 0.28]);
+  assert.equal(getSpawnInterval(2, 10_000), 0.2);
 });
 
 test('2.2 population targets and burst limits retain cap and health relief priority', () => {
   assert.deepEqual([0, 1, 2].map((stageIndex) => getPressureTarget(stageIndex, {
-    activeCap: 42,
+    activeCap: 50,
     healthPercent: 100,
-  })), [15, 24, 34]);
-  assert.deepEqual([0, 1, 2].map(getSpawnBurstLimit), [2, 3, 4]);
-  assert.equal(getPressureTarget(2, { activeCap: 32, healthPercent: 100 }), 32);
-  assert.ok(getPressureTarget(2, { activeCap: 42, healthPercent: 20 }) < 34);
+  })), [20, 30, 42]);
+  assert.deepEqual([0, 1, 2].map(getSpawnBurstLimit), [3, 4, 5]);
+  assert.equal(getPressureTarget(2, { activeCap: 38, healthPercent: 100 }), 38);
+  assert.ok(getPressureTarget(2, { activeCap: 50, healthPercent: 20 }) < 42);
   assert.equal(getPressureTarget(2, { activeCap: 0, healthPercent: 100 }), 0);
 });
