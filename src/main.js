@@ -1609,7 +1609,16 @@ function triggerFeedback(tierName, options = {}) {
   if (options.text && options.position) {
     showFloatingText(options.text, options.position, options.tone ?? "cyan", tierName);
   }
-  if (options.vibration) navigator.vibrate?.(options.vibration);
+  if (options.vibration) haptic(options.vibration);
+}
+
+function haptic(pattern) {
+  if (state.reducedMotion || !globalThis.navigator?.vibrate) return false;
+  try {
+    return globalThis.navigator.vibrate(pattern) !== false;
+  } catch {
+    return false;
+  }
 }
 
 function spawnShard(position) {
@@ -2853,7 +2862,7 @@ function startLaserCharge() {
   spawnRipple(player.position, paletteState.primary.getHex(), 0.72);
   toast("光矛蓄力", "cyan");
   laserAudio.onChargeStarted();
-  navigator.vibrate?.([28, 22, 55]);
+  haptic([28, 22, 55]);
   return true;
 }
 
@@ -3867,7 +3876,7 @@ function damagePlayer(enemy) {
   });
   toast("船体受损", "danger");
   audio.event("hurt");
-  navigator.vibrate?.(45);
+  haptic(45);
   if (state.health <= 0) finishRun("gameover", "hullBreach");
 }
 
