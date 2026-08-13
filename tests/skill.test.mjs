@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { LASER_RULES, NORMAL_FIRE_RULES, canFireLaser, gainWeaponEnergy, getLaserPhase, laserHitsCircle, selectLaserTargets } from '../src/game/skill.js';
 
-test('normal fire is a compact red rapid-fire weapon while charge remains the ultimate', () => {
+test('normal fire is a compact red tail burst while charge remains the ultimate', () => {
   assert.deepEqual(NORMAL_FIRE_RULES, {
-    cooldown: 0.16,
-    speed: 12,
-    life: 0.95,
+    cooldown: 1,
+    burstSize: 7,
+    shotInterval: 0.065,
+    speed: 13.2,
+    life: 1.08,
     damage: 1,
     radius: 0.11,
     color: 0xff3b30,

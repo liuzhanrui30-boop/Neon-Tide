@@ -550,6 +550,8 @@ const shared = {
   }),
   projectileCircleGeometry: new THREE.CircleGeometry(0.11, 10),
   projectileDiamondGeometry: new THREE.PlaneGeometry(0.22, 0.22),
+  normalBoltCoreGeometry: new THREE.CircleGeometry(0.095, 16),
+  normalBoltRingGeometry: new THREE.RingGeometry(0.14, 0.18, 20),
 };
 
 function createTriangleGeometry(nose, tailWidth, tailY) {
@@ -921,7 +923,7 @@ function repairProjectileEntry(projectile, index = projectiles.indexOf(projectil
   const ownedMaterial = ensureProjectileOwnedMaterial(index);
   const ownedMesh = ensureProjectileOwnedMesh(index, ownedMaterial);
   if (!ownedMaterial || !ownedMesh) return false;
-  const expectedGeometry = projectile.type === "voidShard"
+  const expectedGeometry = ["voidShard", "normalBolt"].includes(projectile.type)
     ? shared.projectileDiamondGeometry
     : shared.projectileCircleGeometry;
   if (projectile.material === ownedMaterial
@@ -1051,7 +1053,9 @@ function spawnProjectile(type, origin, direction, overrides = {}) {
   normalizedDirection.normalize();
   const preset = type === "voidShard"
     ? { speed: 4.1, life: 2.8, damage: 1, radius: 0.13, color: 0xff3b30, geometry: shared.projectileDiamondGeometry }
-    : { speed: 3.2, life: 2.4, damage: 1, radius: 0.14, color: 0xff3b30, geometry: shared.projectileCircleGeometry };
+    : type === "normalBolt"
+      ? { speed: 13.2, life: 1.08, damage: 1, radius: 0.12, color: 0xff3b30, geometry: shared.projectileDiamondGeometry }
+      : { speed: 3.2, life: 2.4, damage: 1, radius: 0.14, color: 0xff3b30, geometry: shared.projectileCircleGeometry };
   const speed = Math.max(0, finiteOr(overrides.speed, preset.speed));
   const life = Math.max(0.01, finiteOr(overrides.life, preset.life));
   const damage = Math.max(0, Math.trunc(finiteOr(overrides.damage, preset.damage)));
@@ -1065,7 +1069,9 @@ function spawnProjectile(type, origin, direction, overrides = {}) {
   projectile.mesh.geometry = preset.geometry;
   projectile.mesh.position.set(origin.x, origin.y, 3.4);
   projectile.mesh.rotation.z = Math.atan2(direction.y, direction.x) + (projectile.type === "voidShard" ? Math.PI / 4 : 0);
-  projectile.mesh.scale.setScalar(finiteOr(overrides.scale, 1));
+  const projectileScale = finiteOr(overrides.scale, 1);
+  if (projectile.type === "normalBolt") projectile.mesh.scale.set(0.62 * projectileScale, 1.32 * projectileScale, 1);
+  else projectile.mesh.scale.setScalar(projectileScale);
   projectile.mesh.material.color.set(overrides.color ?? preset.color);
   projectile.mesh.material.opacity = 0.92;
   projectile.mesh.visible = true;
@@ -1331,6 +1337,8 @@ function disposeCombatAssets() {
   });
   shared.projectileCircleGeometry.dispose();
   shared.projectileDiamondGeometry.dispose();
+  shared.normalBoltCoreGeometry.dispose();
+  shared.normalBoltRingGeometry.dispose();
   for (const visual of Object.values(environmentVisual)) {
     world.remove(visual.group);
     visual.geometries.forEach((geometry) => geometry.dispose());
@@ -2770,18 +2778,30 @@ function readMoveDirection() {
 
 function fireNormalShot() {
   if (state.mode !== "playing" || state.playerAttacking || ["charge", "active"].includes(state.laserState)) return false;
-  const direction = player.facing.lengthSq() > 0.01 ? player.facing.clone().normalize() : new THREE.Vector2(0, 1);
-  const origin = player.position.clone().addScaledVector(direction, player.radius + 0.08);
+  const facing = player.facing.lengthSq() > 0.01 ? player.facing.clone().normalize() : new THREE.Vector2(0, 1);
+  // Tail cannon: the muzzle sits behind the ship and fires backward, turning
+  // movement and attack direction into a deliberate risk/reward choice.
+  const direction = facing.clone().multiplyScalar(-1);
+  const lateral = new THREE.Vector2(-direction.y, direction.x);
+  const shotIndex = Math.max(0, COMBAT.normalBurstSize - player.normalBurstShotsRemaining);
+  const alternatingBarrel = shotIndex % 2 === 0 ? -1 : 1;
+  const origin = player.position.clone()
+    .addScaledVector(direction, player.radius + 0.18)
+    .addScaledVector(lateral, alternatingBarrel * 0.13);
+  const fanOffset = (shotIndex - (COMBAT.normalBurstSize - 1) / 2) * 0.024;
+  direction.rotateAround(new THREE.Vector2(0, 0), fanOffset);
   const projectile = spawnProjectile("normalBolt", origin, direction, {
     speed: COMBAT.normalFireSpeed,
     life: COMBAT.normalFireLife,
     damage: COMBAT.normalFireDamage,
     radius: COMBAT.normalFireRadius,
     color: COMBAT.normalFireColor,
-    scale: 0.78,
+    scale: 0.9,
   });
   if (!projectile) return false;
-  spawnParticleBurst(origin, COMBAT.normalFireColor, 2, 1.8, 0.42);
+  spawnParticleBurst(origin, 0xffffff, 3, 2.4, 0.46);
+  spawnParticleBurst(origin, COMBAT.normalFireColor, 5, 3.4, 0.62);
+  spawnRipple(origin, COMBAT.normalFireColor, 0.54);
   audio.event("normalFire", 0.45);
   return true;
 }
@@ -2797,7 +2817,7 @@ function requestNormalBurst() {
     speed: 2.8,
     size: 0.72,
     rippleScale: 0.92,
-    text: "BURST ×5",
+    text: `TAIL BURST ×${COMBAT.normalBurstSize}`,
     tone: "danger",
     vibration: [8, 14, 8],
     stretch: 0.1,

@@ -44,7 +44,7 @@ test('session timing is derived from boss entry and the boss window', () => {
   assert.equal(GAME.duration, GAME.bossStart + GAME.bossWindow);
 });
 
-test('rapid red normal fire is exported as a bounded combat contract', () => {
+test('tail red burst fire is exported as a bounded combat contract', () => {
   assert.deepEqual({
     cooldown: COMBAT.normalFireCooldown,
     speed: COMBAT.normalFireSpeed,
@@ -52,7 +52,7 @@ test('rapid red normal fire is exported as a bounded combat contract', () => {
     damage: COMBAT.normalFireDamage,
     radius: COMBAT.normalFireRadius,
     color: COMBAT.normalFireColor,
-  }, { cooldown:0.16,speed:12,life:0.95,damage:1,radius:0.11,color:0xff3b30 });
+  }, { cooldown:1,speed:13.2,life:1.08,damage:1,radius:0.11,color:0xff3b30 });
 });
 
 test('crossfire pressure ramps by realm instead of allowing a single safe orbit', () => {
@@ -62,8 +62,8 @@ test('crossfire pressure ramps by realm instead of allowing a single safe orbit'
   assert.ok(COMBAT.difficultySpeedRamp > 0.015);
 });
 
-test('normal fire is deliberate five-shot burst with a full-second recovery', () => {
-  assert.equal(COMBAT.normalBurstSize, 5);
+test('normal fire is a deliberate seven-shot tail burst with a full-second recovery', () => {
+  assert.equal(COMBAT.normalBurstSize, 7);
   assert.equal(COMBAT.normalBurstCooldown, 1);
   assert.ok(COMBAT.normalBurstShotInterval > 0 && COMBAT.normalBurstShotInterval < 0.1);
 });

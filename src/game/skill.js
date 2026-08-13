@@ -20,9 +20,11 @@ export const LASER_RULES = freeze({
 });
 
 export const NORMAL_FIRE_RULES = Object.freeze({
-  cooldown: 0.16,
-  speed: 12,
-  life: 0.95,
+  cooldown: 1,
+  burstSize: 7,
+  shotInterval: 0.065,
+  speed: 13.2,
+  life: 1.08,
   damage: 1,
   radius: 0.11,
   color: 0xff3b30,
